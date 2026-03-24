@@ -103,22 +103,38 @@ impl Indexer {
         };
 
         let latest = result.latest_ledger;
-        info!(
-            "Fetched {} events up to ledger {}",
-            result.events.len(),
-            latest
-        );
+        let total = result.events.len();
+        let mut new = 0;
+        let mut skipped = 0;
 
         for event in result.events {
-            if let Err(e) = self.store_event(&event).await {
-                warn!("Failed to store event {}: {}", event.tx_hash, e);
+            match self.store_event(&event).await {
+                Ok(rows) => {
+                    new += rows;
+                    if rows == 0 {
+                        skipped += 1;
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to store event {}: {}", event.tx_hash, e);
+                }
             }
         }
+
+        info!(
+            fetched = total,
+            inserted = new,
+            ledger = latest,
+            "Indexed ledger range"
+        );
+
+        // TODO(#42): Add a duplicate_events_skipped counter to the future metrics endpoint
+        let _duplicate_events_skipped = skipped;
 
         Ok(latest + 1)
     }
 
-    async fn store_event(&self, event: &SorobanEvent) -> Result<(), sqlx::Error> {
+    async fn store_event(&self, event: &SorobanEvent) -> Result<u64, sqlx::Error> {
         let timestamp = DateTime::parse_from_rfc3339(&event.ledger_closed_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
@@ -128,7 +144,7 @@ impl Indexer {
             "topic": event.topic
         });
 
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
             VALUES ($1, $2, $3, $4, $5, $6)
@@ -144,6 +160,6 @@ impl Indexer {
         .execute(&self.pool)
         .await?;
 
-        Ok(())
+        Ok(result.rows_affected())
     }
 }
