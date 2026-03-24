@@ -119,6 +119,14 @@ impl Indexer {
     }
 
     async fn store_event(&self, event: &SorobanEvent) -> Result<(), sqlx::Error> {
+        let ledger = match i64::try_from(event.ledger) {
+            Ok(v) => v,
+            Err(_) => {
+                error!(ledger = event.ledger, "Ledger number overflows i64, skipping event");
+                return Ok(());
+            }
+        };
+
         let timestamp = DateTime::parse_from_rfc3339(&event.ledger_closed_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
@@ -138,12 +146,35 @@ impl Indexer {
         .bind(&event.contract_id)
         .bind(&event.event_type)
         .bind(&event.tx_hash)
-        .bind(event.ledger as i64)
+        .bind(ledger)
         .bind(timestamp)
         .bind(event_data)
         .execute(&self.pool)
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn make_event(ledger: u64) -> SorobanEvent {
+        SorobanEvent {
+            contract_id: "C1".into(),
+            event_type: "contract".into(),
+            tx_hash: "abc".into(),
+            ledger,
+            ledger_closed_at: "2026-03-24T00:00:00Z".into(),
+            value: Value::Null,
+            topic: None,
+        }
+    }
+
+    #[test]
+    fn ledger_overflow_returns_err() {
+        assert!(i64::try_from(make_event(u64::MAX).ledger).is_err());
     }
 }
