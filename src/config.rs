@@ -12,6 +12,7 @@ pub struct Config {
     pub db_max_connections: u32,
     pub db_min_connections: u32,
     pub behind_proxy: bool,
+    pub allowed_origins: Vec<String>,
 }
 
 impl Config {
@@ -41,6 +42,12 @@ impl Config {
                 .parse()
                 .expect("DB_MIN_CONNECTIONS must be a number"),
             behind_proxy,
+            allowed_origins: env::var("ALLOWED_ORIGINS")
+                .unwrap_or_else(|_| "*".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         }
     }
 }
