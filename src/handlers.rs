@@ -125,7 +125,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn get_events_by_contract_no_events_returns_200_empty_data(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
 
         let response = app
             .oneshot(
