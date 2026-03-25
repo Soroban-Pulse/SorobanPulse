@@ -1,8 +1,10 @@
 use axum::{extract::{Path, Query, State}, Json};
 use serde_json::{json, Value};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
 
-use crate::{error::AppError, models::{Event, PaginationParams}};
+use crate::{error::AppError, models::PaginationParams};
 
 fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
     if contract_id.len() != 56 {
@@ -38,14 +40,37 @@ pub async fn get_events(
     let limit = params.limit();
     let offset = params.offset();
     let exact = params.exact_count.unwrap_or(false);
+    let columns = params.columns();
 
-    let events: Vec<Event> = sqlx::query_as(
-        "SELECT * FROM events ORDER BY ledger DESC LIMIT $1 OFFSET $2",
-    )
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&pool)
-    .await?;
+    let query_str = format!(
+        "SELECT {} FROM events ORDER BY ledger DESC LIMIT $1 OFFSET $2",
+        columns.join(", ")
+    );
+
+    let rows = sqlx::query(&query_str)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let mut event = serde_json::Map::new();
+        for &col in &columns {
+            match col {
+                "id" => { event.insert(col.to_string(), json!(row.try_get::<Uuid, _>(col)?)); }
+                "contract_id" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "event_type" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
+                "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
+                "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                _ => {}
+            }
+        }
+        events.push(Value::Object(event));
+    }
 
     let (total, approximate): (i64, bool) = if exact {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
@@ -79,18 +104,41 @@ pub async fn get_events_by_contract(
     
     let limit = params.limit();
     let offset = params.offset();
+    let columns = params.columns();
 
-    let events: Vec<Event> = sqlx::query_as(
-        "SELECT * FROM events WHERE contract_id = $1 ORDER BY ledger DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(&contract_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&pool)
-    .await?;
+    let query_str = format!(
+        "SELECT {} FROM events WHERE contract_id = $1 ORDER BY ledger DESC LIMIT $2 OFFSET $3",
+        columns.join(", ")
+    );
 
-    if events.is_empty() {
+    let rows = sqlx::query(&query_str)
+        .bind(&contract_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&pool)
+        .await?;
+
+    if rows.is_empty() {
         return Err(AppError::NotFound);
+    }
+
+    let mut events = Vec::new();
+    for row in rows {
+        let mut event = serde_json::Map::new();
+        for &col in &columns {
+            match col {
+                "id" => { event.insert(col.to_string(), json!(row.try_get::<Uuid, _>(col)?)); }
+                "contract_id" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "event_type" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
+                "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
+                "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                _ => {}
+            }
+        }
+        events.push(Value::Object(event));
     }
 
     Ok(Json(json!({ "data": events, "contract_id": contract_id })))
@@ -99,15 +147,39 @@ pub async fn get_events_by_contract(
 pub async fn get_events_by_tx(
     State(pool): State<PgPool>,
     Path(tx_hash): Path<String>,
+    Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
     validate_tx_hash(&tx_hash)?;
     
-    let events: Vec<Event> = sqlx::query_as(
-        "SELECT * FROM events WHERE tx_hash = $1 ORDER BY ledger DESC",
-    )
-    .bind(&tx_hash)
-    .fetch_all(&pool)
-    .await?;
+    let columns = params.columns();
+    let query_str = format!(
+        "SELECT {} FROM events WHERE tx_hash = $1 ORDER BY ledger DESC",
+        columns.join(", ")
+    );
+
+    let rows = sqlx::query(&query_str)
+        .bind(&tx_hash)
+        .fetch_all(&pool)
+        .await?;
+
+    let mut events = Vec::new();
+    for row in rows {
+        let mut event = serde_json::Map::new();
+        for &col in &columns {
+            match col {
+                "id" => { event.insert(col.to_string(), json!(row.try_get::<Uuid, _>(col)?)); }
+                "contract_id" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "event_type" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
+                "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
+                "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                _ => {}
+            }
+        }
+        events.push(Value::Object(event));
+    }
 
     Ok(Json(json!({ "data": events, "tx_hash": tx_hash })))
 }
@@ -123,7 +195,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn get_events_by_tx_no_events_returns_200_empty_data(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
 
         let response = app
             .oneshot(
@@ -160,7 +232,7 @@ mod tests {
         .await
         .unwrap();
 
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
 
         let response = app
             .oneshot(
@@ -182,7 +254,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn database_error_response_does_not_leak_internals(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
 
         let response = app
             .oneshot(
@@ -210,7 +282,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn contract_id_too_long_returns_400(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
         let long_id = "C".repeat(100);
 
         let response = app
@@ -231,7 +303,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn contract_id_invalid_format_returns_400(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
 
         let response = app
             .oneshot(
@@ -251,7 +323,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn tx_hash_invalid_length_returns_400(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
 
         let response = app
             .oneshot(
@@ -271,7 +343,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn tx_hash_non_hex_returns_400(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
         let invalid_hex = "z".repeat(64);
 
         let response = app
@@ -292,7 +364,7 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     async fn tx_hash_uppercase_hex_returns_400(pool: PgPool) {
-        let app = crate::routes::create_router(pool, None);
+        let app = crate::routes::create_router(pool, None, &[], 60);
         let uppercase_hex = "A".repeat(64);
 
         let response = app
@@ -351,5 +423,46 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["approximate"], false);
         assert_eq!(v["total"], 0); // Empty table
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_with_fields_filter_returns_only_requested_fields(pool: PgPool) {
+        let app = crate::routes::create_router(pool.clone(), None, &[], 60);
+        
+        // Insert a test row
+        sqlx::query(
+            "INSERT INTO events (id, contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        )
+        .bind(Uuid::new_v4())
+        .bind("C1234567890123456789012345678901234567890123456789012345")
+        .bind("test")
+        .bind("a".repeat(64))
+        .bind(100_i64)
+        .bind(Utc::now())
+        .bind(json!({"foo": "bar"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/events?fields=id,ledger")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        
+        let event = &v["data"][0];
+        assert!(event.get("id").is_some());
+        assert!(event.get("ledger").is_some());
+        assert!(event.get("contract_id").is_none());
+        assert!(event.get("event_data").is_none());
     }
 }

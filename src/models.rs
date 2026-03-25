@@ -20,9 +20,31 @@ pub struct PaginationParams {
     pub page: Option<i64>,
     pub limit: Option<i64>,
     pub exact_count: Option<bool>,
+    pub fields: Option<String>,
 }
 
 impl PaginationParams {
+    pub const ALLOWED_FIELDS: &'static [&'static str] = &[
+        "id",
+        "contract_id",
+        "event_type",
+        "tx_hash",
+        "ledger",
+        "timestamp",
+        "event_data",
+        "created_at",
+    ];
+
+    pub fn columns(&self) -> Vec<&str> {
+        match &self.fields {
+            Some(f) if !f.trim().is_empty() => f
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| Self::ALLOWED_FIELDS.contains(s))
+                .collect(),
+            _ => Self::ALLOWED_FIELDS.to_vec(),
+        }
+    }
     pub fn offset(&self) -> i64 {
         let page = self.page.unwrap_or(1).max(1);
         let limit = self.limit();
