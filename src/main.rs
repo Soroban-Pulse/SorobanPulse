@@ -92,9 +92,7 @@ async fn main() -> anyhow::Result<()> {
     .with_graceful_shutdown(async move {
         let _ = shutdown_rx_axum.changed().await;
     })
-    .await
-    .unwrap();
-
+    .await?;
     let _ = indexer_handle.await;
 
     Ok(())

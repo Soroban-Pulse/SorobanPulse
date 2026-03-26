@@ -77,8 +77,11 @@ Migrations run automatically on startup.
 { "status": "ok" }
 ```
 
-### `GET /events?page=1&limit=20`
+### `GET /events?page=1&limit=20&exact_count=false`
 Returns paginated events across all contracts.
+
+- **`exact_count`**: (Optional) Use `true` for a precise `COUNT(*)` result on a large dataset. Default is `false`, which provides an approximate count via PostgreSQL statistics for low-latency responses.
+
 ```json
 {
   "data": [
@@ -95,7 +98,8 @@ Returns paginated events across all contracts.
   ],
   "total": 100,
   "page": 1,
-  "limit": 20
+  "limit": 20,
+  "approximate": true
 }
 ```
 
