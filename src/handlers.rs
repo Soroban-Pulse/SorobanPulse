@@ -40,6 +40,15 @@ pub async fn get_events(
     let limit = params.limit();
     let offset = params.offset();
     let exact = params.exact_count.unwrap_or(false);
+
+    let events: Vec<Event> = sqlx::query_as(
+        "SELECT *, COUNT(*) OVER () AS total_count FROM events ORDER BY ledger DESC LIMIT $1 OFFSET $2",
+    )
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&pool)
+    .await?;
+
     let columns = params.columns();
 
     let query_str = format!(
@@ -517,6 +526,7 @@ mod tests {
             .await.unwrap();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["total"].as_u64().is_some()); // Can be approximate or exact
         assert!(v["total"].as_u64().is_some());
         assert_eq!(v["data"].as_array().unwrap().len(), 3);
 
