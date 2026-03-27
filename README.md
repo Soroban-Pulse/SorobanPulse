@@ -51,6 +51,7 @@ Open the newly created `.env` file in your editor and fill in your own real valu
 | `DB_MIN_CONNECTIONS` | Min number of connections in the Postgres pool | `1` |
 | `START_LEDGER`    | Ledger to start indexing from (0 = latest) | `0`                               |
 | `PORT`            | HTTP server port                     | `3000`                                   |
+| `RUST_LOG`        | Log verbosity level (`trace`, `debug`, `info`, `warn`, `error`) | `info` |
 | `API_KEY`         | Optional key for API authentication  | (disabled)                               |
 | `RUST_LOG_FORMAT` | Log output format (`text` or `json`) | `text`                                   |
 | `INDEXER_LAG_WARN_THRESHOLD` | Indexer lag warning threshold (ledgers) | `100`                                   |
@@ -61,17 +62,29 @@ Open the newly created `.env` file in your editor and fill in your own real valu
 ### 3. Run with Docker Compose (easiest)
 
 ```bash
-docker-compose up --build
+make docker-up
 ```
 
 ### 4. Run locally
 
 ```bash
 # Start PostgreSQL, then:
-cargo run
+make run
 ```
 
 Migrations run automatically on startup.
+
+### 5. Common tasks
+
+```bash
+make help   # list all available targets with descriptions
+make build  # compile
+make test   # run the full test suite
+make lint   # clippy with warnings as errors
+make fmt    # format source code
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full developer workflow.
 
 ## API
 
@@ -84,6 +97,9 @@ Migrations run automatically on startup.
 Returns paginated events across all contracts.
 
 - **`exact_count`**: (Optional) Use `true` for a precise `COUNT(*)` result on a large dataset. Default is `false`, which provides an approximate count via PostgreSQL statistics for low-latency responses.
+- **`event_type`**: (Optional) Filter by event type. Accepted values: `contract`, `diagnostic`, `system`. Returns `400` for unknown values.
+- **`from_ledger`**: (Optional) Return only events at or after this ledger sequence number.
+- **`to_ledger`**: (Optional) Return only events at or before this ledger sequence number. Returns `400` if `from_ledger > to_ledger`.
 
 ```json
 {
@@ -167,3 +183,19 @@ cargo run
 ## Deployment
 
 See [docs/deployment.md](docs/deployment.md) for TLS termination options (nginx, Caddy, AWS ALB) and production security guidance.
+
+## Troubleshooting
+
+**No log output after `cargo run`**
+The service uses `RUST_LOG` to control log verbosity. If this variable is not set, you will see no output and may think the service is broken — it is not. Set it in your `.env` file or shell:
+
+```bash
+export RUST_LOG=info
+cargo run
+```
+
+The service defaults to `info` level internally, but the environment variable must be present for the tracing subscriber to emit output. The `.env.example` file includes `RUST_LOG=info` — make sure you copied it to `.env`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, branch naming, commit conventions, and the PR process.

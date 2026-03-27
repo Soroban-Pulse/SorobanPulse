@@ -1,3 +1,22 @@
-/target
+# Build artifacts
+target/
+
+# Environment files
 .env
+.env.*
+!.env.example
+
+# Docker overrides
 docker-compose.override.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE / editor
+.idea/
+.vscode/
+*.iml
+
+# Logs
+*.log
