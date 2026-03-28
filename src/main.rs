@@ -14,6 +14,7 @@ mod metrics;
 mod middleware;
 mod models;
 mod routes;
+mod rpc_client;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

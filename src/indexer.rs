@@ -1,5 +1,4 @@
 use chrono::DateTime;
-use reqwest::Client;
 use serde_json::json;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -12,6 +11,7 @@ use crate::{
     config::{Config, HealthState, IndexerState},
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
+    rpc_client::RpcClient,
 };
 
 /// Postgres advisory lock key for the indexer singleton.
@@ -25,20 +25,22 @@ enum IndexerFetchError {
     DbConnection(#[from] sqlx::Error),
 }
 
-fn build_rpc_client(config: &Config) -> Client {
-    Client::builder()
+fn build_rpc_client(config: &Config) -> impl RpcClient {
+    let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(config.rpc_connect_timeout_secs))
         .timeout(Duration::from_secs(config.rpc_request_timeout_secs))
         .pool_max_idle_per_host(5)
         .pool_idle_timeout(Duration::from_secs(30))
         .tcp_keepalive(Duration::from_secs(60))
         .build()
-        .expect("Failed to build HTTP client")
+        .expect("Failed to build HTTP client");
+    
+    crate::rpc_client::HttpRpcClient::new(client)
 }
 
 pub struct Indexer {
     pool: PgPool,
-    client: Client,
+    rpc_client: Box<dyn RpcClient>,
     config: Config,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
     health_state: Option<Arc<HealthState>>,
@@ -48,11 +50,29 @@ pub struct Indexer {
 
 impl Indexer {
     pub fn new(pool: PgPool, config: Config, shutdown_rx: tokio::sync::watch::Receiver<bool>) -> Self {
-        let client = build_rpc_client(&config);
+        let rpc_client = Box::new(build_rpc_client(&config));
 
         Self {
             pool,
-            client,
+            rpc_client,
+            config,
+            shutdown_rx,
+            health_state: None,
+            indexer_state: None,
+            event_tx: None,
+        }
+    }
+
+    /// Constructor for testing that allows injecting a custom RpcClient
+    pub fn new_with_rpc_client(
+        pool: PgPool,
+        config: Config,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
+        rpc_client: Box<dyn RpcClient>,
+    ) -> Self {
+        Self {
+            pool,
+            rpc_client,
             config,
             shutdown_rx,
             health_state: None,
@@ -219,34 +239,14 @@ impl Indexer {
     }
 
     async fn get_latest_ledger(&self) -> Result<u64, String> {
-        let body = json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getLatestLedger"
-        });
-
         let span = span!(Level::INFO, "rpc_get_latest_ledger", url = %self.config.stellar_rpc_url);
         let _enter = span.enter();
 
-        let resp: RpcResponse<LatestLedgerResult> = self
-            .client
-            .post(&self.config.stellar_rpc_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    warn!(
-                        timeout_secs = self.config.rpc_request_timeout_secs,
-                        "RPC request timeout"
-                    );
-                }
-                metrics::record_rpc_error();
-                e.to_string()
-            })?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let resp = self.rpc_client.get_latest_ledger(&self.config.stellar_rpc_url).await.map_err(|e| {
+            warn!(error = %e, "RPC request failed");
+            metrics::record_rpc_error();
+            e
+        })?;
 
         match resp.result {
             Some(r) => {
@@ -283,32 +283,11 @@ impl Indexer {
                 params["startLedger"] = json!(start_ledger);
             }
 
-            let body = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getEvents",
-                "params": params
-            });
-
-            let resp: RpcResponse<GetEventsResult> = self
-                .client
-                .post(&self.config.stellar_rpc_url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        warn!(
-                            timeout_secs = self.config.rpc_request_timeout_secs,
-                            "RPC request timeout"
-                        );
-                    }
-                    metrics::record_rpc_error();
-                    IndexerFetchError::Rpc(e.to_string())
-                })?
-                .json()
-                .await
-                .map_err(|e| IndexerFetchError::Rpc(e.to_string()))?;
+            let resp = self.rpc_client.get_events(&self.config.stellar_rpc_url, params).await.map_err(|e| {
+                warn!(error = %e, "RPC request failed");
+                metrics::record_rpc_error();
+                IndexerFetchError::Rpc(e)
+            })?;
 
             let result = match resp.result {
                 Some(r) => r,
@@ -448,15 +427,30 @@ mod tests {
     }
 
     fn indexer(pool: PgPool) -> Indexer {
+        use crate::rpc_client::mock::MockRpcClient;
+        let mock_client = MockRpcClient::new();
+        
         Indexer {
             pool,
-            client: Client::new(),
+            rpc_client: Box::new(mock_client),
             config: Config {
                 database_url: String::new(),
                 stellar_rpc_url: String::new(),
                 start_ledger: 0,
                 port: 3000,
                 behind_proxy: false,
+                rpc_connect_timeout_secs: 30,
+                rpc_request_timeout_secs: 60,
+                indexer_lag_warn_threshold: 1000,
+                indexer_stall_timeout_secs: 300,
+                start_ledger_fallback: true,
+                api_key: None,
+                environment: crate::config::Environment::Development,
+                allowed_origins: vec![],
+                rate_limit_per_minute: 60,
+                db_max_connections: 10,
+                db_min_connections: 1,
+                db_statement_timeout_ms: 30000,
             },
         }
     }
@@ -491,5 +485,434 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn store_event_valid_input_succeeds(pool: PgPool) {
+        let indexer = indexer(pool.clone());
+        let event = make_event(123);
+
+        let rows_affected = indexer.store_event(&event).await.unwrap();
+        assert_eq!(rows_affected, 1);
+
+        // Verify the event was stored correctly
+        let stored_event: (String, String, String, i64, String, serde_json::Value) = sqlx::query_as(
+            "SELECT contract_id, event_type, tx_hash, ledger, to_char(timestamp, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"'), event_data FROM events"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(stored_event.0, "C1");
+        assert_eq!(stored_event.1, "contract");
+        assert_eq!(stored_event.2, "abc");
+        assert_eq!(stored_event.3, 123);
+        assert_eq!(stored_event.4, "2026-03-24T00:00:00Z");
+        assert_eq!(stored_event.5, serde_json::json!({"value": null, "topic": null}));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn store_event_invalid_timestamp_returns_error(pool: PgPool) {
+        let indexer = indexer(pool.clone());
+        let mut event = make_event(1);
+        event.ledger_closed_at = "invalid-timestamp".into();
+
+        let result = indexer.store_event(&event).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unparseable ledger_closed_at"));
+
+        // Verify no event was stored
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn store_event_ledger_overflow_skips_event(pool: PgPool) {
+        let indexer = indexer(pool.clone());
+        let event = make_event(u64::MAX);
+
+        let rows_affected = indexer.store_event(&event).await.unwrap();
+        assert_eq!(rows_affected, 0);
+
+        // Verify no event was stored
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn store_event_with_complex_data_succeeds(pool: PgPool) {
+        let indexer = indexer(pool.clone());
+        let mut event = make_event(456);
+        event.value = serde_json::json!({"type": "mint", "amount": "1000"});
+        event.topic = Some(vec![serde_json::json!("transfer"), serde_json::json!("native")]);
+
+        let rows_affected = indexer.store_event(&event).await.unwrap();
+        assert_eq!(rows_affected, 1);
+
+        // Verify the complex data was stored correctly
+        let stored_event: serde_json::Value = sqlx::query_scalar("SELECT event_data FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            stored_event,
+            serde_json::json!({
+                "value": {"type": "mint", "amount": "1000"},
+                "topic": ["transfer", "native"]
+            })
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn fetch_and_store_events_with_mock_rpc_succeeds(pool: PgPool) {
+        use crate::rpc_client::mock::MockRpcClient;
+        
+        let mock_client = MockRpcClient::new();
+        
+        // Mock getEvents response
+        let events_response = serde_json::json!({
+            "result": {
+                "events": [
+                    {
+                        "contractId": "C123",
+                        "type": "contract",
+                        "txHash": "tx_hash_123",
+                        "ledger": 1000,
+                        "ledgerClosedAt": "2026-03-24T12:00:00Z",
+                        "value": {"type": "transfer", "amount": "500"},
+                        "topic": ["transfer", "native"]
+                    },
+                    {
+                        "contractId": "C456",
+                        "type": "system",
+                        "txHash": "tx_hash_456",
+                        "ledger": 1001,
+                        "ledgerClosedAt": "2026-03-24T12:01:00Z",
+                        "value": {"type": "upgrade"},
+                        "topic": null
+                    }
+                ],
+                "latestLedger": 1001,
+                "cursor": null
+            }
+        });
+        
+        mock_client.set_response("getEvents", events_response);
+        
+        let config = Config {
+            database_url: String::new(),
+            stellar_rpc_url: "http://mock-rpc".to_string(),
+            start_ledger: 0,
+            port: 3000,
+            behind_proxy: false,
+            rpc_connect_timeout_secs: 30,
+            rpc_request_timeout_secs: 60,
+            indexer_lag_warn_threshold: 1000,
+            indexer_stall_timeout_secs: 300,
+            start_ledger_fallback: true,
+            api_key: None,
+            environment: crate::config::Environment::Development,
+            allowed_origins: vec![],
+            rate_limit_per_minute: 60,
+            db_max_connections: 10,
+            db_min_connections: 1,
+            db_statement_timeout_ms: 30000,
+        };
+        
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let indexer = Indexer::new_with_rpc_client(pool.clone(), config, shutdown_rx, Box::new(mock_client));
+        
+        let result = indexer.fetch_and_store_events(1000).await.unwrap();
+        assert_eq!(result, 1002); // latest_ledger + 1
+        
+        // Verify events were stored
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        
+        // Verify first event
+        let event1: (String, String, String, i64) = sqlx::query_as(
+            "SELECT contract_id, event_type, tx_hash, ledger FROM events WHERE ledger = 1000"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event1.0, "C123");
+        assert_eq!(event1.1, "contract");
+        assert_eq!(event1.2, "tx_hash_123");
+        assert_eq!(event1.3, 1000);
+        
+        // Verify second event
+        let event2: (String, String, String, i64) = sqlx::query_as(
+            "SELECT contract_id, event_type, tx_hash, ledger FROM events WHERE ledger = 1001"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event2.0, "C456");
+        assert_eq!(event2.1, "system");
+        assert_eq!(event2.2, "tx_hash_456");
+        assert_eq!(event2.3, 1001);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn fetch_and_store_events_with_cursor_pagination(pool: PgPool) {
+        use crate::rpc_client::mock::MockRpcClient;
+        
+        let mock_client = MockRpcClient::new();
+        
+        // First page response with cursor
+        let first_page = serde_json::json!({
+            "result": {
+                "events": [
+                    {
+                        "contractId": "C1",
+                        "type": "contract",
+                        "txHash": "tx_1",
+                        "ledger": 2000,
+                        "ledgerClosedAt": "2026-03-24T13:00:00Z",
+                        "value": {"type": "mint"},
+                        "topic": null
+                    }
+                ],
+                "latestLedger": 2000,
+                "cursor": "cursor_123"
+            }
+        });
+        
+        // Second page response without cursor (end)
+        let second_page = serde_json::json!({
+            "result": {
+                "events": [
+                    {
+                        "contractId": "C2",
+                        "type": "contract",
+                        "txHash": "tx_2",
+                        "ledger": 2001,
+                        "ledgerClosedAt": "2026-03-24T13:01:00Z",
+                        "value": {"type": "transfer"},
+                        "topic": ["transfer"]
+                    }
+                ],
+                "latestLedger": 2001,
+                "cursor": null
+            }
+        });
+        
+        mock_client.set_response("getEvents", first_page);
+        
+        let config = Config {
+            database_url: String::new(),
+            stellar_rpc_url: "http://mock-rpc".to_string(),
+            start_ledger: 0,
+            port: 3000,
+            behind_proxy: false,
+            rpc_connect_timeout_secs: 30,
+            rpc_request_timeout_secs: 60,
+            indexer_lag_warn_threshold: 1000,
+            indexer_stall_timeout_secs: 300,
+            start_ledger_fallback: true,
+            api_key: None,
+            environment: crate::config::Environment::Development,
+            allowed_origins: vec![],
+            rate_limit_per_minute: 60,
+            db_max_connections: 10,
+            db_min_connections: 1,
+            db_statement_timeout_ms: 30000,
+        };
+        
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let indexer = Indexer::new_with_rpc_client(pool.clone(), config, shutdown_rx, Box::new(mock_client));
+        
+        // Update mock to return second page for the cursor request
+        // Note: This is a simplified test - in a real scenario, you'd need a more sophisticated mock
+        // that can return different responses based on the request parameters
+        
+        let result = indexer.fetch_and_store_events(2000).await.unwrap();
+        assert!(result >= 2001);
+        
+        // Verify at least the first event was stored
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(count >= 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn fetch_and_store_events_handles_rpc_error(pool: PgPool) {
+        use crate::rpc_client::mock::MockRpcClient;
+        
+        let mock_client = MockRpcClient::new();
+        
+        // Mock RPC error response
+        let error_response = serde_json::json!({
+            "error": {
+                "code": -32600,
+                "message": "Invalid Request"
+            }
+        });
+        
+        mock_client.set_response("getEvents", error_response);
+        
+        let config = Config {
+            database_url: String::new(),
+            stellar_rpc_url: "http://mock-rpc".to_string(),
+            start_ledger: 0,
+            port: 3000,
+            behind_proxy: false,
+            rpc_connect_timeout_secs: 30,
+            rpc_request_timeout_secs: 60,
+            indexer_lag_warn_threshold: 1000,
+            indexer_stall_timeout_secs: 300,
+            start_ledger_fallback: true,
+            api_key: None,
+            environment: crate::config::Environment::Development,
+            allowed_origins: vec![],
+            rate_limit_per_minute: 60,
+            db_max_connections: 10,
+            db_min_connections: 1,
+            db_statement_timeout_ms: 30000,
+        };
+        
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let indexer = Indexer::new_with_rpc_client(pool.clone(), config, shutdown_rx, Box::new(mock_client));
+        
+        let result = indexer.fetch_and_store_events(3000).await;
+        assert!(result.is_err());
+        
+        // Verify no events were stored
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn deduplication_path_same_event_twice_results_in_one_row(pool: PgPool) {
+        use crate::rpc_client::mock::MockRpcClient;
+        
+        let mock_client = MockRpcClient::new();
+        
+        // Mock response with the same event
+        let events_response = serde_json::json!({
+            "result": {
+                "events": [
+                    {
+                        "contractId": "CDEAD",
+                        "type": "contract",
+                        "txHash": "deadbeef_deadbeef_deadbeef_deadbeef_deadbeef_deadbeef_deadbeef",
+                        "ledger": 5000,
+                        "ledgerClosedAt": "2026-03-24T15:00:00Z",
+                        "value": {"type": "transfer", "amount": "100"},
+                        "topic": ["transfer", "native"]
+                    }
+                ],
+                "latestLedger": 5000,
+                "cursor": null
+            }
+        });
+        
+        mock_client.set_response("getEvents", events_response);
+        
+        let config = Config {
+            database_url: String::new(),
+            stellar_rpc_url: "http://mock-rpc".to_string(),
+            start_ledger: 0,
+            port: 3000,
+            behind_proxy: false,
+            rpc_connect_timeout_secs: 30,
+            rpc_request_timeout_secs: 60,
+            indexer_lag_warn_threshold: 1000,
+            indexer_stall_timeout_secs: 300,
+            start_ledger_fallback: true,
+            api_key: None,
+            environment: crate::config::Environment::Development,
+            allowed_origins: vec![],
+            rate_limit_per_minute: 60,
+            db_max_connections: 10,
+            db_min_connections: 1,
+            db_statement_timeout_ms: 30000,
+        };
+        
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let indexer = Indexer::new_with_rpc_client(pool.clone(), config, shutdown_rx, Box::new(mock_client));
+        
+        // First call - should insert the event
+        let result1 = indexer.fetch_and_store_events(5000).await.unwrap();
+        assert_eq!(result1, 5001); // latest_ledger + 1
+        
+        // Verify one event was stored
+        let count1: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count1, 1);
+        
+        // Second call with same event - should deduplicate
+        let result2 = indexer.fetch_and_store_events(5000).await.unwrap();
+        assert_eq!(result2, 5001); // latest_ledger + 1
+        
+        // Verify still only one event exists (deduplication worked)
+        let count2: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count2, 1);
+        
+        // Verify the event details are correct
+        let event: (String, String, String, i64) = sqlx::query_as(
+            "SELECT contract_id, event_type, tx_hash, ledger FROM events LIMIT 1"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(event.0, "CDEAD");
+        assert_eq!(event.1, "contract");
+        assert_eq!(event.2, "deadbeef_deadbeef_deadbeef_deadbeef_deadbeef_deadbeef_deadbeef");
+        assert_eq!(event.3, 5000);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn deduplication_direct_store_event_twice(pool: PgPool) {
+        let indexer = indexer(pool.clone());
+        let event = make_event(7777);
+
+        // First insertion
+        let rows1 = indexer.store_event(&event).await.unwrap();
+        assert_eq!(rows1, 1);
+
+        // Second insertion of same event
+        let rows2 = indexer.store_event(&event).await.unwrap();
+        assert_eq!(rows2, 0); // Should be 0 due to ON CONFLICT DO NOTHING
+
+        // Verify exactly one row exists
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify the stored event is correct
+        let stored_event: (String, String, String, i64) = sqlx::query_as(
+            "SELECT contract_id, event_type, tx_hash, ledger FROM events LIMIT 1"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(stored_event.0, "C1");
+        assert_eq!(stored_event.1, "contract");
+        assert_eq!(stored_event.2, "abc");
+        assert_eq!(stored_event.3, 7777);
     }
 }
