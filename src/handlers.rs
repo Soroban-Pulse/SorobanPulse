@@ -838,4 +838,657 @@ mod tests {
         assert_eq!(v["status"], "degraded");
         assert_eq!(v["db"], "unreachable");
     }
+
+    // Health endpoint tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn health_happy_path_returns_200(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["db"], "ok");
+        assert_eq!(v["indexer"], "ok");
+    }
+
+    // Status endpoint tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn status_returns_operational_info(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        
+        // Verify required fields are present
+        assert!(v.get("version").is_some());
+        assert!(v.get("uptime_secs").is_some());
+        assert!(v.get("current_ledger").is_some());
+        assert!(v.get("latest_ledger").is_some());
+        assert!(v.get("lag_ledgers").is_some());
+        assert!(v.get("total_events").is_some());
+        assert!(v.get("indexer_status").is_some());
+        
+        // Verify total_events is 0 for empty DB
+        assert_eq!(v["total_events"], 0);
+    }
+
+    // OpenAPI endpoint tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn openapi_json_returns_valid_spec(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/openapi.json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        
+        // Verify it's a valid OpenAPI spec
+        assert_eq!(v["openapi"], "3.0.0");
+        assert!(v.get("info").is_some());
+        assert!(v.get("paths").is_some());
+    }
+
+    // Main events endpoint tests - Happy path
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_empty_db_returns_200_with_empty_data(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        
+        assert_eq!(v["data"], json!([]));
+        assert_eq!(v["total"], 0);
+        assert_eq!(v["page"], 1);
+        assert_eq!(v["limit"], 20);
+        assert_eq!(v["approximate"], true);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_with_data_returns_paginated_results(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        
+        // Insert test data
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(i as i64)
+            .bind(Utc::now())
+            .bind(json!({"test": i}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?limit=3")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        
+        assert_eq!(v["data"].as_array().unwrap().len(), 3);
+        assert_eq!(v["total"], 5);
+        assert_eq!(v["page"], 1);
+        assert_eq!(v["limit"], 3);
+    }
+
+    // Main events endpoint tests - Error cases
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_invalid_event_type_returns_400(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?event_type=invalid")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("event_type must be one of"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_invalid_ledger_range_returns_400(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?from_ledger=100&to_ledger=50")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("from_ledger must be <= to_ledger"));
+    }
+
+    // Events by contract tests - Happy path
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_by_contract_with_data_returns_200(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        let contract_id = "C1234567890123456789012345678901234567890123456789012345";
+        
+        // Insert test data
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+             VALUES ($1, $2, $3, $4, $5, $6)"
+        )
+        .bind(contract_id)
+        .bind("contract")
+        .bind("a".repeat(64))
+        .bind(100_i64)
+        .bind(Utc::now())
+        .bind(json!({"test": "data"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/events/contract/{}", contract_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        
+        assert_eq!(v["data"].as_array().unwrap().len(), 1);
+        assert_eq!(v["contract_id"], contract_id);
+    }
+
+    // Events by contract tests - Error cases
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_by_contract_not_found_returns_404(pool: PgPool) {
+        let app = create_test_router(pool);
+        let contract_id = "C1234567890123456789012345678901234567890123456789012345";
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/events/contract/{}", contract_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    // Events by transaction tests - Happy path
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_events_by_tx_multiple_events_returns_all(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        let tx_hash = "a1b2c3d4e5f6789012345678901234567890123456789012345678901234567890";
+        
+        // Insert multiple events for same transaction
+        for i in 0..3 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(&tx_hash)
+            .bind(i as i64)
+            .bind(Utc::now())
+            .bind(json!({"event_num": i}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/events/tx/{}", tx_hash))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        
+        assert_eq!(v["data"].as_array().unwrap().len(), 3);
+        assert_eq!(v["tx_hash"], tx_hash);
+    }
+
+    // Stream events endpoint tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn stream_events_returns_sse_stream(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stream")
+                    .header("Accept", "text/event-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn stream_events_with_contract_filter(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stream?contract_id=C1234567890123456789012345678901234567890123456789012345")
+                    .header("Accept", "text/event-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+    }
+
+    // Metrics endpoint tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn metrics_returns_prometheus_format(pool: PgPool) {
+        let app = create_test_router(pool);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        // Metrics endpoint should return text/plain content type
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "text/plain; version=0.0.4"
+        );
+    }
+
+    // Pagination boundary condition tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pagination_boundary_conditions(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        
+        // Insert exactly 25 test events
+        for i in 0..25 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(i as i64)
+            .bind(Utc::now())
+            .bind(json!({"test": i}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Test limit boundary: limit=1 (minimum)
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?limit=1").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["limit"], 1);
+        assert_eq!(v["data"].as_array().unwrap().len(), 1);
+        assert_eq!(v["total"], 25);
+
+        // Test limit boundary: limit=100 (maximum)
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?limit=100").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["limit"], 100);
+        assert_eq!(v["data"].as_array().unwrap().len(), 25); // All events
+        assert_eq!(v["total"], 25);
+
+        // Test page boundary: page=1, limit=10
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?page=1&limit=10").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["page"], 1);
+        assert_eq!(v["limit"], 10);
+        assert_eq!(v["data"].as_array().unwrap().len(), 10);
+
+        // Test page boundary: page=3, limit=10 (last page with 5 items)
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?page=3&limit=10").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["page"], 3);
+        assert_eq!(v["limit"], 10);
+        assert_eq!(v["data"].as_array().unwrap().len(), 5);
+
+        // Test page boundary: page=4, limit=10 (beyond last page, empty)
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?page=4&limit=10").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["page"], 4);
+        assert_eq!(v["limit"], 10);
+        assert_eq!(v["data"].as_array().unwrap().len(), 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pagination_invalid_parameters_are_clamped(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        
+        // Insert test data
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(i as i64)
+            .bind(Utc::now())
+            .bind(json!({"test": i}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Test limit=0 gets clamped to 1
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?limit=0").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["limit"], 1);
+
+        // Test limit=200 gets clamped to 100
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?limit=200").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["limit"], 100);
+
+        // Test page=0 gets treated as page=1
+        let response = app
+            .oneshot(Request::builder().uri("/v1/events?page=0").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["page"], 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pagination_exact_count_vs_approximate_count(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        
+        // Insert test data
+        for i in 0..15 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(i as i64)
+            .bind(Utc::now())
+            .bind(json!({"test": i}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Test approximate count (default)
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["approximate"], true);
+        // Approximate count may not be exact but should be reasonable
+        let approx_count = v["total"].as_i64().unwrap();
+        assert!(approx_count >= 0); // Should be non-negative
+
+        // Test exact count
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?exact_count=true").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["approximate"], false);
+        assert_eq!(v["total"], 15); // Exact count should match
+
+        // Test filtered queries always use exact count
+        let response = app
+            .oneshot(Request::builder().uri("/v1/events?event_type=contract").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["approximate"], false);
+        assert_eq!(v["total"], 15); // All events are contract type
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pagination_with_filters(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        
+        // Insert mixed event types
+        for i in 0..10 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+                 VALUES ($1, $2, $3, $4, $5, $6)"
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind(if i % 2 == 0 { "contract" } else { "diagnostic" })
+            .bind(format!("{:0>64}", i))
+            .bind(i as i64)
+            .bind(Utc::now())
+            .bind(json!({"test": i}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Test pagination with event_type filter
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?event_type=contract&limit=3").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 3);
+        assert_eq!(v["total"], 5); // 5 contract events
+        assert_eq!(v["approximate"], false); // Filtered queries use exact count
+
+        // Test pagination with ledger range filter
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?from_ledger=2&to_ledger=8&limit=5").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 5);
+        assert_eq!(v["total"], 7); // Events with ledger 2-8
+        assert_eq!(v["approximate"], false); // Filtered queries use exact count
+
+        // Test pagination with both filters
+        let response = app
+            .oneshot(Request::builder().uri("/v1/events?event_type=contract&from_ledger=0&to_ledger=6&limit=10").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 4); // Contract events with ledger 0-6
+        assert_eq!(v["total"], 4);
+        assert_eq!(v["approximate"], false);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pagination_fields_filtering(pool: PgPool) {
+        let app = create_test_router(pool.clone());
+        
+        // Insert test data
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) 
+             VALUES ($1, $2, $3, $4, $5, $6)"
+        )
+        .bind("C1234567890123456789012345678901234567890123456789012345")
+        .bind("contract")
+        .bind("a".repeat(64))
+        .bind(100_i64)
+        .bind(Utc::now())
+        .bind(json!({"test": "data"}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Test fields filter with single field
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?fields=ledger").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let event = &v["data"][0];
+        assert!(event.get("ledger").is_some());
+        assert!(event.get("contract_id").is_none());
+        assert!(event.get("event_type").is_none());
+        assert!(event.get("tx_hash").is_none());
+        assert!(event.get("timestamp").is_none());
+        assert!(event.get("event_data").is_none());
+        assert!(event.get("created_at").is_none());
+
+        // Test fields filter with multiple fields
+        let response = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?fields=ledger,contract_id,event_type").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let event = &v["data"][0];
+        assert!(event.get("ledger").is_some());
+        assert!(event.get("contract_id").is_some());
+        assert!(event.get("event_type").is_some());
+        assert!(event.get("tx_hash").is_none());
+        assert!(event.get("timestamp").is_none());
+        assert!(event.get("event_data").is_none());
+        assert!(event.get("created_at").is_none());
+
+        // Test fields filter with invalid fields (should be ignored)
+        let response = app
+            .oneshot(Request::builder().uri("/v1/events?fields=ledger,invalid_field,contract_id").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let event = &v["data"][0];
+        assert!(event.get("ledger").is_some());
+        assert!(event.get("contract_id").is_some());
+        assert!(event.get("invalid_field").is_none());
+
+        // Test empty fields filter (should return all fields)
+        let response = app
+            .oneshot(Request::builder().uri("/v1/events?fields=").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let event = &v["data"][0];
+        assert!(event.get("ledger").is_some());
+        assert!(event.get("contract_id").is_some());
+        assert!(event.get("event_type").is_some());
+        assert!(event.get("tx_hash").is_some());
+        assert!(event.get("timestamp").is_some());
+        assert!(event.get("event_data").is_some());
+        assert!(event.get("created_at").is_some());
+    }
 }
