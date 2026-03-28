@@ -1,0 +1,81 @@
+name: CI Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libpq-dev pkg-config libssl-dev
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Set up database
+      run: |
+        # Wait for PostgreSQL to be ready
+        until pg_isready -h localhost -p 5432 -U postgres; do
+          echo "Waiting for PostgreSQL..."
+          sleep 2
+        done
+        
+        # Create test database
+        psql -h localhost -U postgres -c "CREATE DATABASE soroban_pulse_test;" || echo "Database might already exist"
+        
+        # Set DATABASE_URL for tests
+        echo "DATABASE_URL=postgres://postgres:postgres@localhost/soroban_pulse_test" >> $GITHUB_ENV
+    
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+    
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+    
+    - name: Run tests
+      run: cargo test --all-features
+      env:
+        DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_test
+    
+    - name: Run doc tests
+      run: cargo test --doc
+      env:
+        DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_test
