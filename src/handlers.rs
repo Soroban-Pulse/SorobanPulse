@@ -153,6 +153,19 @@ pub async fn openapi_json() -> impl IntoResponse {
     Json(ApiDoc::openapi())
 }
 
+/// Serve a minimal Swagger UI page backed by the CDN bundle.
+pub async fn swagger_ui() -> impl IntoResponse {
+    axum::response::Html(
+        "<!DOCTYPE html><html><head><title>Soroban Pulse API</title>\
+        <meta charset=\"utf-8\"/>\
+        <link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\"></head>\
+        <body><div id=\"swagger-ui\"></div>\
+        <script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\"></script>\
+        <script>SwaggerUIBundle({url:\"/openapi.json\",dom_id:\"#swagger-ui\"})</script>\
+        </body></html>"
+    )
+}
+
 /// Stream new events in real time via Server-Sent Events.
 #[utoipa::path(
     get,
@@ -1466,7 +1479,7 @@ mod tests {
         assert!(event.get("created_at").is_none());
 
         // Test fields filter with invalid fields (should be ignored)
-        let response = app
+        let response = app.clone()
             .oneshot(Request::builder().uri("/v1/events?fields=ledger,invalid_field,contract_id").body(Body::empty()).unwrap())
             .await.unwrap();
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();

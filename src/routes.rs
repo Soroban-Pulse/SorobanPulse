@@ -13,7 +13,6 @@ use tower_http::{
 use metrics_exporter_prometheus::PrometheusHandle;
 use uuid::Uuid;
 use utoipa::OpenApi;
-use utoipa_swagger_ui::SwaggerUi;
 
 use crate::{config::{HealthState, IndexerState}, handlers, middleware, metrics, models::SorobanEvent};
 
@@ -117,14 +116,12 @@ pub fn create_router_with_tx(
             resp
         }));
 
-    let swagger: Router<AppState> = SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()).into();
-
     Router::new()
         .route("/health", get(handlers::health))
         .route("/status", get(handlers::status))
         .route("/metrics", get(handlers::metrics))
         .route("/openapi.json", get(handlers::openapi_json))
-        .merge(swagger)
+        .route("/docs", get(handlers::swagger_ui))
         .nest("/v1", v1)
         .merge(deprecated)
         .layer(axum::middleware::from_fn_with_state(

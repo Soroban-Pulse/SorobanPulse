@@ -115,7 +115,15 @@ mod tests {
     use super::*;
 
     fn params(page: Option<i64>, limit: Option<i64>) -> PaginationParams {
-        PaginationParams { page, limit }
+        PaginationParams {
+            page,
+            limit,
+            exact_count: None,
+            fields: None,
+            event_type: None,
+            from_ledger: None,
+            to_ledger: None,
+        }
     }
 
     #[test]
@@ -146,5 +154,46 @@ mod tests {
     #[test]
     fn page_3_limit_10_offset_is_20() {
         assert_eq!(params(Some(3), Some(10)).offset(), 20);
+    }
+
+    // --- RPC deserialization fixture tests ---
+
+    #[test]
+    fn deserialize_get_events_success() {
+        let raw = include_str!("../tests/fixtures/get_events_response.json");
+        let resp: RpcResponse<GetEventsResult> = serde_json::from_str(raw).unwrap();
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert_eq!(result.latest_ledger, 1234600);
+        assert_eq!(result.rpc_cursor.as_deref(), Some("1234567-0"));
+        assert_eq!(result.events.len(), 1);
+        let ev = &result.events[0];
+        assert_eq!(ev.contract_id, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM");
+        assert_eq!(ev.event_type, "contract");
+        assert_eq!(ev.tx_hash, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
+        assert_eq!(ev.ledger, 1234567);
+        assert_eq!(ev.ledger_closed_at, "2026-03-14T00:00:00Z");
+        assert!(ev.topic.is_some());
+    }
+
+    #[test]
+    fn deserialize_get_events_error() {
+        let raw = include_str!("../tests/fixtures/get_events_error.json");
+        let resp: RpcResponse<GetEventsResult> = serde_json::from_str(raw).unwrap();
+        assert!(resp.result.is_none());
+        let err = resp.error.unwrap();
+        assert_eq!(err.code, -32600);
+        assert_eq!(err.message, "startLedger must be within the ledger retention window");
+    }
+
+    #[test]
+    fn deserialize_get_events_empty() {
+        let raw = include_str!("../tests/fixtures/get_events_empty.json");
+        let resp: RpcResponse<GetEventsResult> = serde_json::from_str(raw).unwrap();
+        assert!(resp.error.is_none());
+        let result = resp.result.unwrap();
+        assert!(result.events.is_empty());
+        assert_eq!(result.latest_ledger, 1234600);
+        assert!(result.rpc_cursor.is_none());
     }
 }

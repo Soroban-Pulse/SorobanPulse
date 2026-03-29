@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "events": [
+      {
+        "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+        "type": "contract",
+        "txHash": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+        "ledger": 1234567,
+        "ledgerClosedAt": "2026-03-14T00:00:00Z",
+        "value": { "xdr": "AAAABQAAAAk=" },
+        "topic": [{ "xdr": "AAAADwAAAAh0cmFuc2Zlcg==" }]
+      }
+    ],
+    "latestLedger": 1234600,
+    "cursor": "1234567-0"
+  }
+}

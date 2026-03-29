@@ -11,7 +11,6 @@ use crate::{
     config::{Config, HealthState, IndexerState},
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
-    rpc_client::RpcClient,
 };
 
 #[async_trait::async_trait]
@@ -31,27 +30,24 @@ enum IndexerFetchError {
     DbConnection(#[from] sqlx::Error),
 }
 
-fn build_rpc_client(config: &Config) -> impl RpcClient {
-    let client = reqwest::Client::builder()
+fn build_rpc_client(config: &Config) -> reqwest::Client {
+    reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(config.rpc_connect_timeout_secs))
         .timeout(Duration::from_secs(config.rpc_request_timeout_secs))
         .pool_max_idle_per_host(5)
         .pool_idle_timeout(Duration::from_secs(30))
         .tcp_keepalive(Duration::from_secs(60))
         .build()
-        .expect("Failed to build HTTP client");
-    
-    crate::rpc_client::HttpRpcClient::new(client)
+        .expect("Failed to build HTTP client")
 }
 
 pub struct SorobanRpcClient {
-    client: Client,
+    client: reqwest::Client,
 }
 
 impl SorobanRpcClient {
     pub fn new(config: &Config) -> Self {
-        let client = build_rpc_client(config);
-        Self { client }
+        Self { client: build_rpc_client(config) }
     }
 }
 
@@ -622,7 +618,7 @@ mod tests {
         assert_eq!(count, 2);
     }
 
-    #[sqlx::test(migrations = "./migrations")]
+    #[tokio::test]
     async fn mock_rpc_client_returns_configured_responses() {
         let mock_client = MockRpcClient::with_latest_ledger_responses(vec![
             Ok(42),
@@ -635,7 +631,7 @@ mod tests {
         assert_eq!(mock_client.get_latest_ledger("http://test").await.unwrap(), 100);
     }
 
-    #[sqlx::test(migrations = "./migrations")]
+    #[tokio::test]
     async fn mock_rpc_client_get_events_returns_configured_responses() {
         let test_event = make_event(1);
         let mock_client = MockRpcClient::with_get_events_responses(vec![
