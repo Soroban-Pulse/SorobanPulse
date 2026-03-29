@@ -115,7 +115,15 @@ mod tests {
     use super::*;
 
     fn params(page: Option<i64>, limit: Option<i64>) -> PaginationParams {
-        PaginationParams { page, limit }
+        PaginationParams {
+            page,
+            limit,
+            exact_count: None,
+            fields: None,
+            event_type: None,
+            from_ledger: None,
+            to_ledger: None,
+        }
     }
 
     #[test]

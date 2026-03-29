@@ -19,10 +19,22 @@ opentelemetry = { version = "0.21", optional = true }
 opentelemetry-otlp = { version = "0.14", optional = true }
 dotenvy = "0.15"
 thiserror = "1"
+utoipa = { version = "4", features = ["axum_extras"] }
+anyhow = "1"
+futures = "0.3"
+url = "2"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.5", features = ["trace", "cors", "compression-full", "metrics", "request-id"] }
+metrics = "0.21"
+metrics-exporter-prometheus = "0.12"
 axum-extra = { version = "0.9", features = ["typed-header"] }
 async-trait = "0.1"
 
 [dev-dependencies]
 sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
 async-trait = "0.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "pagination"
+harness = false

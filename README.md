@@ -214,6 +214,37 @@ export RUST_LOG_FORMAT=json
 cargo run
 ```
 
+## Performance
+
+### Target SLOs
+
+| Metric | Target |
+|--------|--------|
+| p99 latency (`GET /v1/events`) | < 200 ms at 100 req/s |
+| Error rate | < 1% |
+
+### Benchmarks
+
+Criterion micro-benchmarks cover `PaginationParams::offset()` and `limit()`:
+
+```bash
+cargo bench
+```
+
+Results are written to `target/criterion/`. Run this after changes to `PaginationParams` to catch regressions. The CI pipeline runs `cargo bench` as a non-blocking step so historical results are preserved in the job logs.
+
+### Load Testing
+
+A [k6](https://k6.io) script targeting `GET /v1/events` lives in `tests/load/events.js`. It runs a 30-second constant-arrival-rate scenario at 100 req/s and asserts the SLOs above.
+
+```bash
+# Install k6: https://k6.io/docs/get-started/installation/
+k6 run tests/load/events.js
+
+# Point at a non-default host
+k6 run -e BASE_URL=http://localhost:3000 tests/load/events.js
+```
+
 ## Deployment
 
 See [docs/deployment.md](docs/deployment.md) for TLS termination options (nginx, Caddy, AWS ALB) and production security guidance.

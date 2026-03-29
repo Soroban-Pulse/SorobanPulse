@@ -11,7 +11,6 @@ use crate::{
     config::{Config, HealthState, IndexerState},
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
-    rpc_client::RpcClient,
 };
 
 #[async_trait::async_trait]
@@ -31,26 +30,21 @@ enum IndexerFetchError {
     DbConnection(#[from] sqlx::Error),
 }
 
-fn build_rpc_client(config: &Config) -> impl RpcClient {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(config.rpc_connect_timeout_secs))
-        .timeout(Duration::from_secs(config.rpc_request_timeout_secs))
-        .pool_max_idle_per_host(5)
-        .pool_idle_timeout(Duration::from_secs(30))
-        .tcp_keepalive(Duration::from_secs(60))
-        .build()
-        .expect("Failed to build HTTP client");
-    
-    crate::rpc_client::HttpRpcClient::new(client)
-}
 
 pub struct SorobanRpcClient {
-    client: Client,
+    client: reqwest::Client,
 }
 
 impl SorobanRpcClient {
     pub fn new(config: &Config) -> Self {
-        let client = build_rpc_client(config);
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(config.rpc_connect_timeout_secs))
+            .timeout(Duration::from_secs(config.rpc_request_timeout_secs))
+            .pool_max_idle_per_host(5)
+            .pool_idle_timeout(Duration::from_secs(30))
+            .tcp_keepalive(Duration::from_secs(60))
+            .build()
+            .expect("Failed to build HTTP client");
         Self { client }
     }
 }

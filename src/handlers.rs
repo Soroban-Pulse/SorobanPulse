@@ -153,6 +153,19 @@ pub async fn openapi_json() -> impl IntoResponse {
     Json(ApiDoc::openapi())
 }
 
+/// Serve a minimal Swagger UI HTML page.
+pub async fn swagger_ui() -> impl IntoResponse {
+    axum::response::Html(
+        "<!DOCTYPE html><html><head><title>Soroban Pulse API</title>\
+        <meta charset=\"utf-8\"/>\
+        <link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\"></head>\
+        <body><div id=\"swagger-ui\"></div>\
+        <script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\"></script>\
+        <script>SwaggerUIBundle({url:\"/openapi.json\",dom_id:\"#swagger-ui\"})</script>\
+        </body></html>"
+    )
+}
+
 /// Stream new events in real time via Server-Sent Events.
 #[utoipa::path(
     get,
