@@ -44,6 +44,47 @@ With 3 replicas running, exactly one will hold the advisory lock and index event
 
 
 
+## Migration Strategy
+
+### How migrations are run
+
+`db::run_migrations` is called automatically on every replica startup. To prevent race conditions during rolling deploys (where multiple replicas start simultaneously), the migration step is guarded by a **Postgres session-level advisory lock**:
+
+1. The starting replica acquires `pg_advisory_lock(<id>)` on a dedicated connection.
+2. It runs `sqlx::migrate!` against that connection.
+3. It releases `pg_advisory_unlock(<id>)` — unconditionally, even if migration fails.
+
+Because `pg_advisory_lock` blocks (rather than fails) when another session holds the lock, replicas queue up and each one either applies pending migrations or finds nothing to do. No replica proceeds to serve traffic until the lock is released and migrations are confirmed complete.
+
+The lock is **session-scoped**: if the process crashes mid-migration, Postgres releases the lock automatically when the connection is dropped, allowing the next replica to retry.
+
+### Alternative: run migrations as a pre-deploy Job (Kubernetes)
+
+For stricter separation of concerns, you can disable in-process migrations and run them as a Kubernetes `Job` that completes before the `Deployment` rollout begins:
+
+```yaml
+# k8s/migrate-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: soroban-pulse-migrate
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: soroban-pulse:latest
+          command: ["./migrate"]   # separate migrate binary
+          envFrom:
+            - secretRef:
+                name: soroban-pulse-secrets
+```
+
+Reference this Job in your `Deployment` rollout pipeline (e.g., Argo CD sync waves, Helm hooks) so it runs to completion before any application pods start.
+
+---
+
 Soroban Pulse ships three `.env.*.example` templates:
 
 | File | Purpose |

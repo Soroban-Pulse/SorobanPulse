@@ -30,6 +30,27 @@ pub async fn create_pool(
         .await
 }
 
+/// Runs migrations under a Postgres session-level advisory lock so that
+/// concurrent replicas starting simultaneously do not race each other.
+/// The lock is always released — even if migration fails.
 pub async fn run_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
-    sqlx::migrate!("./migrations").run(pool).await
+    const MIGRATION_LOCK_ID: i64 = 0xD0C0_1234_i64; // arbitrary stable key
+
+    let mut conn = pool.acquire().await.map_err(sqlx::migrate::MigrateError::from)?;
+
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATION_LOCK_ID)
+        .execute(&mut *conn)
+        .await
+        .map_err(sqlx::migrate::MigrateError::from)?;
+
+    let result = sqlx::migrate!("./migrations").run(&mut *conn).await;
+
+    // Always release — ignore unlock errors so the migration result is returned.
+    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATION_LOCK_ID)
+        .execute(&mut *conn)
+        .await;
+
+    result
 }
