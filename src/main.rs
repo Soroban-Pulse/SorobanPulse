@@ -166,7 +166,7 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
     info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
-    let router = routes::create_router_with_tx(pool, config.api_key, &config.allowed_origins, config.rate_limit_per_minute, health_state, indexer_state, prometheus_handle, event_tx);
+    let router = routes::create_router_with_tx(pool, config.api_key, &config.allowed_origins, config.rate_limit_per_minute, health_state, indexer_state, prometheus_handle, event_tx, config.max_body_size_bytes);
 
     info!(addr = %addr, "Soroban Pulse listening");
 

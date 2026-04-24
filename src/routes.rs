@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 use tower_http::{
     compression::CompressionLayer,
     cors::CorsLayer,
+    limit::RequestBodyLimitLayer,
     request_id::{MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
     trace::TraceLayer,
 };
@@ -54,6 +55,7 @@ pub struct AppState {
     components(schemas(
         crate::models::Event,
         crate::models::PaginationParams,
+        crate::error::ErrorResponse,
     )),
     tags(
         (name = "events", description = "Event indexing endpoints"),
@@ -70,8 +72,9 @@ pub fn create_router(
     health_state: Arc<HealthState>,
     indexer_state: Arc<IndexerState>,
     prometheus_handle: PrometheusHandle,
+    max_body_size_bytes: usize,
 ) -> Router {
-    create_router_with_tx(pool, api_key, allowed_origins, rate_limit_per_minute, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0)
+    create_router_with_tx(pool, api_key, allowed_origins, rate_limit_per_minute, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, max_body_size_bytes)
 }
 
 pub fn create_router_with_tx(
@@ -83,6 +86,7 @@ pub fn create_router_with_tx(
     indexer_state: Arc<IndexerState>,
     prometheus_handle: PrometheusHandle,
     event_tx: broadcast::Sender<SorobanEvent>,
+    max_body_size_bytes: usize,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_key });
@@ -160,6 +164,7 @@ pub fn create_router_with_tx(
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(CompressionLayer::new())
         .layer(SetRequestIdLayer::x_request_id(UuidMakeRequestId))
+        .layer(RequestBodyLimitLayer::new(max_body_size_bytes))
         .with_state(app_state)
 }
 

@@ -124,6 +124,7 @@ pub struct Config {
     pub indexer_stall_timeout_secs: u64,
     pub db_statement_timeout_ms: u64,
     pub environment: Environment,
+    pub max_body_size_bytes: usize,
 }
 
 impl Default for Config {
@@ -308,6 +309,10 @@ impl Config {
                 .unwrap_or_else(|_| "5000".to_string())
                 .parse()
                 .expect("DB_STATEMENT_TIMEOUT_MS must be a number"),
+            max_body_size_bytes: env::var("MAX_BODY_SIZE_BYTES")
+                .unwrap_or_else(|_| "1048576".to_string())
+                .parse()
+                .expect("MAX_BODY_SIZE_BYTES must be a number"),
             environment,
         }
     }
