@@ -36,5 +36,8 @@ docker-down: ## Tear down the Docker Compose stack
 migrate: ## Run pending database migrations
 	cargo sqlx migrate run
 
+migrate-down: ## Rollback the most recent migration
+	cargo sqlx migrate revert
+
 clean: ## Remove build artifacts
 	cargo clean
