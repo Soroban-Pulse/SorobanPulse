@@ -77,3 +77,13 @@ Hooks typically complete in under 30 seconds on a typical change. If a hook fail
 - Keep PRs focused — one logical change per PR.
 - Ensure `make test` and `make lint` pass locally before opening a PR.
 - Write a clear PR description referencing the relevant issue (e.g. `Closes #75`).
+
+## Releases
+
+See [RELEASE.md](RELEASE.md) for the complete release process, including:
+- Version numbering (Semantic Versioning)
+- Updating CHANGELOG.md
+- Creating git tags and GitHub releases
+- Docker image publishing
+
+Only maintainers can cut releases. If you'd like to propose a release, open an issue or contact the maintainers.
