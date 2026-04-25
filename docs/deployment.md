@@ -58,6 +58,90 @@ Because `pg_advisory_lock` blocks (rather than fails) when another session holds
 
 The lock is **session-scoped**: if the process crashes mid-migration, Postgres releases the lock automatically when the connection is dropped, allowing the next replica to retry.
 
+### Migration rollback procedure
+
+Each migration has a corresponding `.down.sql` file that reverses its changes. To roll back the most recent migration:
+
+```bash
+# Using the Makefile
+make migrate-down
+
+# Or directly with cargo
+cargo sqlx migrate revert
+```
+
+This will:
+1. Execute the most recent `.down.sql` file
+2. Remove the migration entry from the `_sqlx_migrations` table
+3. Leave the database in the pre-migration state
+
+### Rollback scenarios
+
+**Scenario 1: Deployment fails validation**
+
+If a new version fails health checks or integration tests after deployment:
+
+```bash
+# 1. Roll back the application to the previous version
+kubectl rollout undo deployment/soroban-pulse
+
+# 2. Roll back the database migration
+kubectl exec -it deployment/soroban-pulse -- make migrate-down
+```
+
+**Scenario 2: Migration causes performance degradation**
+
+If a migration creates an index that causes lock contention or slow queries:
+
+```bash
+# 1. Roll back the migration immediately
+make migrate-down
+
+# 2. Investigate the issue in a staging environment
+# 3. Modify the migration to use CONCURRENTLY or adjust timing
+# 4. Re-apply when ready
+make migrate
+```
+
+**Scenario 3: Data corruption detected**
+
+If a migration inadvertently corrupts data:
+
+```bash
+# 1. Roll back the migration
+make migrate-down
+
+# 2. Restore from the most recent backup taken before the migration
+./scripts/restore.sh s3://my-bucket/backups/soroban_pulse_pre_migration.dump
+
+# 3. Fix the migration script
+# 4. Test thoroughly in staging before re-applying
+```
+
+### Testing migrations and rollbacks
+
+Before deploying to production, test both the up and down migrations:
+
+```bash
+# 1. Start a test database
+docker-compose -f docker-compose.test.yml up -d
+
+# 2. Apply the migration
+DATABASE_URL=postgres://postgres:postgres@localhost/soroban_pulse_test make migrate
+
+# 3. Verify the schema changes
+psql $DATABASE_URL -c "\d events"
+
+# 4. Roll back the migration
+DATABASE_URL=postgres://postgres:postgres@localhost/soroban_pulse_test make migrate-down
+
+# 5. Verify the schema is restored
+psql $DATABASE_URL -c "\d events"
+
+# 6. Clean up
+docker-compose -f docker-compose.test.yml down
+```
+
 ### Alternative: run migrations as a pre-deploy Job (Kubernetes)
 
 For stricter separation of concerns, you can disable in-process migrations and run them as a Kubernetes `Job` that completes before the `Deployment` rollout begins:
