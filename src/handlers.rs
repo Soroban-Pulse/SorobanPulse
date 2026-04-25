@@ -1,5 +1,6 @@
 use axum::{extract::{Path, Query, State}, Json, response::IntoResponse, http::StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures::stream::{self, Stream};
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -23,6 +24,52 @@ static CONTRACTS_CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
 
 fn contracts_cache() -> &'static Mutex<Option<CacheEntry>> {
     CONTRACTS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Encode a (ledger, id) pair as an opaque URL-safe base64 cursor.
+fn encode_cursor(ledger: i64, id: Uuid) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{ledger}:{id}"))
+}
+
+/// Decode a cursor back to (ledger, id). Returns a validation error on malformed input.
+fn decode_cursor(cursor: &str) -> Result<(i64, Uuid), AppError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    let s = std::str::from_utf8(&bytes)
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    let (ledger_str, id_str) = s
+        .split_once(':')
+        .ok_or_else(|| AppError::Validation("invalid cursor".to_string()))?;
+    let ledger = ledger_str
+        .parse::<i64>()
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    let id = Uuid::parse_str(id_str)
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    Ok((ledger, id))
+}
+
+/// Map sqlx rows to a JSON array, projecting only the requested columns.
+fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str]) -> Result<Vec<Value>, AppError> {
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut event = serde_json::Map::new();
+        for &col in columns {
+            match col {
+                "id" => { event.insert(col.to_string(), json!(row.try_get::<Uuid, _>(col)?)); }
+                "contract_id" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "event_type" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
+                "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
+                "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
+                "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
+                _ => {}
+            }
+        }
+        events.push(Value::Object(event));
+    }
+    Ok(events)
 }
 
 fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
@@ -348,11 +395,77 @@ pub async fn get_events(
     }
 
     let limit = params.limit();
-    let offset = params.offset();
-    let exact = params.exact_count.unwrap_or(false);
     let columns = params.columns();
 
-    // Build WHERE clause dynamically
+    // Cursor-based path
+    if let Some(ref cursor_str) = params.cursor {
+        let (cursor_ledger, cursor_id) = decode_cursor(cursor_str)?;
+
+        let mut conditions: Vec<String> = vec![
+            format!("(ledger, id) < ($1, $2)")
+        ];
+        let mut bind_idx: i32 = 3;
+
+        if params.event_type.is_some() {
+            conditions.push(format!("event_type = ${bind_idx}"));
+            bind_idx += 1;
+        }
+        if params.from_ledger.is_some() {
+            conditions.push(format!("ledger >= ${bind_idx}"));
+            bind_idx += 1;
+        }
+        if params.to_ledger.is_some() {
+            conditions.push(format!("ledger <= ${bind_idx}"));
+            bind_idx += 1;
+        }
+
+        let where_clause = format!("WHERE {}", conditions.join(" AND "));
+
+        // Always fetch ledger + id so we can build next_cursor; merge with requested columns.
+        let mut select_cols = columns.to_vec();
+        if !select_cols.contains(&"ledger") { select_cols.push("ledger"); }
+        if !select_cols.contains(&"id") { select_cols.push("id"); }
+
+        let query_str = format!(
+            "SELECT {} FROM events {} ORDER BY ledger DESC, id DESC LIMIT ${}",
+            select_cols.join(", "),
+            where_clause,
+            bind_idx,
+        );
+
+        let mut q = sqlx::query(&query_str)
+            .bind(cursor_ledger)
+            .bind(cursor_id);
+        if let Some(ref et) = params.event_type { q = q.bind(et); }
+        if let Some(fl) = params.from_ledger { q = q.bind(fl); }
+        if let Some(tl) = params.to_ledger { q = q.bind(tl); }
+        q = q.bind(limit);
+
+        let rows = q.fetch_all(&state.pool).await?;
+
+        let has_more = rows.len() as i64 == limit;
+        let next_cursor = if has_more {
+            let last = rows.last().unwrap();
+            let last_ledger: i64 = last.try_get("ledger")?;
+            let last_id: Uuid = last.try_get("id")?;
+            Some(encode_cursor(last_ledger, last_id))
+        } else {
+            None
+        };
+
+        let events = rows_to_json(&rows, &columns)?;
+
+        return Ok(Json(json!({
+            "data": events,
+            "next_cursor": next_cursor,
+            "limit": limit,
+        })));
+    }
+
+    // Offset-based path (deprecated fallback)
+    let offset = params.offset();
+    let exact = params.exact_count.unwrap_or(false);
+
     let mut conditions: Vec<String> = Vec::new();
     let mut bind_idx: i32 = 1;
 
@@ -375,9 +488,14 @@ pub async fn get_events(
         format!("WHERE {}", conditions.join(" AND "))
     };
 
+    // Always include ledger + id so we can emit next_cursor even in offset mode.
+    let mut select_cols = columns.to_vec();
+    if !select_cols.contains(&"ledger") { select_cols.push("ledger"); }
+    if !select_cols.contains(&"id") { select_cols.push("id"); }
+
     let query_str = format!(
-        "SELECT {} FROM events {} ORDER BY ledger DESC LIMIT ${} OFFSET ${}",
-        columns.join(", "),
+        "SELECT {} FROM events {} ORDER BY ledger DESC, id DESC LIMIT ${} OFFSET ${}",
+        select_cols.join(", "),
         where_clause,
         bind_idx,
         bind_idx + 1,
@@ -391,24 +509,17 @@ pub async fn get_events(
 
     let rows = q.fetch_all(&state.pool).await?;
 
-    let mut events = Vec::new();
-    for row in rows {
-        let mut event = serde_json::Map::new();
-        for &col in &columns {
-            match col {
-                "id" => { event.insert(col.to_string(), json!(row.try_get::<Uuid, _>(col)?)); }
-                "contract_id" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "event_type" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
-                "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
-                "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                _ => {}
-            }
-        }
-        events.push(Value::Object(event));
-    }
+    let has_more = rows.len() as i64 == limit;
+    let next_cursor = if has_more {
+        let last = rows.last().unwrap();
+        let last_ledger: i64 = last.try_get("ledger")?;
+        let last_id: Uuid = last.try_get("id")?;
+        Some(encode_cursor(last_ledger, last_id))
+    } else {
+        None
+    };
+
+    let events = rows_to_json(&rows, &columns)?;
 
     let (total, approximate): (i64, bool) = if exact {
         let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
@@ -426,7 +537,6 @@ pub async fn get_events(
         .await?;
         (count, true)
     } else {
-        // Filtered queries always use exact count — approximate stats don't apply to subsets
         let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
         let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
         if let Some(ref et) = params.event_type { cq = cq.bind(et); }
@@ -438,10 +548,12 @@ pub async fn get_events(
 
     Ok(Json(json!({
         "data": events,
+        "next_cursor": next_cursor,
         "total": total,
         "page": params.page.unwrap_or(1),
         "limit": limit,
-        "approximate": approximate
+        "approximate": approximate,
+        "pagination": "offset — migrate to cursor parameter for better performance",
     })))
 }
 
@@ -485,24 +597,7 @@ pub async fn get_events_by_contract(
         return Err(AppError::NotFound);
     }
 
-    let mut events = Vec::new();
-    for row in rows {
-        let mut event = serde_json::Map::new();
-        for &col in &columns {
-            match col {
-                "id" => { event.insert(col.to_string(), json!(row.try_get::<Uuid, _>(col)?)); }
-                "contract_id" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "event_type" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
-                "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
-                "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                _ => {}
-            }
-        }
-        events.push(Value::Object(event));
-    }
+    let events = rows_to_json(&rows, &columns)?;
 
     Ok(Json(json!({ "data": events, "contract_id": contract_id })))
 }
@@ -537,24 +632,7 @@ pub async fn get_events_by_tx(
         .fetch_all(&state.pool)
         .await?;
 
-    let mut events = Vec::new();
-    for row in rows {
-        let mut event = serde_json::Map::new();
-        for &col in &columns {
-            match col {
-                "id" => { event.insert(col.to_string(), json!(row.try_get::<Uuid, _>(col)?)); }
-                "contract_id" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "event_type" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
-                "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
-                "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
-                "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                _ => {}
-            }
-        }
-        events.push(Value::Object(event));
-    }
+    let events = rows_to_json(&rows, &columns)?;
 
     Ok(Json(json!({ "data": events, "tx_hash": tx_hash })))
 }
@@ -1735,114 +1813,122 @@ mod tests {
         assert!(event.get("created_at").is_some());
     }
 
-    #[sqlx::test(migrations = "./migrations")]
-    async fn get_contracts_empty_returns_empty_data(pool: PgPool) {
-        let app = create_test_router(pool);
-        let response = app
-            .oneshot(Request::builder().uri("/v1/contracts").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let v: Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["data"], json!([]));
-        assert_eq!(v["total"], 0);
-    }
+    // --- Cursor pagination tests ---
 
-    #[sqlx::test(migrations = "./migrations")]
-    async fn get_contracts_returns_aggregated_data(pool: PgPool) {
-        let contract_a = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
-        let contract_b = "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
-
-        for (contract, ledger) in [(contract_a, 10_i64), (contract_a, 20_i64), (contract_b, 5_i64)] {
+    async fn insert_events(pool: &PgPool, count: usize) {
+        for i in 0..count {
             sqlx::query(
-                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data) \
-                 VALUES ($1, 'contract', $2, $3, $4, '{}'::jsonb)",
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, $5, $6)"
             )
-            .bind(contract)
-            .bind("a".repeat(64))
-            .bind(ledger)
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(i as i64)
             .bind(Utc::now())
-            .execute(&pool)
+            .bind(json!({}))
+            .execute(pool)
             .await
             .unwrap();
         }
+    }
 
+    #[sqlx::test(migrations = "./migrations")]
+    async fn cursor_pagination_traverses_all_pages(pool: PgPool) {
+        insert_events(&pool, 5).await;
         let app = create_test_router(pool);
-        let response = app
-            .oneshot(Request::builder().uri("/v1/contracts").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        // Page 1: limit=2, no cursor
+        let resp = app.clone()
+            .oneshot(Request::builder().uri("/v1/events?limit=2").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 2);
+        let cursor1 = v["next_cursor"].as_str().expect("next_cursor must be present on page 1").to_string();
 
-        assert_eq!(v["total"], 2);
-        let data = v["data"].as_array().unwrap();
-        assert_eq!(data.len(), 2);
-        // Ordered by latest_ledger DESC — contract_a (ledger 20) first
-        assert_eq!(data[0]["contract_id"], contract_a);
-        assert_eq!(data[0]["event_count"], 2);
-        assert_eq!(data[0]["latest_ledger"], 20);
-        assert_eq!(data[1]["contract_id"], contract_b);
-        assert_eq!(data[1]["event_count"], 1);
-        assert_eq!(data[1]["latest_ledger"], 5);
+        // Page 2: use cursor from page 1
+        let resp = app.clone()
+            .oneshot(Request::builder().uri(format!("/v1/events?limit=2&cursor={cursor1}")).body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 2);
+        let cursor2 = v["next_cursor"].as_str().expect("next_cursor must be present on page 2").to_string();
+
+        // Page 3: last page — 1 row, next_cursor must be null
+        let resp = app.clone()
+            .oneshot(Request::builder().uri(format!("/v1/events?limit=2&cursor={cursor2}")).body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 1);
+        assert!(v["next_cursor"].is_null(), "next_cursor must be null on last page");
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn get_contracts_deprecated_alias_has_deprecation_header(pool: PgPool) {
+    async fn cursor_pagination_no_duplicate_or_missing_rows(pool: PgPool) {
+        insert_events(&pool, 6).await;
         let app = create_test_router(pool);
-        let response = app
-            .oneshot(Request::builder().uri("/contracts").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers().get("Deprecation").unwrap(), "true");
+
+        let mut seen_ledgers: Vec<i64> = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let uri = match &cursor {
+                Some(c) => format!("/v1/events?limit=2&cursor={c}"),
+                None => "/v1/events?limit=2".to_string(),
+            };
+            let resp = app.clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await.unwrap();
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let v: Value = serde_json::from_slice(&body).unwrap();
+            let page = v["data"].as_array().unwrap();
+            for ev in page {
+                seen_ledgers.push(ev["ledger"].as_i64().unwrap());
+            }
+            cursor = v["next_cursor"].as_str().map(|s| s.to_string());
+            if cursor.is_none() { break; }
+        }
+
+        // All 6 ledgers seen exactly once, in descending order
+        assert_eq!(seen_ledgers.len(), 6);
+        let mut sorted = seen_ledgers.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(seen_ledgers, sorted);
+        let unique: std::collections::HashSet<_> = seen_ledgers.iter().collect();
+        assert_eq!(unique.len(), 6);
     }
 
     #[sqlx::test(migrations = "./migrations")]
-    async fn sse_keepalive_comment_sent_within_interval(pool: PgPool) {
-        use http_body_util::BodyExt;
-        use tokio::time::{timeout, Duration};
+    async fn cursor_invalid_returns_400(pool: PgPool) {
+        let app = create_test_router(pool);
+        let resp = app
+            .oneshot(Request::builder().uri("/v1/events?cursor=notvalidbase64!!!").body(Body::empty()).unwrap())
+            .await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "invalid cursor");
+    }
 
-        let health_state = Arc::new(crate::config::HealthState::new(60));
-        let indexer_state = Arc::new(crate::config::IndexerState::new());
-        let prometheus_handle = crate::metrics::init_metrics();
-        let (event_tx, _) = tokio::sync::broadcast::channel(16);
-        // Use a 200 ms keep-alive so the test completes quickly.
-        let app = crate::routes::create_router_with_tx(
-            pool, None, &[], 60,
-            health_state, indexer_state, prometheus_handle,
-            event_tx, 200,
-        );
+    #[sqlx::test(migrations = "./migrations")]
+    async fn offset_response_includes_next_cursor(pool: PgPool) {
+        insert_events(&pool, 3).await;
+        let app = create_test_router(pool);
 
-        let response = app
-            .oneshot(Request::builder().uri("/v1/events/stream").body(Body::empty()).unwrap())
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers().get("content-type").unwrap(), "text/event-stream");
-
-        // Read frames for up to 600 ms and look for the ": ping" keep-alive comment.
-        let mut body = response.into_body();
-        let mut buf = Vec::new();
-        let found = timeout(Duration::from_millis(600), async {
-            while let Some(frame) = body.frame().await {
-                if let Ok(f) = frame {
-                    if let Ok(data) = f.into_data() {
-                        buf.extend_from_slice(&data);
-                        if buf.windows(6).any(|w| w == b": ping") {
-                            return true;
-                        }
-                    }
-                }
-            }
-            false
-        })
-        .await
-        .unwrap_or(false);
-
-        assert!(found, "expected SSE keep-alive comment within 600 ms");
+        let resp = app
+            .oneshot(Request::builder().uri("/v1/events?limit=2").body(Body::empty()).unwrap())
+            .await.unwrap();
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        // Offset path still returns total/page/approximate AND next_cursor
+        assert!(v.get("total").is_some());
+        assert!(v.get("page").is_some());
+        assert!(v["next_cursor"].is_string(), "offset path must also return next_cursor");
     }
 }

@@ -10,6 +10,7 @@ fn make(page: Option<i64>, limit: Option<i64>) -> PaginationParams {
         event_type: None,
         from_ledger: None,
         to_ledger: None,
+        cursor: None,
     }
 }
 

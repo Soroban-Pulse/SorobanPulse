@@ -27,6 +27,7 @@ pub struct PaginationParams {
     pub event_type: Option<String>,
     pub from_ledger: Option<i64>,
     pub to_ledger: Option<i64>,
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +131,7 @@ mod tests {
             event_type: None,
             from_ledger: None,
             to_ledger: None,
+            cursor: None,
         }
     }
 

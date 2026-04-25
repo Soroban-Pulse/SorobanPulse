@@ -6,10 +6,10 @@ edition = "2021"
 [dependencies]
 axum = { version = "0.8", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.12", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
@@ -29,12 +29,14 @@ metrics = "0.21"
 metrics-exporter-prometheus = "0.12"
 axum-extra = { version = "0.9", features = ["typed-header"] }
 async-trait = "0.1"
+tower-governor = { version = "0.8", features = ["axum"] }
+base64 = "0.22"
 
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
 
 [dev-dependencies]
-sqlx = { version = "0.7", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
 async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports"] }
 http-body-util = "0.1"
