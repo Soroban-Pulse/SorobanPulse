@@ -226,6 +226,27 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         .await
         .unwrap_or(0);
 
+    // Query event counts by type
+    let events_by_type_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT event_type, COUNT(*) as count FROM events GROUP BY event_type"
+    )
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+    // Build events_by_type object with all event types (defaulting to 0 if not present)
+    let mut events_by_type = serde_json::json!({
+        "contract": 0i64,
+        "diagnostic": 0i64,
+        "system": 0i64,
+    });
+
+    for (event_type, count) in events_by_type_rows {
+        if let Some(obj) = events_by_type.as_object_mut() {
+            obj.insert(event_type, serde_json::json!(count));
+        }
+    }
+
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs,
@@ -233,6 +254,7 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         "latest_ledger": latest_ledger,
         "lag_ledgers": lag_ledgers,
         "total_events": total_events,
+        "events_by_type": events_by_type,
         "indexer_status": indexer_status,
     }))
 }
