@@ -2,6 +2,25 @@ use thiserror::Error;
 use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
 use serde::Serialize;
 use uuid::Uuid;
+use std::cell::RefCell;
+
+thread_local! {
+    static REQUEST_ID: RefCell<Option<String>> = RefCell::new(None);
+}
+
+pub fn set_request_id(id: String) {
+    REQUEST_ID.with(|rid| {
+        *rid.borrow_mut() = Some(id);
+    });
+}
+
+pub fn get_request_id() -> String {
+    REQUEST_ID.with(|rid| {
+        rid.borrow()
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string())
+    })
+}
 
 /// Machine-readable error response body.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -32,7 +51,7 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let correlation_id = Uuid::new_v4().to_string();
+        let correlation_id = get_request_id();
 
         let (status, message, code) = match &self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string(), "NOT_FOUND"),
@@ -47,7 +66,6 @@ impl IntoResponse for AppError {
                     return (StatusCode::SERVICE_UNAVAILABLE, Json(body)).into_response();
                 }
                 tracing::error!(
-                    correlation_id = %correlation_id,
                     error = %e,
                     "Database error"
                 );
@@ -55,7 +73,6 @@ impl IntoResponse for AppError {
             }
             AppError::Http(e) => {
                 tracing::error!(
-                    correlation_id = %correlation_id,
                     error = %e,
                     "HTTP error"
                 );
@@ -63,7 +80,6 @@ impl IntoResponse for AppError {
             }
             AppError::Internal(msg) => {
                 tracing::error!(
-                    correlation_id = %correlation_id,
                     error = %msg,
                     "Internal error"
                 );

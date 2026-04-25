@@ -1,7 +1,7 @@
 use axum::{extract::{Path, Query, State}, Json, response::IntoResponse, http::StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
-use futures::stream::{self, Stream};
+use futures::stream::{self, Stream, StreamExt};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use std::time::Duration;
@@ -226,6 +226,27 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         .await
         .unwrap_or(0);
 
+    // Query event counts by type
+    let events_by_type_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT event_type, COUNT(*) as count FROM events GROUP BY event_type"
+    )
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+
+    // Build events_by_type object with all event types (defaulting to 0 if not present)
+    let mut events_by_type = serde_json::json!({
+        "contract": 0i64,
+        "diagnostic": 0i64,
+        "system": 0i64,
+    });
+
+    for (event_type, count) in events_by_type_rows {
+        if let Some(obj) = events_by_type.as_object_mut() {
+            obj.insert(event_type, serde_json::json!(count));
+        }
+    }
+
     Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "uptime_secs": uptime_secs,
@@ -233,6 +254,7 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         "latest_ledger": latest_ledger,
         "lag_ledgers": lag_ledgers,
         "total_events": total_events,
+        "events_by_type": events_by_type,
         "indexer_status": indexer_status,
     }))
 }
@@ -277,9 +299,27 @@ pub async fn stream_events(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
     headers: axum::http::HeaderMap,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    // Check if we've reached the max SSE connections limit
+    let current_connections = state.sse_connections.load(std::sync::atomic::Ordering::Relaxed);
+    if current_connections >= state.sse_max_connections {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "too many SSE connections",
+                "code": "SSE_LIMIT_EXCEEDED"
+            }))
+        ));
+    }
+
+    // Increment connection counter
+    state.sse_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let new_count = state.sse_connections.load(std::sync::atomic::Ordering::Relaxed);
+    crate::metrics::update_sse_connections(new_count);
+    
     let keepalive_ms = state.sse_keepalive_interval_ms;
     let contract_filter = params.contract_id;
+    let sse_connections = state.sse_connections.clone();
 
     // Replay missed events if the client sends Last-Event-ID (a UUID).
     let last_event_id = headers
@@ -350,11 +390,26 @@ pub async fn stream_events(
 
     let combined = replay_stream.chain(live_stream);
 
-    Sse::new(combined).keep_alive(
+    // Wrap the stream to decrement the connection counter when the stream ends
+    let stream_with_cleanup = stream::unfold(
+        (combined, sse_connections.clone()),
+        move |(mut stream, counter)| async move {
+            match stream.next().await {
+                Some(item) => Some((item, (stream, counter))),
+                None => {
+                    let new_count = counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+                    crate::metrics::update_sse_connections(new_count);
+                    None
+                }
+            }
+        }
+    );
+
+    Ok(Sse::new(stream_with_cleanup).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_millis(keepalive_ms))
             .text("ping"),
-    )
+    ))
 }
 
 /// Converts an `Event` to a JSON object containing only the requested fields.

@@ -36,14 +36,19 @@ pub fn record_rpc_error() {
     m::counter!("soroban_pulse_rpc_errors_total", 1u64);
 }
 
-/// Record a duplicate event
-pub fn record_duplicate_event() {
-    m::counter!("soroban_pulse_events_duplicate_total", 1u64);
+/// Record a validation failure
+pub fn record_validation_failure() {
+    m::counter!("soroban_pulse_events_validation_failed_total", 1u64);
 }
 
 /// Record HTTP request duration
 pub fn record_http_request_duration(duration: std::time::Duration, method: &str, route: &str, status: &str) {
     m::histogram!("soroban_pulse_http_request_duration_seconds", duration.as_secs_f64(), "method" => method.to_string(), "route" => route.to_string(), "status" => status.to_string());
+}
+
+/// Update the active SSE connections count
+pub fn update_sse_connections(count: usize) {
+    m::gauge!("soroban_pulse_sse_connections_active", count as f64);
 }
 
 #[cfg(test)]
@@ -99,9 +104,9 @@ mod tests {
     }
 
     #[test]
-    fn test_record_duplicate_event() {
+    fn test_record_validation_failure() {
         // This should not panic
-        record_duplicate_event();
+        record_validation_failure();
         assert!(true);
     }
 

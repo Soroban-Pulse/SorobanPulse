@@ -3,6 +3,7 @@ use axum::http::{HeaderValue, Method, Request};
 use axum::extract::MatchedPath;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 use tokio::sync::broadcast;
 use tower_http::{
@@ -41,6 +42,8 @@ pub struct AppState {
     pub prometheus_handle: PrometheusHandle,
     pub event_tx: broadcast::Sender<SorobanEvent>,
     pub sse_keepalive_interval_ms: u64,
+    pub sse_connections: Arc<AtomicUsize>,
+    pub sse_max_connections: usize,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -74,7 +77,7 @@ pub struct ApiDoc;
 
 pub fn create_router(
     pool: PgPool,
-    api_key: Option<String>,
+    api_keys: Vec<String>,
     allowed_origins: &[String],
     rate_limit_per_minute: u32,
     health_state: Arc<HealthState>,
@@ -82,12 +85,12 @@ pub fn create_router(
     prometheus_handle: PrometheusHandle,
     _health_check_timeout_ms: u64,
 ) -> Router {
-    create_router_with_tx(pool, api_key, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1024 * 1024)
+    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000)
 }
 
 pub fn create_router_with_tx(
     pool: PgPool,
-    api_key: Option<String>,
+    api_keys: Vec<String>,
     allowed_origins: &[String],
     rate_limit_per_minute: u32,
     behind_proxy: bool,
@@ -96,10 +99,10 @@ pub fn create_router_with_tx(
     prometheus_handle: PrometheusHandle,
     event_tx: broadcast::Sender<SorobanEvent>,
     sse_keepalive_interval_ms: u64,
-    max_body_size_bytes: usize,
+    sse_max_connections: usize,
 ) -> Router {
     let cors = build_cors(allowed_origins);
-    let auth_state = Arc::new(middleware::AuthState { api_key });
+    let auth_state = Arc::new(middleware::AuthState { api_keys });
     let app_state = AppState { pool, health_state, indexer_state, prometheus_handle, event_tx, sse_keepalive_interval_ms };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.
@@ -190,6 +193,7 @@ pub fn create_router_with_tx(
     Router::new()
         .merge(health_routes)
         .merge(rate_limited_routes)
+        .layer(axum::middleware::from_fn(middleware::request_id_middleware))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth_middleware,

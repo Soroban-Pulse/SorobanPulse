@@ -112,7 +112,7 @@ pub struct Config {
     pub start_ledger: u64,
     pub start_ledger_fallback: bool,
     pub port: u16,
-    pub api_key: Option<String>,
+    pub api_keys: Vec<String>,
     pub db_max_connections: u32,
     pub db_min_connections: u32,
     pub behind_proxy: bool,
@@ -126,6 +126,7 @@ pub struct Config {
     pub indexer_poll_interval_ms: u64,
     pub indexer_error_backoff_ms: u64,
     pub sse_keepalive_interval_ms: u64,
+    pub sse_max_connections: usize,
     pub environment: Environment,
     pub max_body_size_bytes: usize,
 }
@@ -138,7 +139,7 @@ impl Default for Config {
             start_ledger: 0,
             start_ledger_fallback: false,
             port: 3000,
-            api_key: None,
+            api_keys: Vec::new(),
             db_max_connections: 10,
             db_min_connections: 2,
             behind_proxy: false,
@@ -152,6 +153,7 @@ impl Default for Config {
             indexer_poll_interval_ms: 5000,
             indexer_error_backoff_ms: 10000,
             sse_keepalive_interval_ms: 15000,
+            sse_max_connections: 1000,
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
         }
@@ -281,7 +283,20 @@ impl Config {
             start_ledger,
             start_ledger_fallback,
             port,
-            api_key: env::var("API_KEY").ok(),
+            api_keys: {
+                let mut keys = Vec::new();
+                if let Ok(key) = env::var("API_KEY") {
+                    if !key.is_empty() {
+                        keys.push(key);
+                    }
+                }
+                if let Ok(key) = env::var("API_KEY_SECONDARY") {
+                    if !key.is_empty() {
+                        keys.push(key);
+                    }
+                }
+                keys
+            },
             db_max_connections: env::var("DB_MAX_CONNECTIONS")
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
@@ -341,6 +356,14 @@ impl Config {
                     .expect("SSE_KEEPALIVE_INTERVAL_MS must be a number");
                 assert!((1000..=60000).contains(&v),
                     "SSE_KEEPALIVE_INTERVAL_MS must be between 1000 and 60000 ms, got {v}");
+                v
+            },
+            sse_max_connections: {
+                let v: usize = env::var("SSE_MAX_CONNECTIONS")
+                    .unwrap_or_else(|_| "1000".to_string())
+                    .parse()
+                    .expect("SSE_MAX_CONNECTIONS must be a number");
+                assert!(v > 0, "SSE_MAX_CONNECTIONS must be greater than 0, got {v}");
                 v
             },
             environment,

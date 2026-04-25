@@ -418,8 +418,51 @@ impl<R: RpcClient> Indexer<R> {
             Ok(start_ledger)
         }
     }
+    fn validate_event_data(event: &SorobanEvent) -> bool {
+        // Validate that value is an object or null
+        match &event.value {
+            serde_json::Value::Object(_) | serde_json::Value::Null => {}
+            _ => {
+                warn!(
+                    tx_hash = %event.tx_hash,
+                    contract_id = %event.contract_id,
+                    ledger = event.ledger,
+                    event_type = %event.event_type,
+                    value_type = event.value.type_str(),
+                    "Invalid event_data.value: expected object or null",
+                );
+                metrics::record_validation_failure();
+                return false;
+            }
+        }
+
+        // Validate that topic is an array or null
+        match &event.topic {
+            Some(serde_json::Value::Array(_)) | None => {}
+            Some(other) => {
+                warn!(
+                    tx_hash = %event.tx_hash,
+                    contract_id = %event.contract_id,
+                    ledger = event.ledger,
+                    event_type = %event.event_type,
+                    topic_type = other.type_str(),
+                    "Invalid event_data.topic: expected array or null",
+                );
+                metrics::record_validation_failure();
+                return false;
+            }
+        }
+
+        true
+    }
+
     #[instrument(skip(self, event), fields(tx_hash = %event.tx_hash, contract_id = %event.contract_id, ledger = event.ledger))]
     async fn store_event(&self, event: &SorobanEvent) -> Result<u64, anyhow::Error> {
+        // Validate event_data structure
+        if !Self::validate_event_data(event) {
+            return Ok(0);
+        }
+
         let ledger = match i64::try_from(event.ledger) {
             Ok(v) => v,
             Err(_) => {
@@ -557,6 +600,91 @@ mod tests {
         assert!(i64::try_from(make_event(u64::MAX).ledger).is_err());
     }
 
+    #[test]
+    fn validate_event_data_accepts_valid_object_value() {
+        let mut event = make_event(1);
+        event.value = json!({"key": "value"});
+        event.topic = Some(vec![json!("topic1")]);
+        assert!(Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_accepts_null_value() {
+        let mut event = make_event(1);
+        event.value = Value::Null;
+        event.topic = None;
+        assert!(Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_accepts_null_topic() {
+        let mut event = make_event(1);
+        event.value = json!({"key": "value"});
+        event.topic = None;
+        assert!(Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_accepts_array_topic() {
+        let mut event = make_event(1);
+        event.value = json!({"key": "value"});
+        event.topic = Some(vec![json!("topic1"), json!("topic2")]);
+        assert!(Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_rejects_string_value() {
+        let mut event = make_event(1);
+        event.value = Value::String("invalid".to_string());
+        assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_rejects_number_value() {
+        let mut event = make_event(1);
+        event.value = Value::Number(42.into());
+        assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_rejects_array_value() {
+        let mut event = make_event(1);
+        event.value = Value::Array(vec![]);
+        assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_rejects_string_topic() {
+        let mut event = make_event(1);
+        event.value = json!({"key": "value"});
+        event.topic = Some(Value::String("invalid".to_string()));
+        assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[test]
+    fn validate_event_data_rejects_object_topic() {
+        let mut event = make_event(1);
+        event.value = json!({"key": "value"});
+        event.topic = Some(json!({"invalid": "object"}));
+        assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn invalid_event_data_is_skipped(pool: PgPool) {
+        let indexer = indexer(pool.clone());
+        let mut event = make_event(1);
+        event.value = Value::String("invalid".to_string());
+
+        let result = indexer.store_event(&event).await.unwrap();
+        assert_eq!(result, 0); // Event should be skipped
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
     fn indexer(pool: PgPool) -> Indexer<MockRpcClient> {
         let (_, shutdown_rx) = watch::channel(false);
         Indexer::new(
@@ -571,7 +699,7 @@ mod tests {
                 indexer_lag_warn_threshold: 1000,
                 rpc_connect_timeout_secs: 30,
                 rpc_request_timeout_secs: 60,
-                api_key: None,
+                api_keys: Vec::new(),
                 db_max_connections: 10,
                 db_min_connections: 2,
                 allowed_origins: vec!["*".to_string()],
@@ -580,7 +708,9 @@ mod tests {
                 db_statement_timeout_ms: 5000,
                 indexer_poll_interval_ms: 5000,
                 indexer_error_backoff_ms: 10000,
+                sse_keepalive_interval_ms: 15000,
                 environment: crate::config::Environment::Development,
+                max_body_size_bytes: 1024 * 1024,
             },
             shutdown_rx,
             MockRpcClient::new(),

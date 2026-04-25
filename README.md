@@ -264,6 +264,39 @@ k6 run tests/load/events.js
 k6 run -e BASE_URL=http://localhost:3000 tests/load/events.js
 ```
 
+#### SSE Stream Load Testing
+
+A separate k6 script in `tests/load/sse_stream.js` tests the `GET /v1/events/stream` endpoint under load. This endpoint has different characteristics than the REST API:
+- Maintains long-lived connections
+- Consumes broadcast channel slots
+- Requires server to push data to all connected clients
+
+The script tests two scenarios:
+
+**Sustained Connections:** Establishes 50 concurrent SSE connections and holds them for 30 seconds, verifying:
+- Connection establishment time (p99 < 500ms)
+- Correct `Content-Type: text/event-stream` header
+- Event delivery
+
+**Connection Churn:** Rapidly connects and disconnects at 10 connects/sec for 20 seconds, verifying:
+- Server handles connection lifecycle correctly
+- No resource leaks under rapid churn
+- Time-to-first-byte (p99 < 1s)
+
+```bash
+# Run SSE load tests
+k6 run tests/load/sse_stream.js
+
+# Point at a non-default host
+k6 run -e BASE_URL=http://localhost:3000 tests/load/sse_stream.js
+```
+
+**SSE SLO Thresholds:**
+- p99 connection establishment time: < 500ms
+- p99 time-to-first-byte: < 1s
+- Connection error rate: < 5%
+- Connection churn error rate: < 5%
+
 ## Deployment
 
 See [docs/deployment.md](docs/deployment.md) for TLS termination options (nginx, Caddy, AWS ALB) and production security guidance.
