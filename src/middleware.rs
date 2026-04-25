@@ -6,6 +6,7 @@ use axum::{
     Json,
 };
 use std::sync::Arc;
+use sha2::{Sha256, Digest};
 
 /// Middleware to extract request_id from headers and store in thread-local
 pub async fn request_id_middleware(
@@ -59,6 +60,63 @@ pub async fn auth_middleware(
     }
     
     Ok(next.run(req).await)
+}
+
+pub async fn cache_middleware(
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path();
+    let query = req.uri.query().unwrap_or("");
+    
+    let mut response = next.run(req).await;
+    
+    // Add cache headers based on endpoint
+    let cache_control = if path.ends_with("/tx/") || (path.contains("/tx/") && !path.contains("?")) {
+        // GET /v1/events/tx/:hash - immutable, cache for 1 hour
+        "public, max-age=3600, immutable"
+    } else if path == "/v1/events" || path == "/events" {
+        // GET /v1/events - check for filters
+        if query.contains("to_ledger") {
+            // With to_ledger filter - cache for 60 seconds
+            "public, max-age=60"
+        } else {
+            // No filters - cache for 5 seconds with stale-while-revalidate
+            "public, max-age=5, stale-while-revalidate=10"
+        }
+    } else if path.contains("/contract/") {
+        // GET /v1/events/contract/:id - cache for 5 seconds with stale-while-revalidate
+        "public, max-age=5, stale-while-revalidate=10"
+    } else {
+        // Default - no caching
+        return response;
+    };
+    
+    response.headers_mut().insert(
+        "Cache-Control",
+        cache_control.parse().unwrap_or_else(|_| "no-cache".parse().unwrap()),
+    );
+    
+    // Add ETag header based on response body hash
+    if let Ok(body_bytes) = axum::body::to_bytes(response.into_body(), usize::MAX).await {
+        let mut hasher = Sha256::new();
+        hasher.update(&body_bytes);
+        let hash = format!("{:x}", hasher.finalize());
+        let etag = format!("\"{}\"", &hash[..16]); // Use first 16 chars of hash
+        
+        let mut new_response = Response::new(axum::body::Body::from(body_bytes));
+        *new_response.status_mut() = response.status();
+        *new_response.headers_mut() = response.headers().clone();
+        
+        new_response.headers_mut().insert(
+            "ETag",
+            etag.parse().unwrap_or_else(|_| "\"unknown\"".parse().unwrap()),
+        );
+        
+        return new_response;
+    }
+    
+    response
 }
 
 #[cfg(test)]

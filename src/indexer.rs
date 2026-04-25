@@ -228,9 +228,9 @@ impl<R: RpcClient> Indexer<R> {
     async fn run_loop(&self) {
         let mut current_ledger = self.config.start_ledger;
         let mut consecutive_db_errors = 0u32;
+        let mut rpc_backoff_ms = 1000u64; // Start with 1 second backoff
 
         if current_ledger == 0 {
-            let mut retries = 0;
             loop {
                 match self.rpc_client.get_latest_ledger(&self.config.stellar_rpc_url).await {
                     Ok(ledger) => {
@@ -240,22 +240,14 @@ impl<R: RpcClient> Indexer<R> {
                         if let Some(ref s) = self.indexer_state {
                             s.current_ledger.store(current_ledger, std::sync::atomic::Ordering::Relaxed);
                         }
+                        rpc_backoff_ms = 1000; // Reset backoff on success
                         break;
                     }
                     Err(e) => {
-                        error!(attempt = retries + 1, error = %e, "Failed to get latest ledger");
-                        retries += 1;
-                        if retries >= 5 {
-                            if self.config.start_ledger_fallback {
-                                warn!("Falling back to genesis ledger (1) due to RPC failure");
-                                current_ledger = 1;
-                                break;
-                            } else {
-                                error!("Fatal RPC error: Could not fetch initial ledger after 5 attempts");
-                                std::process::exit(1);
-                            }
-                        }
-                        sleep(Duration::from_secs(10)).await;
+                        error!(error = %e, backoff_ms = rpc_backoff_ms, "Failed to get latest ledger, retrying with exponential backoff");
+                        sleep(Duration::from_millis(rpc_backoff_ms)).await;
+                        // Exponential backoff with max 60 seconds
+                        rpc_backoff_ms = std::cmp::min(rpc_backoff_ms * 2, 60000);
                     }
                 }
             }
@@ -378,6 +370,7 @@ impl<R: RpcClient> Indexer<R> {
                         total_inserted += rows;
                         if rows == 0 {
                             total_skipped += 1;
+                            metrics::record_duplicate_event();
                         } else if let Some(ref tx) = self.event_tx {
                             let _ = tx.send(event);
                         }
@@ -409,7 +402,15 @@ impl<R: RpcClient> Indexer<R> {
         );
         metrics::record_events_indexed(total_inserted as u64);
 
-        let _duplicate_events_skipped = total_skipped;
+        if total_fetched > 0 {
+            let duplicate_rate = (total_skipped as f64 / total_fetched as f64) * 100.0;
+            tracing::debug!(
+                duplicates = total_skipped,
+                total_fetched = total_fetched,
+                duplicate_rate = duplicate_rate,
+                "Event deduplication stats"
+            );
+        }
 
         if latest_ledger > start_ledger {
             Ok(latest_ledger + 1)

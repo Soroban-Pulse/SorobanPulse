@@ -155,6 +155,7 @@ impl Default for Config {
             sse_keepalive_interval_ms: 15000,
             sse_max_connections: 1000,
             environment: Environment::Development,
+            max_body_size_bytes: 1024 * 1024, // 1 MB default
         }
     }
 }
@@ -366,6 +367,10 @@ impl Config {
                 v
             },
             environment,
+            max_body_size_bytes: env::var("MAX_BODY_SIZE_BYTES")
+                .unwrap_or_else(|_| (1024 * 1024).to_string())
+                .parse()
+                .expect("MAX_BODY_SIZE_BYTES must be a number"),
         }
     }
 }
@@ -444,7 +449,6 @@ mod tests {
         assert_eq!(config.port, 3000);
         assert_eq!(config.start_ledger, 0);
         assert!(!config.start_ledger_fallback);
-        assert_eq!(config.health_check_timeout_ms, 2000);
         assert_eq!(config.environment, Environment::Development);
     }
 

@@ -1,6 +1,9 @@
 pub mod config;
+pub mod db;
 pub mod error;
+pub mod handlers;
 pub mod metrics;
 pub mod middleware;
 pub mod models;
+pub mod rpc_client;
 pub mod routes;

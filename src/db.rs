@@ -1,6 +1,23 @@
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use tracing::info;
 
+/// Per-endpoint query timeout configuration (in milliseconds)
+pub struct QueryTimeouts {
+    pub fast_lookup: u64,      // Simple lookups by ID/hash (e.g., 1000ms)
+    pub standard_query: u64,   // Standard paginated queries (e.g., 5000ms)
+    pub expensive_query: u64,  // Expensive queries like COUNT(*) (e.g., 10000ms)
+}
+
+impl Default for QueryTimeouts {
+    fn default() -> Self {
+        Self {
+            fast_lookup: 1000,
+            standard_query: 5000,
+            expensive_query: 10000,
+        }
+    }
+}
+
 pub async fn create_pool(
     database_url: &str,
     db_max_connections: u32,
@@ -28,6 +45,18 @@ pub async fn create_pool(
         })
         .connect(database_url)
         .await
+}
+
+/// Helper to set per-query timeout using SET LOCAL statement_timeout
+/// This should be called at the beginning of a transaction
+pub async fn set_query_timeout(
+    conn: &mut sqlx::PgConnection,
+    timeout_ms: u64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(&format!("SET LOCAL statement_timeout = '{timeout_ms}ms'"))
+        .execute(&mut **conn)
+        .await
+        .map(|_| ())
 }
 
 /// Runs migrations under a Postgres session-level advisory lock so that
