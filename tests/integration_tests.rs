@@ -13,7 +13,8 @@ fn make_router(pool: PgPool, api_key: Option<String>) -> axum::Router {
     health_state.update_last_poll();
     let indexer_state = Arc::new(IndexerState::new());
     let prometheus_handle = init_metrics();
-    create_router(pool, api_key, &[], 60, health_state, indexer_state, prometheus_handle, 1_048_576)
+    let api_keys = api_key.into_iter().collect();
+    create_router(pool, api_keys, &[], 60, health_state, indexer_state, prometheus_handle, 15000)
 }
 
 // --- Health ---
@@ -238,4 +239,63 @@ async fn contract_without_ledger_range_returns_all_events(pool: PgPool) {
     assert_eq!(body["data"].as_array().unwrap().len(), 3);
     assert!(body.get("from_ledger").is_none());
     assert!(body.get("to_ledger").is_none());
+}
+
+// --- SSE Streaming ---
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sse_contract_stream_invalid_contract_id_returns_400(pool: PgPool) {
+    let app = make_router(pool, None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/contract/INVALID/stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sse_contract_stream_establishes_successfully(pool: PgPool) {
+    let contract_id = "C1234567890123456789012345678901234567890123456789012345";
+    let app = make_router(pool, None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/events/contract/{}/stream", contract_id))
+                .header(header::ACCEPT, "text/event-stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "text/event-stream");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn sse_deprecated_contract_stream_unversioned_alias_works(pool: PgPool) {
+    let contract_id = "C1234567890123456789012345678901234567890123456789012345";
+    let app = make_router(pool, None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/events/contract/{}/stream", contract_id))
+                .header(header::ACCEPT, "text/event-stream")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers().get("Deprecation").unwrap(), "true");
 }

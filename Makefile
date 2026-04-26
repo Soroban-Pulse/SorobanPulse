@@ -41,3 +41,23 @@ migrate-down: ## Rollback the most recent migration
 
 clean: ## Remove build artifacts
 	cargo clean
+	rm -f openapi.json
+
+generate-sdk: ## Generate TypeScript and Python SDKs from OpenAPI spec
+	cargo run --bin gen_openapi > openapi.json
+	# Generate TypeScript SDK
+	npx @openapitools/openapi-generator-cli generate \
+		-i openapi.json \
+		-g typescript-fetch \
+		-o sdk/typescript \
+		--additional-properties=typescriptThreePlus=true,supportsES6=true
+	# Generate Python SDK
+	npx @openapitools/openapi-generator-cli generate \
+		-i openapi.json \
+		-g python \
+		-o sdk/python \
+		--additional-properties=library=httpx
+
+vacuum: ## Run VACUUM ANALYZE on the events table
+	@if [ -z "$$DATABASE_URL" ]; then echo "DATABASE_URL is not set"; exit 1; fi
+	psql "$$DATABASE_URL" -c "VACUUM ANALYZE events;"

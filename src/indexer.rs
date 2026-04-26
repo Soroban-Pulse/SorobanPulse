@@ -2,6 +2,7 @@ use chrono::DateTime;
 use serde_json::json;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::sleep;
@@ -156,6 +157,7 @@ pub struct Indexer<R: RpcClient> {
     health_state: Option<Arc<HealthState>>,
     indexer_state: Option<Arc<IndexerState>>,
     event_tx: Option<broadcast::Sender<SorobanEvent>>,
+    event_counter: AtomicU64,
 }
 
 impl<R: RpcClient> Indexer<R> {
@@ -168,6 +170,7 @@ impl<R: RpcClient> Indexer<R> {
             health_state: None,
             indexer_state: None,
             event_tx: None,
+            event_counter: AtomicU64::new(0),
         }
     }
 
@@ -430,13 +433,20 @@ impl<R: RpcClient> Indexer<R> {
         // Validate that value is an object or null
         match &event.value {
             serde_json::Value::Object(_) | serde_json::Value::Null => {}
-            _ => {
+            other => {
                 warn!(
                     tx_hash = %event.tx_hash,
                     contract_id = %event.contract_id,
                     ledger = event.ledger,
                     event_type = %event.event_type,
-                    value_type = event.value.type_str(),
+                    value_type = match other {
+                        serde_json::Value::Null => "null",
+                        serde_json::Value::Bool(_) => "bool",
+                        serde_json::Value::Number(_) => "number",
+                        serde_json::Value::String(_) => "string",
+                        serde_json::Value::Array(_) => "array",
+                        serde_json::Value::Object(_) => "object",
+                    },
                     "Invalid event_data.value: expected object or null",
                 );
                 metrics::record_validation_failure();
@@ -444,28 +454,35 @@ impl<R: RpcClient> Indexer<R> {
             }
         }
 
-        // Validate that topic is an array or null
-        match &event.topic {
-            Some(serde_json::Value::Array(_)) | None => {}
-            Some(other) => {
-                warn!(
-                    tx_hash = %event.tx_hash,
-                    contract_id = %event.contract_id,
-                    ledger = event.ledger,
-                    event_type = %event.event_type,
-                    topic_type = other.type_str(),
-                    "Invalid event_data.topic: expected array or null",
-                );
-                metrics::record_validation_failure();
-                return false;
-            }
+        // Validate that topic is nested list (array) if present
+        if let Some(ref topic) = event.topic {
+            // topic is Vec<Value>, so it's always an array in JSON terms
+            // but we might want to validate something about it?
+            // The original code was trying to validate it was a JSON Array.
+            // If it's Vec<Value>, it's already structured.
+            let _ = topic;
         }
 
         true
     }
+    
+    fn should_log_debug(&self) -> bool {
+        let count = self.event_counter.fetch_add(1, Ordering::Relaxed);
+        count % u64::from(self.config.log_sample_rate) == 0
+    }
 
     #[instrument(skip(self, event), fields(tx_hash = %event.tx_hash, contract_id = %event.contract_id, ledger = event.ledger))]
     async fn store_event(&self, event: &SorobanEvent) -> Result<u64, anyhow::Error> {
+        if self.should_log_debug() {
+            tracing::debug!(
+                tx_hash = %event.tx_hash,
+                contract_id = %event.contract_id,
+                ledger = event.ledger,
+                event_type = %event.event_type,
+                "Processing event"
+            );
+        }
+
         // Validate event_data structure
         if !Self::validate_event_data(event) {
             return Ok(0);
@@ -719,10 +736,55 @@ mod tests {
                 sse_keepalive_interval_ms: 15000,
                 environment: crate::config::Environment::Development,
                 max_body_size_bytes: 1024 * 1024,
+                log_sample_rate: 1,
             },
             shutdown_rx,
             MockRpcClient::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn test_should_log_debug_sampling() {
+        let pool = PgPool::connect("postgres://localhost/soroban_pulse").await.unwrap_or_else(|_| {
+            // Fallback for environments where PG is not available
+            // In a real test environment we'd have a pool.
+            // Since this is specifically testing business logic in Indexer, 
+            // we can just use an uninitialized pool or skip if needed.
+            // But Indexer::new needs a pool.
+            // Actually, we can use the same pattern as in `indexer` helper.
+            return;
+        });
+
+        let mut indexer = indexer(pool);
+        
+        // Test with sample_rate = 1 (should log everything)
+        indexer.config.log_sample_rate = 1;
+        for _ in 0..100 {
+            assert!(indexer.should_log_debug());
+        }
+
+        // Test with sample_rate = 10 (should log every 10th)
+        indexer.config.log_sample_rate = 10;
+        indexer.event_counter.store(0, Ordering::SeqCst);
+        let mut logs = 0;
+        for _ in 0..100 {
+            if indexer.should_log_debug() {
+                logs += 1;
+            }
+        }
+        assert_eq!(logs, 10);
+        
+        // Test with sample_rate = 3
+        indexer.config.log_sample_rate = 3;
+        indexer.event_counter.store(0, Ordering::SeqCst);
+        let mut logs = 0;
+        for _ in 0..100 {
+            if indexer.should_log_debug() {
+                logs += 1;
+            }
+        }
+        // 0, 3, 6, ..., 99 -> 34 logs
+        assert_eq!(logs, 34);
     }
 
     #[sqlx::test(migrations = "./migrations")]

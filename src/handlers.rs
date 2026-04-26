@@ -1,5 +1,6 @@
 use axum::{extract::{Path, Query, State}, Json, response::IntoResponse, http::StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use sqlx::Row;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures::stream::{self, Stream, StreamExt};
 use serde_json::{json, Value};
@@ -81,6 +82,8 @@ fn resolve_columns<'a>(params: &'a PaginationParams) -> Result<Vec<&'a str>, App
         ))
     })
 }
+
+fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
     if contract_id.len() != 56 {
         return Err(AppError::Validation("invalid contract_id format".to_string()));
     }
@@ -301,12 +304,15 @@ pub async fn swagger_ui() -> impl IntoResponse {
 }
 
 /// Stream new events in real time via Server-Sent Events.
+///
+/// This endpoint is less preferred for contract-specific streaming; use
+/// `/v1/events/contract/{contract_id}/stream` instead.
 #[utoipa::path(
     get,
     path = "/v1/events/stream",
     tag = "events",
     params(
-        ("contract_id" = Option<String>, Query, description = "Filter by contract ID"),
+        ("contract_id" = Option<String>, Query, description = "Filter by contract ID (less preferred)"),
     ),
     responses(
         (status = 200, description = "SSE stream of new events (text/event-stream)"),
@@ -316,6 +322,39 @@ pub async fn swagger_ui() -> impl IntoResponse {
 pub async fn stream_events(
     State(state): State<AppState>,
     Query(params): Query<StreamParams>,
+    headers: axum::http::HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    stream_events_internal(State(state), params.contract_id, headers).await
+}
+
+/// Stream new events for a specific contract in real time via Server-Sent Events.
+#[utoipa::path(
+    get,
+    path = "/v1/events/contract/{contract_id}/stream",
+    tag = "events",
+    params(
+        ("contract_id" = String, Path, description = "Stellar contract ID"),
+    ),
+    responses(
+        (status = 200, description = "SSE stream of contract events (text/event-stream)"),
+        (status = 400, description = "Invalid contract_id format"),
+    )
+)]
+pub async fn stream_events_by_contract(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    validate_contract_id(&contract_id).map_err(|e| {
+        let (status, body) = e.into_response_parts();
+        (status, body)
+    })?;
+    stream_events_internal(State(state), Some(contract_id), headers).await
+}
+
+async fn stream_events_internal(
+    State(state): State<AppState>,
+    contract_filter: Option<String>,
     headers: axum::http::HeaderMap,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
     // Check if we've reached the max SSE connections limit
@@ -336,12 +375,14 @@ pub async fn stream_events(
     crate::metrics::update_sse_connections(new_count);
     
     let keepalive_ms = state.sse_keepalive_interval_ms;
-    let contract_filter = params.contract_id;
     let sse_connections = state.sse_connections.clone();
 
     // Validate contract_id if provided
     if let Some(ref cid) = contract_filter {
-        validate_contract_id(cid)?;
+        validate_contract_id(cid).map_err(|e| {
+            let (status, body) = e.into_response_parts();
+            (status, body)
+        })?;
     }
 
     // Replay missed events if the client sends Last-Event-ID (a UUID).
@@ -378,7 +419,7 @@ pub async fn stream_events(
 
     let rx = state.event_tx.subscribe();
 
-    let replay_stream = stream::iter(replay.into_iter().map(|ev| {
+    let replay_stream = stream::iter(replay.into_iter().map(move |ev| {
         let data = serde_json::to_string(&ev).unwrap_or_default();
         Ok(Event::default()
             .id(ev.id.to_string())
@@ -412,6 +453,7 @@ pub async fn stream_events(
     );
 
     let combined = replay_stream.chain(live_stream);
+    let combined = Box::pin(combined);
 
     // Wrap the stream to decrement the connection counter when the stream ends
     let stream_with_cleanup = stream::unfold(
@@ -560,11 +602,24 @@ pub async fn get_events(
     let mut conditions: Vec<String> = Vec::new();
     let mut bind_idx: i32 = 1;
 
-    let events: Vec<Value> = rows.iter().map(|e| filter_fields(e, &columns)).collect();
+    if params.event_type.is_some() {
+        conditions.push(format!("event_type = ${}", bind_idx));
+        bind_idx += 1;
+    }
+    if params.from_ledger.is_some() {
+        conditions.push(format!("ledger >= ${}", bind_idx));
+        bind_idx += 1;
+    }
+    if params.to_ledger.is_some() {
+        conditions.push(format!("ledger <= ${}", bind_idx));
+        bind_idx += 1;
+    }
 
-    let has_filters = params.event_type.is_some()
-        || params.from_ledger.is_some()
-        || params.to_ledger.is_some();
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
 
     // Always include ledger + id so we can emit next_cursor even in offset mode.
     let mut select_cols = columns.to_vec();
@@ -608,20 +663,22 @@ pub async fn get_events(
         let count = cq.fetch_one(&state.pool).await?;
         (count, false)
     } else {
-        let count: i64 = sqlx::query_scalar(
+        match sqlx::query_scalar::<_, i64>(
             "SELECT reltuples::bigint FROM pg_class WHERE relname = 'events'",
         )
         .fetch_one(&state.pool)
-        .await?;
-        (count, true)
-    } else {
-        let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
-        let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
-        if let Some(ref et) = params.event_type { cq = cq.bind(et); }
-        if let Some(fl) = params.from_ledger { cq = cq.bind(fl); }
-        if let Some(tl) = params.to_ledger { cq = cq.bind(tl); }
-        let count = cq.fetch_one(&state.pool).await?;
-        (count, false)
+        .await {
+            Ok(count) => (count, true),
+            Err(_) => {
+                let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
+                let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
+                if let Some(ref et) = params.event_type { cq = cq.bind(et); }
+                if let Some(fl) = params.from_ledger { cq = cq.bind(fl); }
+                if let Some(tl) = params.to_ledger { cq = cq.bind(tl); }
+                let count = cq.fetch_one(&state.pool).await?;
+                (count, false)
+            }
+        }
     };
 
     Ok(Json(json!({
@@ -743,6 +800,14 @@ pub async fn get_events_by_tx(
     validate_tx_hash(&tx_hash)?;
 
     let columns = resolve_columns(&params)?;
+
+    let rows = sqlx::query(&format!(
+        "SELECT {} FROM events WHERE tx_hash = $1 ORDER BY ledger DESC",
+        columns.join(", ")
+    ))
+    .bind(&tx_hash)
+    .fetch_all(&state.pool)
+    .await?;
 
     let events = rows_to_json(&rows, &columns)?;
 

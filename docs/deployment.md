@@ -42,8 +42,6 @@ With 3 replicas running, exactly one will hold the advisory lock and index event
 
 ---
 
-
-
 ## Migration Strategy
 
 ### How migrations are run
@@ -71,6 +69,7 @@ cargo sqlx migrate revert
 ```
 
 This will:
+
 1. Execute the most recent `.down.sql` file
 2. Remove the migration entry from the `_sqlx_migrations` table
 3. Leave the database in the pre-migration state
@@ -159,7 +158,7 @@ spec:
       containers:
         - name: migrate
           image: soroban-pulse:latest
-          command: ["./migrate"]   # separate migrate binary
+          command: ["./migrate"] # separate migrate binary
           envFrom:
             - secretRef:
                 name: soroban-pulse-secrets
@@ -171,11 +170,11 @@ Reference this Job in your `Deployment` rollout pipeline (e.g., Argo CD sync wav
 
 Soroban Pulse ships three `.env.*.example` templates:
 
-| File | Purpose |
-|------|---------|
-| `.env.example` | Local development defaults |
-| `.env.staging.example` | Staging environment — testnet, JSON logs, restricted CORS |
-| `.env.production.example` | Production — mainnet, strict CORS, higher pool sizing |
+| File                      | Purpose                                                   |
+| ------------------------- | --------------------------------------------------------- |
+| `.env.example`            | Local development defaults                                |
+| `.env.staging.example`    | Staging environment — testnet, JSON logs, restricted CORS |
+| `.env.production.example` | Production — mainnet, strict CORS, higher pool sizing     |
 
 Copy the appropriate template and fill in real values:
 
@@ -188,24 +187,24 @@ cp .env.production.example .env.production
 
 Set the `ENVIRONMENT` variable to one of `development`, `staging`, or `production`.
 
-| Behaviour | development | staging | production |
-|-----------|-------------|---------|------------|
-| `ALLOWED_ORIGINS=*` allowed | ✅ | ❌ panics at startup | ❌ panics at startup |
-| `RUST_LOG_FORMAT` default | `text` | `json` | `json` |
-| Recommended `API_KEY` | optional | required | required |
+| Behaviour                   | development | staging              | production           |
+| --------------------------- | ----------- | -------------------- | -------------------- |
+| `ALLOWED_ORIGINS=*` allowed | ✅          | ❌ panics at startup | ❌ panics at startup |
+| `RUST_LOG_FORMAT` default   | `text`      | `json`               | `json`               |
+| Recommended `API_KEY`       | optional    | required             | required             |
 
 In staging and production, setting `ALLOWED_ORIGINS=*` will cause the service to **panic at startup** — you must list explicit origins.
 
 ### Key differences between environments
 
-| Variable | Development | Staging | Production |
-|----------|-------------|---------|------------|
-| `STELLAR_RPC_URL` | testnet | testnet | mainnet |
-| `ALLOWED_ORIGINS` | `*` | `https://staging.example.com` | `https://app.example.com,...` |
-| `RUST_LOG` | `debug` | `info` | `warn` |
-| `RATE_LIMIT_PER_MINUTE` | `60` | `60` | `30` |
-| `DB_MAX_CONNECTIONS` | `10` | `10` | `20` |
-| `BEHIND_PROXY` | `false` | `true` | `true` |
+| Variable                | Development | Staging                       | Production                    |
+| ----------------------- | ----------- | ----------------------------- | ----------------------------- |
+| `STELLAR_RPC_URL`       | testnet     | testnet                       | mainnet                       |
+| `ALLOWED_ORIGINS`       | `*`         | `https://staging.example.com` | `https://app.example.com,...` |
+| `RUST_LOG`              | `debug`     | `info`                        | `warn`                        |
+| `RATE_LIMIT_PER_MINUTE` | `60`        | `60`                          | `30`                          |
+| `DB_MAX_CONNECTIONS`    | `10`        | `10`                          | `20`                          |
+| `BEHIND_PROXY`          | `false`     | `true`                        | `true`                        |
 
 ---
 
@@ -362,10 +361,10 @@ sudo systemctl reload caddy
 
 ### RTO / RPO targets
 
-| Target | Goal |
-|--------|------|
+| Target                         | Goal                                      |
+| ------------------------------ | ----------------------------------------- |
 | RPO (Recovery Point Objective) | ≤ 1 hour (with hourly `pg_dump` schedule) |
-| RTO (Recovery Time Objective) | ≤ 30 minutes (restore from latest dump) |
+| RTO (Recovery Time Objective)  | ≤ 30 minutes (restore from latest dump)   |
 
 For stricter RPO, enable WAL archiving (see below).
 
@@ -441,11 +440,11 @@ DATABASE_URL=postgres://user:pass@localhost:5432/soroban_pulse_verify \
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ENVIRONMENT` | Deployment environment (`development`/`staging`/`production`) | `development` |
-| `BEHIND_PROXY` | Trust `X-Forwarded-For` from upstream proxy/load balancer | `false` |
-| `DATABASE_URL_FILE` | Path to a file containing the database URL (takes precedence over `DATABASE_URL`) | — |
+| Variable            | Description                                                                       | Default       |
+| ------------------- | --------------------------------------------------------------------------------- | ------------- |
+| `ENVIRONMENT`       | Deployment environment (`development`/`staging`/`production`)                     | `development` |
+| `BEHIND_PROXY`      | Trust `X-Forwarded-For` from upstream proxy/load balancer                         | `false`       |
+| `DATABASE_URL_FILE` | Path to a file containing the database URL (takes precedence over `DATABASE_URL`) | —             |
 
 See the root [README](../README.md) for all other variables.
 
@@ -462,3 +461,51 @@ See the root [README](../README.md) for all other variables.
 - [ ] `API_KEY` is set and rotated regularly
 - [ ] Secrets are managed via Docker Secrets, Kubernetes Secrets, or a vault — not plain `.env` files
 - [ ] Database backups are scheduled and restore procedure is tested
+- [ ] Autovacuum is configured to prevent table and index bloat
+
+---
+
+## Database Maintenance
+
+### Table Bloat and VACUUM
+
+Soroban Pulse uses an `ON CONFLICT DO NOTHING` pattern for the `events` table to ensure idempotency. While efficient for data integrity, this pattern creates **dead tuples** every time a duplicate event is encountered. In an append-heavy workload, these dead tuples can lead to "table bloat," where the table and its indexes consume far more disk space than necessary, eventually degrading query performance and increasing index scan times.
+
+PostgreSQL's built-in **autovacuum** daemon handles the removal of dead tuples and the updating of query planner statistics (`ANALYZE`). For a high-traffic indexing service, the default autovacuum settings may be too conservative.
+
+### Recommended Autovacuum Settings
+
+We recommend the following settings in `postgresql.conf` to ensure the `events` table is vacuumed frequently enough to prevent significant bloat:
+
+```ini
+# Trigger vacuum when 1% of the table has changed (default is 20%)
+autovacuum_vacuum_scale_factor = 0.01
+
+# Trigger analyze when 0.5% of the table has changed (default is 10%)
+autovacuum_analyze_scale_factor = 0.005
+
+# Reduce the delay between vacuum rounds to increase throughput
+autovacuum_vacuum_cost_delay = 10ms
+```
+
+### Managed Database Configuration (RDS, Cloud SQL)
+
+If you are using a managed service that does not allow global `postgresql.conf` changes, you can apply these settings specifically to the `events` table:
+
+```sql
+ALTER TABLE events SET (
+  autovacuum_vacuum_scale_factor = 0.01,
+  autovacuum_analyze_scale_factor = 0.005,
+  autovacuum_vacuum_cost_delay = 10
+);
+```
+
+### Manual Maintenance
+
+In cases of extreme bloat (e.g., after a large re-indexing operation), you may want to run a manual vacuum using the provided Makefile target:
+
+```bash
+make vacuum
+```
+
+This executes `VACUUM ANALYZE events;` which cleans up dead tuples and updates statistics without taking an exclusive lock on the table (allowing application traffic to continue).

@@ -20,6 +20,28 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  validate-sdk:
+    name: Validate SDKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+      - run: make generate-sdk
+      - name: Check for diffs
+        run: |
+          if [ -n "$(git status --porcelain sdk/)" ]; then
+            echo "SDKs are out of date. Please run 'make generate-sdk' and commit the changes."
+            git status --porcelain sdk/
+            exit 1
+          fi
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
