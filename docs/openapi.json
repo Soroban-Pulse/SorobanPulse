@@ -1,0 +1,413 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Soroban Pulse API",
+    "description": "Indexes Soroban smart contract events on the Stellar network.",
+    "license": {
+      "name": ""
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Service is healthy"
+          },
+          "503": {
+            "description": "Service is degraded"
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Indexer operational status"
+          }
+        }
+      }
+    },
+    "/v1/contracts": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "get_contracts",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default 1)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Items per page (1-100, default 20)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of indexed contract IDs"
+          }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "get_events",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default: 1)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Results per page, 1–100 (default: 20)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "exact_count",
+            "in": "query",
+            "description": "Use exact COUNT(*) instead of approximate",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "nullable": true
+            }
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "description": "Filter by event type: contract, diagnostic, system",
+            "required": false,
+            "schema": {
+              "allOf": [
+                {
+                  "$ref": "#/components/schemas/EventType"
+                }
+              ],
+              "nullable": true
+            }
+          },
+          {
+            "name": "from_ledger",
+            "in": "query",
+            "description": "Return events at or after this ledger",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "to_ledger",
+            "in": "query",
+            "description": "Return events at or before this ledger",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated list of events"
+          },
+          "400": {
+            "description": "Invalid query parameters"
+          }
+        }
+      }
+    },
+    "/v1/events/contract/{contract_id}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "get_events_by_contract",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "path",
+            "description": "Stellar contract ID (56-char, starts with C)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "description": "Page number (default: 1)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Results per page, 1–100 (default: 20)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "from_ledger",
+            "in": "query",
+            "description": "Return events at or after this ledger",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "to_ledger",
+            "in": "query",
+            "description": "Return events at or before this ledger",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events for the given contract"
+          },
+          "400": {
+            "description": "Invalid contract_id format or ledger range"
+          },
+          "404": {
+            "description": "No events found for contract"
+          }
+        }
+      }
+    },
+    "/v1/events/stream": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Stream new events in real time via Server-Sent Events.",
+        "operationId": "stream_events",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "query",
+            "description": "Filter by contract ID",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of new events (text/event-stream)"
+          },
+          "400": {
+            "description": "Invalid contract_id format"
+          }
+        }
+      }
+    },
+    "/v1/events/tx/{tx_hash}": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "get_events_by_tx",
+        "parameters": [
+          {
+            "name": "tx_hash",
+            "in": "path",
+            "description": "Transaction hash (64 hex chars, case-insensitive — normalized to lowercase)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events for the given transaction (empty array if none)"
+          },
+          "400": {
+            "description": "Invalid tx_hash format"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ContractSummary": {
+        "type": "object",
+        "required": [
+          "contract_id",
+          "event_count",
+          "latest_ledger"
+        ],
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "event_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "latest_ledger": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "Event": {
+        "type": "object",
+        "required": [
+          "id",
+          "contract_id",
+          "event_type",
+          "tx_hash",
+          "ledger",
+          "timestamp",
+          "event_data",
+          "created_at"
+        ],
+        "properties": {
+          "contract_id": {
+            "type": "string"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "event_data": {},
+          "event_type": {
+            "$ref": "#/components/schemas/EventType"
+          },
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "ledger": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "timestamp": {
+            "$ref": "#/components/schemas/DateTime"
+          },
+          "tx_hash": {
+            "type": "string"
+          }
+        }
+      },
+      "PaginationParams": {
+        "type": "object",
+        "properties": {
+          "cursor": {
+            "type": "string",
+            "nullable": true
+          },
+          "event_type": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/EventType"
+              }
+            ],
+            "nullable": true
+          },
+          "exact_count": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "fields": {
+            "type": "string",
+            "nullable": true
+          },
+          "from_ledger": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "page": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "to_ledger": {
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "events",
+      "description": "Event indexing endpoints"
+    },
+    {
+      "name": "system",
+      "description": "Health and observability endpoints"
+    }
+  ]
+}

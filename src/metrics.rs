@@ -52,6 +52,12 @@ pub fn update_sse_connections(count: usize) {
     m::gauge!("soroban_pulse_sse_connections_active", count as f64);
 }
 
+/// Update DB connection pool metrics
+pub fn update_db_pool_metrics(pool: &PgPool) {
+    m::gauge!("soroban_pulse_db_pool_size", pool.size() as f64);
+    m::gauge!("soroban_pulse_db_pool_idle", pool.num_idle() as f64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -3,6 +3,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures::stream::{self, Stream, StreamExt};
 use serde_json::{json, Value};
+use sqlx::Row;
 use std::convert::Infallible;
 use std::time::Duration;
 use std::sync::OnceLock;
@@ -81,6 +82,8 @@ fn resolve_columns<'a>(params: &'a PaginationParams) -> Result<Vec<&'a str>, App
         ))
     })
 }
+
+fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
     if contract_id.len() != 56 {
         return Err(AppError::Validation("invalid contract_id format".to_string()));
     }
@@ -97,7 +100,8 @@ fn validate_tx_hash(tx_hash: &str) -> Result<(), AppError> {
     if tx_hash.len() != 64 {
         return Err(AppError::Validation("invalid tx_hash format".to_string()));
     }
-    if !tx_hash.chars().all(|c| c.is_ascii_hexdigit() && c.is_lowercase()) {
+    // Accept both uppercase and lowercase hex — callers should normalize to lowercase first.
+    if !tx_hash.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(AppError::Validation("invalid tx_hash format".to_string()));
     }
     Ok(())
@@ -341,7 +345,10 @@ pub async fn stream_events(
 
     // Validate contract_id if provided
     if let Some(ref cid) = contract_filter {
-        validate_contract_id(cid)?;
+        validate_contract_id(cid).map_err(|e| {
+            let body = json!({ "error": e.to_string(), "code": "VALIDATION_ERROR" });
+            (StatusCode::BAD_REQUEST, Json(body))
+        })?;
     }
 
     // Replay missed events if the client sends Last-Event-ID (a UUID).
@@ -378,7 +385,7 @@ pub async fn stream_events(
 
     let rx = state.event_tx.subscribe();
 
-    let replay_stream = stream::iter(replay.into_iter().map(|ev| {
+    let replay_stream = stream::iter(replay.into_iter().map(move |ev| {
         let data = serde_json::to_string(&ev).unwrap_or_default();
         Ok(Event::default()
             .id(ev.id.to_string())
@@ -415,7 +422,7 @@ pub async fn stream_events(
 
     // Wrap the stream to decrement the connection counter when the stream ends
     let stream_with_cleanup = stream::unfold(
-        (combined, sse_connections.clone()),
+        (Box::pin(combined), sse_connections.clone()),
         move |(mut stream, counter)| async move {
             match stream.next().await {
                 Some(item) => Some((item, (stream, counter))),
@@ -560,11 +567,24 @@ pub async fn get_events(
     let mut conditions: Vec<String> = Vec::new();
     let mut bind_idx: i32 = 1;
 
-    let events: Vec<Value> = rows.iter().map(|e| filter_fields(e, &columns)).collect();
+    if params.event_type.is_some() {
+        conditions.push(format!("event_type = ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if params.from_ledger.is_some() {
+        conditions.push(format!("ledger >= ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if params.to_ledger.is_some() {
+        conditions.push(format!("ledger <= ${bind_idx}"));
+        bind_idx += 1;
+    }
 
-    let has_filters = params.event_type.is_some()
-        || params.from_ledger.is_some()
-        || params.to_ledger.is_some();
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
 
     // Always include ledger + id so we can emit next_cursor even in offset mode.
     let mut select_cols = columns.to_vec();
@@ -614,14 +634,6 @@ pub async fn get_events(
         .fetch_one(&state.pool)
         .await?;
         (count, true)
-    } else {
-        let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
-        let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
-        if let Some(ref et) = params.event_type { cq = cq.bind(et); }
-        if let Some(fl) = params.from_ledger { cq = cq.bind(fl); }
-        if let Some(tl) = params.to_ledger { cq = cq.bind(tl); }
-        let count = cq.fetch_one(&state.pool).await?;
-        (count, false)
     };
 
     Ok(Json(json!({
@@ -728,7 +740,7 @@ pub async fn get_events_by_contract(
     path = "/v1/events/tx/{tx_hash}",
     tag = "events",
     params(
-        ("tx_hash" = String, Path, description = "Transaction hash (64 lowercase hex chars)"),
+        ("tx_hash" = String, Path, description = "Transaction hash (64 hex chars, case-insensitive — normalized to lowercase)"),
     ),
     responses(
         (status = 200, description = "Events for the given transaction (empty array if none)"),
@@ -740,9 +752,25 @@ pub async fn get_events_by_tx(
     Path(tx_hash): Path<String>,
     Query(params): Query<PaginationParams>,
 ) -> Result<Json<Value>, AppError> {
+    // Normalize to lowercase so uppercase/mixed-case hashes from blockchain explorers work.
+    let tx_hash = tx_hash.to_lowercase();
     validate_tx_hash(&tx_hash)?;
 
     let columns = resolve_columns(&params)?;
+
+    let mut select_cols = columns.to_vec();
+    if !select_cols.contains(&"ledger") { select_cols.push("ledger"); }
+    if !select_cols.contains(&"id") { select_cols.push("id"); }
+
+    let query_str = format!(
+        "SELECT {} FROM events WHERE tx_hash = $1 ORDER BY ledger DESC, id DESC",
+        select_cols.join(", "),
+    );
+
+    let rows = sqlx::query(&query_str)
+        .bind(&tx_hash)
+        .fetch_all(&state.pool)
+        .await?;
 
     let events = rows_to_json(&rows, &columns)?;
 
