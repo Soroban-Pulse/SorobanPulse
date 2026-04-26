@@ -11,7 +11,7 @@ use uuid::Uuid;
 use chrono::{DateTime, Utc};
 
 use std::sync::atomic::Ordering;
-use crate::{error::AppError, models::{ContractSummary, PaginationParams, StreamParams}, routes::AppState};
+use crate::{error::AppError, models::{self, ContractSummary, PaginationParams, StreamParams}, routes::AppState};
 
 /// Simple in-process cache entry for the contracts list.
 struct CacheEntry {
@@ -625,10 +625,14 @@ pub async fn get_events(
     tag = "events",
     params(
         ("contract_id" = String, Path, description = "Stellar contract ID (56-char, starts with C)"),
+        ("page" = Option<i64>, Query, description = "Page number (default: 1)"),
+        ("limit" = Option<i64>, Query, description = "Results per page, 1–100 (default: 20)"),
+        ("from_ledger" = Option<i64>, Query, description = "Return events at or after this ledger"),
+        ("to_ledger" = Option<i64>, Query, description = "Return events at or before this ledger"),
     ),
     responses(
         (status = 200, description = "Events for the given contract"),
-        (status = 400, description = "Invalid contract_id format"),
+        (status = 400, description = "Invalid contract_id format or ledger range"),
         (status = 404, description = "No events found for contract"),
     )
 )]
@@ -639,26 +643,68 @@ pub async fn get_events_by_contract(
 ) -> Result<Json<Value>, AppError> {
     validate_contract_id(&contract_id)?;
 
+    // Validate ledger range
+    if let (Some(from), Some(to)) = (params.from_ledger, params.to_ledger) {
+        if from > to {
+            return Err(AppError::Validation(
+                "from_ledger must be <= to_ledger".to_string(),
+            ));
+        }
+    }
+
     let limit = params.limit();
     let offset = params.offset();
     let columns = params.columns();
 
-    let rows: Vec<models::Event> = sqlx::query_as::<_, models::Event>(
-        "SELECT * FROM events WHERE contract_id = $1 ORDER BY ledger DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(&contract_id)
-    .bind(limit)
-    .bind(offset)
-    .fetch_all(&state.pool)
-    .await?;
+    // Build query dynamically based on optional ledger filters
+    let mut conditions: Vec<String> = vec!["contract_id = $1".to_string()];
+    let mut bind_idx: i32 = 2;
+
+    if params.from_ledger.is_some() {
+        conditions.push(format!("ledger >= ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if params.to_ledger.is_some() {
+        conditions.push(format!("ledger <= ${bind_idx}"));
+        bind_idx += 1;
+    }
+
+    let where_clause = format!("WHERE {}", conditions.join(" AND "));
+    let query_str = format!(
+        "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, created_at, 0::bigint AS total_count \
+         FROM events {} ORDER BY ledger DESC LIMIT ${} OFFSET ${}",
+        where_clause, bind_idx, bind_idx + 1,
+    );
+
+    let mut q = sqlx::query_as::<_, models::Event>(&query_str).bind(&contract_id);
+    if let Some(fl) = params.from_ledger { q = q.bind(fl); }
+    if let Some(tl) = params.to_ledger { q = q.bind(tl); }
+    q = q.bind(limit).bind(offset);
+
+    let rows = q.fetch_all(&state.pool).await?;
 
     if rows.is_empty() {
         return Err(AppError::NotFound);
     }
 
-    let events = rows_to_json(&rows, &columns)?;
+    let events: Vec<Value> = rows.iter().map(|e| filter_fields(e, &columns)).collect();
 
-    Ok(Json(json!({ "data": events, "contract_id": contract_id })))
+    let mut response = json!({
+        "data": events,
+        "contract_id": contract_id,
+        "page": params.page.unwrap_or(1),
+        "limit": limit,
+    });
+
+    // Echo back applied filters for client confirmation
+    if let Some(fl) = params.from_ledger {
+        response["from_ledger"] = json!(fl);
+    }
+    if let Some(tl) = params.to_ledger {
+        response["to_ledger"] = json!(tl);
+    }
+
+    Ok(Json(response))
 }
 
 #[utoipa::path(
