@@ -109,14 +109,21 @@ impl PaginationParams {
         "created_at",
     ];
 
-    pub fn columns(&self) -> Vec<&str> {
+    pub fn columns(&self) -> Result<Vec<&str>, (Vec<String>, Vec<&'static str>)> {
         match &self.fields {
-            Some(f) if !f.trim().is_empty() => f
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| Self::ALLOWED_FIELDS.contains(s))
-                .collect(),
-            _ => Self::ALLOWED_FIELDS.to_vec(),
+            Some(f) if !f.trim().is_empty() => {
+                let requested: Vec<&str> = f.split(',').map(|s| s.trim()).collect();
+                let unknown: Vec<String> = requested
+                    .iter()
+                    .filter(|s| !Self::ALLOWED_FIELDS.contains(s))
+                    .map(|s| s.to_string())
+                    .collect();
+                if !unknown.is_empty() {
+                    return Err((unknown, Self::ALLOWED_FIELDS));
+                }
+                Ok(requested)
+            }
+            _ => Ok(Self::ALLOWED_FIELDS.to_vec()),
         }
     }
     pub fn offset(&self) -> i64 {
