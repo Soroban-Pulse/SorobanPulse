@@ -11,6 +11,7 @@ fn make(page: Option<i64>, limit: Option<i64>) -> PaginationParams {
         from_ledger: None,
         to_ledger: None,
         cursor: None,
+        sort: None,
     }
 }
 

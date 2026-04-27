@@ -61,6 +61,25 @@ pub struct PaginationParams {
     pub from_ledger: Option<i64>,
     pub to_ledger: Option<i64>,
     pub cursor: Option<String>,
+    pub sort: Option<SortOrder>,
+}
+
+/// Sort order for event list endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
+impl SortOrder {
+    /// Returns the SQL ORDER BY direction string.
+    pub fn as_sql(&self) -> &'static str {
+        match self {
+            SortOrder::Asc => "ASC",
+            SortOrder::Desc => "DESC",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -194,6 +213,7 @@ mod tests {
             from_ledger: None,
             to_ledger: None,
             cursor: None,
+            sort: None,
         }
     }
 
