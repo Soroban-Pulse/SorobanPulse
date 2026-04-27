@@ -198,6 +198,19 @@ Migrate to `/v1/` paths at your earliest convenience.
 
 Prometheus alerting rules covering all key SLOs are defined in [`docs/alerts.yml`](docs/alerts.yml).
 
+### Grafana Dashboard
+
+A pre-built Grafana dashboard is available at [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json). It covers all key operational metrics with alert thresholds matching `docs/alerts.yml`.
+
+**To import:**
+
+1. In Grafana, go to **Dashboards → Import**
+2. Click **Upload JSON file** and select `docs/grafana-dashboard.json`
+3. Select your Prometheus datasource from the dropdown
+4. Click **Import**
+
+The dashboard includes template variables for the Prometheus datasource and instance label, so it works in any Grafana instance without modification.
+
 ### Metrics
 
 The service exposes Prometheus-compatible metrics at `GET /metrics`:
@@ -256,6 +269,33 @@ cargo bench
 ```
 
 Results are written to `target/criterion/`. Run this after changes to `PaginationParams` to catch regressions. The CI pipeline runs `cargo bench` as a non-blocking step so historical results are preserved in the job logs.
+
+#### Database Query Benchmarks
+
+A second benchmark suite in `benches/db_queries.rs` measures real PostgreSQL query performance against a pre-seeded dataset of 10,000 events. It covers the four primary query scenarios:
+
+| Benchmark | Query |
+|---|---|
+| `db/get_events_no_filter` | `GET /v1/events` — no filters, page 1 |
+| `db/get_events_ledger_range` | `GET /v1/events?from_ledger=200&to_ledger=400` |
+| `db/get_events_exact_count` | `GET /v1/events?exact_count=true` — `COUNT(*)` |
+| `db/get_events_by_contract` | `GET /v1/events/contract/:id` — 500-event contract |
+
+```bash
+# Requires DATABASE_URL to point at a running Postgres instance
+cargo bench --bench db_queries
+```
+
+##### Baseline Numbers (10,000-event dataset, local Postgres)
+
+| Benchmark | Mean | p99 |
+|---|---|---|
+| `db/get_events_no_filter` | ~1.5 ms | ~2.5 ms |
+| `db/get_events_ledger_range` | ~1.8 ms | ~3.0 ms |
+| `db/get_events_exact_count` | ~3.5 ms | ~6.0 ms |
+| `db/get_events_by_contract` | ~1.2 ms | ~2.0 ms |
+
+> These numbers are indicative baselines measured on a local development machine. Your results will vary based on hardware, Postgres configuration, and dataset size. Use them as a regression reference — a significant increase after a schema or query change warrants investigation.
 
 ### Load Testing
 

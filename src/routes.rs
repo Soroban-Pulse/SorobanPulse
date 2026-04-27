@@ -47,6 +47,8 @@ pub struct AppState {
     pub sse_connections: Arc<AtomicUsize>,
     pub sse_max_connections: usize,
     pub health_check_timeout_ms: u64,
+    pub encryption_key: Option<[u8; 32]>,
+    pub encryption_key_old: Option<[u8; 32]>,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -66,16 +68,19 @@ pub struct AppState {
         handlers::stream_events,
         handlers::stream_events_by_contract,
         handlers::get_contracts,
+        handlers::replay_events,
     ),
     components(schemas(
         crate::models::Event,
         crate::models::EventType,
         crate::models::PaginationParams,
         crate::models::ContractSummary,
+        crate::models::ReplayRequest,
     )),
     tags(
         (name = "events", description = "Event indexing endpoints"),
         (name = "system", description = "Health and observability endpoints"),
+        (name = "admin", description = "Administrative endpoints"),
     )
 )]
 pub struct ApiDoc;
@@ -90,7 +95,11 @@ pub fn create_router(
     prometheus_handle: PrometheusHandle,
     health_check_timeout_ms: u64,
 ) -> Router {
+
     create_router_with_tx(pool.clone(), pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms)
+
+    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None)
+
 }
 
 pub fn create_router_with_tx(
@@ -107,6 +116,8 @@ pub fn create_router_with_tx(
     sse_keepalive_interval_ms: u64,
     sse_max_connections: usize,
     health_check_timeout_ms: u64,
+    encryption_key: Option<[u8; 32]>,
+    encryption_key_old: Option<[u8; 32]>,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_keys });
@@ -121,6 +132,8 @@ pub fn create_router_with_tx(
         sse_connections: Arc::new(AtomicUsize::new(0)),
         sse_max_connections,
         health_check_timeout_ms,
+        encryption_key,
+        encryption_key_old,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.
@@ -133,10 +146,18 @@ pub fn create_router_with_tx(
     let v1 = Router::new()
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::stream_events))
+
         .route("/events/contract/{contract_id}", get(handlers::get_events_by_contract))
         .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
         .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
         .route("/contracts", get(handlers::get_contracts));
+
+        .route("/events/contract/:contract_id", get(handlers::get_events_by_contract))
+        .route("/events/contract/:contract_id/stream", get(handlers::stream_events_by_contract))
+        .route("/events/tx/:tx_hash", get(handlers::get_events_by_tx))
+        .route("/contracts", get(handlers::get_contracts))
+        .route("/admin/replay", axum::routing::post(handlers::replay_events));
+
 
     // Unversioned deprecated aliases (same handlers, add Deprecation header via middleware)
     let deprecated = Router::new()
@@ -213,6 +234,7 @@ pub fn create_router_with_tx(
     Router::new()
         .merge(health_routes)
         .merge(rate_limited_routes)
+        .layer(axum::middleware::from_fn(middleware::security_headers_middleware))
         .layer(axum::middleware::from_fn(middleware::request_id_middleware))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,

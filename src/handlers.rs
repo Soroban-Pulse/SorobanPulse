@@ -11,9 +11,10 @@ use std::sync::OnceLock;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
+use reqwest;
 
 use std::sync::atomic::Ordering;
-use crate::{error::AppError, models::{self, ContractSummary, PaginationParams, StreamParams}, routes::AppState};
+use crate::{error::AppError, models::{self, ContractSummary, PaginationParams, StreamParams, ReplayRequest}, routes::AppState};
 
 /// Compute a lightweight ETag from the last event id, created_at, and total count.
 /// Uses SHA-256 truncated to 8 bytes, base64-encoded — no double-serialization needed.
@@ -63,7 +64,7 @@ fn decode_cursor(cursor: &str) -> Result<(i64, Uuid), AppError> {
 }
 
 /// Map sqlx rows to a JSON array, projecting only the requested columns.
-fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str]) -> Result<Vec<Value>, AppError> {
+fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str], enc_key: Option<&[u8; 32]>, enc_key_old: Option<&[u8; 32]>) -> Result<Vec<Value>, AppError> {
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
         let mut event = serde_json::Map::new();
@@ -75,7 +76,11 @@ fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str]) -> Result<Vec<
                 "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
                 "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
                 "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
+                "event_data" => {
+                    let raw: Value = row.try_get::<Value, _>(col)?;
+                    let decrypted = decrypt_event_data(&raw, enc_key, enc_key_old);
+                    event.insert(col.to_string(), decrypted);
+                }
                 "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
                 _ => {}
             }
@@ -432,8 +437,11 @@ async fn stream_events_internal(
     };
 
     let rx = state.event_tx.subscribe();
+    let enc_key = state.encryption_key;
+    let enc_key_old = state.encryption_key_old;
 
-    let replay_stream = stream::iter(replay.into_iter().map(move |ev| {
+    let replay_stream = stream::iter(replay.into_iter().map(move |mut ev| {
+        ev.event_data = decrypt_event_data(&ev.event_data, enc_key.as_ref(), enc_key_old.as_ref());
         let data = serde_json::to_string(&ev).unwrap_or_default();
         Ok(Event::default()
             .id(ev.id.to_string())
@@ -491,8 +499,20 @@ async fn stream_events_internal(
     ))
 }
 
+/// Decrypt event_data if an encryption key is configured.
+fn decrypt_event_data(raw: &Value, key: Option<&[u8; 32]>, old_key: Option<&[u8; 32]>) -> Value {
+    if let Some(k) = key {
+        crate::encryption::decrypt(k, old_key, raw).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to decrypt event_data, returning raw value");
+            raw.clone()
+        })
+    } else {
+        raw.clone()
+    }
+}
+
 /// Converts an `Event` to a JSON object containing only the requested fields.
-fn filter_fields(event: &models::Event, columns: &[&str]) -> Value {
+fn filter_fields(event: &models::Event, columns: &[&str], enc_key: Option<&[u8; 32]>, enc_key_old: Option<&[u8; 32]>) -> Value {
     let mut map = serde_json::Map::new();
     for &col in columns {
         match col {
@@ -502,7 +522,10 @@ fn filter_fields(event: &models::Event, columns: &[&str]) -> Value {
             "tx_hash"     => { map.insert(col.to_string(), json!(event.tx_hash)); }
             "ledger"      => { map.insert(col.to_string(), json!(event.ledger)); }
             "timestamp"   => { map.insert(col.to_string(), json!(event.timestamp)); }
-            "event_data"  => { map.insert(col.to_string(), event.event_data.clone()); }
+            "event_data"  => {
+                let decrypted = decrypt_event_data(&event.event_data, enc_key, enc_key_old);
+                map.insert(col.to_string(), decrypted);
+            }
             "created_at"  => { map.insert(col.to_string(), json!(event.created_at)); }
             _ => {}
         }
@@ -521,6 +544,7 @@ fn filter_fields(event: &models::Event, columns: &[&str]) -> Value {
         ("event_type" = Option<EventType>, Query, description = "Filter by event type: contract, diagnostic, system"),
         ("from_ledger" = Option<i64>, Query, description = "Return events at or after this ledger"),
         ("to_ledger" = Option<i64>, Query, description = "Return events at or before this ledger"),
+        ("contract_id" = Option<String>, Query, description = "Filter by contract ID (56-char Stellar contract address starting with C)"),
     ),
     responses(
         (status = 200, description = "Paginated list of events"),
@@ -542,6 +566,11 @@ pub async fn get_events(
         }
     }
 
+    // Validate contract_id if provided
+    if let Some(ref cid) = params.contract_id {
+        validate_contract_id(cid)?;
+    }
+
     let limit = params.limit();
     let columns = resolve_columns(&params)?;
 
@@ -554,6 +583,10 @@ pub async fn get_events(
         ];
         let mut bind_idx: i32 = 3;
 
+        if params.contract_id.is_some() {
+            conditions.push(format!("contract_id = ${bind_idx}"));
+            bind_idx += 1;
+        }
         if params.event_type.is_some() {
             conditions.push(format!("event_type = ${bind_idx}"));
             bind_idx += 1;
@@ -583,6 +616,7 @@ pub async fn get_events(
         let mut q = sqlx::query(&query_str)
             .bind(cursor_ledger)
             .bind(cursor_id);
+        if let Some(ref cid) = params.contract_id { q = q.bind(cid); }
         if let Some(ref et) = params.event_type { q = q.bind(et); }
         if let Some(fl) = params.from_ledger { q = q.bind(fl); }
         if let Some(tl) = params.to_ledger { q = q.bind(tl); }
@@ -600,7 +634,7 @@ pub async fn get_events(
             None
         };
 
-        let events = rows_to_json(&rows, &columns)?;
+        let events = rows_to_json(&rows, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())?;
 
         return Ok(Json(json!({
             "data": events,
@@ -616,6 +650,10 @@ pub async fn get_events(
     let mut conditions: Vec<String> = Vec::new();
     let mut bind_idx: i32 = 1;
 
+    if params.contract_id.is_some() {
+        conditions.push(format!("contract_id = ${bind_idx}"));
+        bind_idx += 1;
+    }
     if params.event_type.is_some() {
         conditions.push(format!("event_type = ${bind_idx}"));
         bind_idx += 1;
@@ -650,6 +688,7 @@ pub async fn get_events(
     );
 
     let mut q = sqlx::query(&query_str);
+    if let Some(ref cid) = params.contract_id { q = q.bind(cid); }
     if let Some(ref et) = params.event_type { q = q.bind(et); }
     if let Some(fl) = params.from_ledger { q = q.bind(fl); }
     if let Some(tl) = params.to_ledger { q = q.bind(tl); }
@@ -667,11 +706,12 @@ pub async fn get_events(
         None
     };
 
-    let events = rows_to_json(&rows, &columns)?;
+    let events = rows_to_json(&rows, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())?;
 
     let (total, approximate): (i64, bool) = if exact || !conditions.is_empty() {
         let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
         let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
+        if let Some(ref cid) = params.contract_id { cq = cq.bind(cid); }
         if let Some(ref et) = params.event_type { cq = cq.bind(et); }
         if let Some(fl) = params.from_ledger { cq = cq.bind(fl); }
         if let Some(tl) = params.to_ledger { cq = cq.bind(tl); }
@@ -800,7 +840,7 @@ pub async fn get_events_by_contract(
         return Err(AppError::NotFound);
     }
 
-    let events: Vec<Value> = rows.iter().map(|e| filter_fields(e, &columns)).collect();
+    let events: Vec<Value> = rows.iter().map(|e| filter_fields(e, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())).collect();
 
     let mut response = json!({
         "data": events,
@@ -857,7 +897,7 @@ pub async fn get_events_by_tx(
         .fetch_all(&state.read_pool)
         .await?;
 
-    let events = rows_to_json(&rows, &columns)?;
+    let events = rows_to_json(&rows, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())?;
 
     Ok(Json(json!({ "data": events, "tx_hash": tx_hash })))
 }
@@ -924,6 +964,189 @@ pub async fn get_contracts(
     Ok(Json(result))
 }
 
+/// Replay events for a specific ledger range
+#[utoipa::path(
+    post,
+    path = "/v1/admin/replay",
+    tag = "admin",
+    request_body(content = ReplayRequest, description = "Ledger range to replay", content_type = "application/json"),
+    responses(
+        (status = 202, description = "Replay job accepted and queued"),
+        (status = 401, description = "Unauthorized - API key required"),
+        (status = 403, description = "Forbidden - not the active indexer"),
+        (status = 400, description = "Invalid request parameters"),
+    )
+)]
+pub async fn replay_events(
+    State(state): State<AppState>,
+    Json(request): Json<models::ReplayRequest>,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
+    // Validate ledger range
+    if request.from_ledger > request.to_ledger {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "from_ledger must be <= to_ledger"
+            }))
+        ));
+    }
+
+    // Validate range size (max 10,000 ledgers)
+    let range_size = request.to_ledger.saturating_sub(request.from_ledger) + 1;
+    if range_size > 10_000 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "ledger range cannot exceed 10,000 ledgers"
+            }))
+        ));
+    }
+
+    // Check if this replica is the active indexer (holds the advisory lock)
+    let is_active = state.indexer_state.is_active_indexer.load(std::sync::atomic::Ordering::Relaxed);
+    if !is_active {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "replay endpoint only available on active indexer"
+            }))
+        ));
+    }
+
+    // Record the replay job metric
+    crate::metrics::record_replay_job();
+
+    // Spawn background task to handle the replay
+    let pool = state.pool.clone();
+    let rpc_url = state.config.stellar_rpc_url.clone();
+    let from_ledger = request.from_ledger;
+    let to_ledger = request.to_ledger;
+    
+    tokio::spawn(async move {
+        if let Err(e) = execute_replay_job(pool, &rpc_url, from_ledger, to_ledger).await {
+            tracing::error!(error = %e, "Replay job failed");
+        }
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "message": "replay job accepted",
+            "from_ledger": request.from_ledger,
+            "to_ledger": request.to_ledger
+        }))
+    ))
+}
+
+/// Execute the replay job using the same fetch_and_store_events logic
+async fn execute_replay_job(
+    pool: sqlx::PgPool,
+    rpc_url: &str,
+    from_ledger: u64,
+    to_ledger: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing::info!(from_ledger = from_ledger, to_ledger = to_ledger, "Starting replay job");
+
+    // Create RPC client
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(60))
+        .build()?;
+
+    let mut current_ledger = from_ledger;
+    
+    while current_ledger <= to_ledger {
+        // Fetch events for current ledger range
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getEvents",
+            "params": {
+                "filters": [],
+                "pagination": {"limit": 100},
+                "startLedger": current_ledger
+            }
+        });
+
+        let response = client
+            .post(rpc_url)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(format!("RPC request failed: {}", response.status()).into());
+        }
+
+        let rpc_response: crate::models::RpcResponse<crate::models::GetEventsResult> = 
+            response.json().await?;
+
+        let result = match rpc_response.result {
+            Some(r) => r,
+            None => {
+                if let Some(err) = rpc_response.error {
+                    return Err(format!("RPC error: {}", err.message).into());
+                } else {
+                    return Err("RPC returned no result".into());
+                }
+            }
+        };
+
+        // Store events with ON CONFLICT DO NOTHING for idempotency
+        for event in result.events {
+            if let Err(e) = store_event_with_idempotency(&pool, &event).await {
+                tracing::warn!(error = %e, "Failed to store event during replay");
+            }
+        }
+
+        // Move to next ledger or break if we've reached the end
+        if result.latest_ledger >= current_ledger {
+            current_ledger = result.latest_ledger + 1;
+        } else {
+            break;
+        }
+
+        // Add small delay to avoid overwhelming the RPC
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    tracing::info!(from_ledger = from_ledger, to_ledger = to_ledger, "Replay job completed");
+    Ok(())
+}
+
+/// Store event with idempotency using ON CONFLICT DO NOTHING
+async fn store_event_with_idempotency(
+    pool: &sqlx::PgPool,
+    event: &crate::models::SorobanEvent,
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
+    let ledger = i64::try_from(event.ledger)?;
+    let timestamp = DateTime::parse_from_rfc3339(&event.ledger_closed_at)
+        .map(|dt| dt.with_timezone(&chrono::Utc))?;
+
+    let event_data = serde_json::json!({
+        "value": event.value,
+        "topic": event.topic
+    });
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING
+        "#,
+    )
+    .bind(&event.contract_id)
+    .bind(&event.event_type)
+    .bind(&event.tx_hash)
+    .bind(ledger)
+    .bind(timestamp)
+    .bind(event_data)
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,7 +1162,12 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let indexer_state = Arc::new(IndexerState::new());
         let prometheus_handle = crate::metrics::init_metrics();
+
         crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000)
+
+        let config = crate::config::Config::default();
+        crate::routes::create_router(pool, None, &[], 60, health_state, indexer_state, prometheus_handle, 2000, config)
+
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2250,6 +2478,7 @@ mod tests {
         assert!(v["next_cursor"].is_string(), "offset path must also return next_cursor");
     }
 
+
     // --- ETag / conditional GET tests ---
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2323,5 +2552,313 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         // No rows → no ETag
         assert!(resp.headers().get("etag").is_none());
+
+    // Replay endpoint tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_endpoint_requires_api_key(pool: PgPool) {
+        let app = create_test_router(pool);
+        let replay_request = ReplayRequest {
+            from_ledger: 100,
+            to_ledger: 200,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/replay")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&replay_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        // Should return 401 when no API key is provided (since test router has no API keys configured)
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "unauthorized");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_endpoint_validates_ledger_range(pool: PgPool) {
+        let health_state = Arc::new(HealthState::new(60));
+        let indexer_state = Arc::new(IndexerState::new());
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        
+        // Create router with API key to bypass auth
+        let app = crate::routes::create_router(
+            pool, 
+            vec!["test-key".to_string()], 
+            &[], 
+            60, 
+            health_state, 
+            indexer_state, 
+            prometheus_handle, 
+            2000, 
+            config
+        );
+
+        // Test invalid range: from_ledger > to_ledger
+        let replay_request = ReplayRequest {
+            from_ledger: 200,
+            to_ledger: 100,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/replay")
+                    .header("Authorization", "Bearer test-key")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&replay_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "from_ledger must be <= to_ledger");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_endpoint_validates_range_size(pool: PgPool) {
+        let health_state = Arc::new(HealthState::new(60));
+        let indexer_state = Arc::new(IndexerState::new());
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        
+        // Create router with API key to bypass auth
+        let app = crate::routes::create_router(
+            pool, 
+            vec!["test-key".to_string()], 
+            &[], 
+            60, 
+            health_state, 
+            indexer_state, 
+            prometheus_handle, 
+            2000, 
+            config
+        );
+
+        // Test range too large: > 10,000 ledgers
+        let replay_request = ReplayRequest {
+            from_ledger: 1,
+            to_ledger: 15000,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/replay")
+                    .header("Authorization", "Bearer test-key")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&replay_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "ledger range cannot exceed 10,000 ledgers");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_endpoint_returns_403_when_not_active_indexer(pool: PgPool) {
+        let health_state = Arc::new(HealthState::new(60));
+        let mut indexer_state = Arc::new(IndexerState::new());
+        
+        // Set indexer as not active
+        indexer_state.is_active_indexer.store(false, std::sync::atomic::Ordering::Relaxed);
+        
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        
+        // Create router with API key to bypass auth
+        let app = crate::routes::create_router(
+            pool, 
+            vec!["test-key".to_string()], 
+            &[], 
+            60, 
+            health_state, 
+            indexer_state, 
+            prometheus_handle, 
+            2000, 
+            config
+        );
+
+        let replay_request = ReplayRequest {
+            from_ledger: 100,
+            to_ledger: 200,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/replay")
+                    .header("Authorization", "Bearer test-key")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&replay_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "replay endpoint only available on active indexer");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_endpoint_accepts_valid_request(pool: PgPool) {
+        let health_state = Arc::new(HealthState::new(60));
+        let mut indexer_state = Arc::new(IndexerState::new());
+        
+        // Set indexer as active
+        indexer_state.is_active_indexer.store(true, std::sync::atomic::Ordering::Relaxed);
+        
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        
+        // Create router with API key to bypass auth
+        let app = crate::routes::create_router(
+            pool, 
+            vec!["test-key".to_string()], 
+            &[], 
+            60, 
+            health_state, 
+            indexer_state, 
+            prometheus_handle, 
+            2000, 
+            config
+        );
+
+        let replay_request = ReplayRequest {
+            from_ledger: 100,
+            to_ledger: 200,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/replay")
+                    .header("Authorization", "Bearer test-key")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&replay_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["message"], "replay job accepted");
+        assert_eq!(v["from_ledger"], 100);
+        assert_eq!(v["to_ledger"], 200);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_endpoint_accepts_x_api_key_header(pool: PgPool) {
+        let health_state = Arc::new(HealthState::new(60));
+        let mut indexer_state = Arc::new(IndexerState::new());
+        
+        // Set indexer as active
+        indexer_state.is_active_indexer.store(true, std::sync::atomic::Ordering::Relaxed);
+        
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        
+        // Create router with API key to bypass auth
+        let app = crate::routes::create_router(
+            pool, 
+            vec!["test-key".to_string()], 
+            &[], 
+            60, 
+            health_state, 
+            indexer_state, 
+            prometheus_handle, 
+            2000, 
+            config
+        );
+
+        let replay_request = ReplayRequest {
+            from_ledger: 100,
+            to_ledger: 200,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/replay")
+                    .header("X-Api-Key", "test-key")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&replay_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["message"], "replay job accepted");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn replay_endpoint_rejects_invalid_api_key(pool: PgPool) {
+        let health_state = Arc::new(HealthState::new(60));
+        let indexer_state = Arc::new(IndexerState::new());
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        
+        // Create router with API key
+        let app = crate::routes::create_router(
+            pool, 
+            vec!["correct-key".to_string()], 
+            &[], 
+            60, 
+            health_state, 
+            indexer_state, 
+            prometheus_handle, 
+            2000, 
+            config
+        );
+
+        let replay_request = ReplayRequest {
+            from_ledger: 100,
+            to_ledger: 200,
+        };
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/replay")
+                    .header("Authorization", "Bearer wrong-key")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&replay_request).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "unauthorized");
+
     }
 }

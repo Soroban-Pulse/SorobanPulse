@@ -62,6 +62,46 @@ pub async fn auth_middleware(
     Ok(next.run(req).await)
 }
 
+pub async fn security_headers_middleware(
+    req: Request,
+    next: Next,
+) -> Response {
+    let path = req.uri().path();
+    let mut response = next.run(req).await;
+    
+    // Set standard security headers for all responses
+    response.headers_mut().insert(
+        "X-Content-Type-Options",
+        "nosniff".parse().unwrap(),
+    );
+    
+    response.headers_mut().insert(
+        "X-Frame-Options",
+        "DENY".parse().unwrap(),
+    );
+    
+    response.headers_mut().insert(
+        "Referrer-Policy",
+        "strict-origin-when-cross-origin".parse().unwrap(),
+    );
+    
+    // Set CSP header with different policies for /docs vs other routes
+    let csp = if path == "/docs" {
+        // For Swagger UI, allow unpkg.com for scripts and styles
+        "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com; img-src 'self' data:; connect-src 'self';"
+    } else {
+        // Restrictive CSP for all other routes
+        "default-src 'self';"
+    };
+    
+    response.headers_mut().insert(
+        "Content-Security-Policy",
+        csp.parse().unwrap(),
+    );
+    
+    response
+}
+
 pub async fn cache_middleware(
     req: Request,
     next: Next,
@@ -123,7 +163,7 @@ mod tests {
     use super::*;
     use axum::{routing::get, Router};
     use tower::ServiceExt;
-    use axum::http::{Request, StatusCode};
+    use axum::http::{Request, StatusCode, HeaderValue};
     use axum::body::Body;
     use axum::response::Response;
 
@@ -252,5 +292,107 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    async fn setup_security_test_app() -> Router {
+        Router::new()
+            .route("/test", get(|| async { "OK" }))
+            .route("/docs", get(|| async { "Swagger UI" }))
+            .layer(axum::middleware::from_fn(security_headers_middleware))
+    }
+
+    #[tokio::test]
+    async fn test_security_headers_on_regular_route() {
+        let app = setup_security_test_app().await;
+        
+        let response = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        
+        assert_eq!(response.status(), StatusCode::OK);
+        
+        // Verify X-Content-Type-Options header
+        assert_eq!(
+            response.headers().get("X-Content-Type-Options"),
+            Some(&HeaderValue::from_static("nosniff"))
+        );
+        
+        // Verify X-Frame-Options header
+        assert_eq!(
+            response.headers().get("X-Frame-Options"),
+            Some(&HeaderValue::from_static("DENY"))
+        );
+        
+        // Verify Referrer-Policy header
+        assert_eq!(
+            response.headers().get("Referrer-Policy"),
+            Some(&HeaderValue::from_static("strict-origin-when-cross-origin"))
+        );
+        
+        // Verify restrictive CSP header for regular routes
+        assert_eq!(
+            response.headers().get("Content-Security-Policy"),
+            Some(&HeaderValue::from_static("default-src 'self';"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_security_headers_on_docs_route() {
+        let app = setup_security_test_app().await;
+        
+        let response = app
+            .oneshot(Request::builder().uri("/docs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        
+        assert_eq!(response.status(), StatusCode::OK);
+        
+        // Verify standard security headers are still present
+        assert_eq!(
+            response.headers().get("X-Content-Type-Options"),
+            Some(&HeaderValue::from_static("nosniff"))
+        );
+        
+        assert_eq!(
+            response.headers().get("X-Frame-Options"),
+            Some(&HeaderValue::from_static("DENY"))
+        );
+        
+        assert_eq!(
+            response.headers().get("Referrer-Policy"),
+            Some(&HeaderValue::from_static("strict-origin-when-cross-origin"))
+        );
+        
+        // Verify permissive CSP header for /docs route that allows unpkg.com
+        let expected_csp = "default-src 'self'; script-src 'self' https://unpkg.com; style-src 'self' https://unpkg.com; img-src 'self' data:; connect-src 'self';";
+        assert_eq!(
+            response.headers().get("Content-Security-Policy"),
+            Some(&HeaderValue::from_static(expected_csp))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_all_security_headers_present() {
+        let app = setup_security_test_app().await;
+        
+        let response = app
+            .oneshot(Request::builder().uri("/test").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        
+        let headers = response.headers();
+        
+        // Verify all required security headers are present
+        assert!(headers.contains_key("X-Content-Type-Options"));
+        assert!(headers.contains_key("X-Frame-Options"));
+        assert!(headers.contains_key("Referrer-Policy"));
+        assert!(headers.contains_key("Content-Security-Policy"));
+        
+        // Verify header values are not empty
+        assert!(!headers.get("X-Content-Type-Options").unwrap().is_empty());
+        assert!(!headers.get("X-Frame-Options").unwrap().is_empty());
+        assert!(!headers.get("Referrer-Policy").unwrap().is_empty());
+        assert!(!headers.get("Content-Security-Policy").unwrap().is_empty());
     }
 }
