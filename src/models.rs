@@ -58,11 +58,14 @@ pub struct PaginationParams {
     pub limit: Option<i64>,
     pub exact_count: Option<bool>,
     pub fields: Option<String>,
+    pub contract_id: Option<String>,
     pub event_type: Option<EventType>,
     pub from_ledger: Option<i64>,
     pub to_ledger: Option<i64>,
     pub cursor: Option<String>,
     pub sort: Option<SortOrder>,
+    /// Filter by the first topic symbol (uses topic_0_sym generated column index).
+    pub topic_sym: Option<String>,
 }
 
 /// Sort order for event list endpoints.
@@ -139,6 +142,13 @@ pub struct ExportParams {
 pub struct ReplayRequest {
     pub from_ledger: u64,
     pub to_ledger: u64,
+}
+
+/// Request body for the batch tx-hash lookup endpoint.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchTxRequest {
+    /// List of transaction hashes to look up (max 100).
+    pub hashes: Vec<String>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
@@ -242,11 +252,13 @@ mod tests {
             limit,
             exact_count: None,
             fields: None,
+            contract_id: None,
             event_type: None,
             from_ledger: None,
             to_ledger: None,
             cursor: None,
             sort: None,
+            topic_sym: None,
         }
     }
 
