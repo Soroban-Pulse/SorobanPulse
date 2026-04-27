@@ -67,6 +67,10 @@ pub fn record_webhook_failure() {
     m::counter!("soroban_pulse_webhook_failures_total", 1u64);
 }
 
+pub fn record_replay_job() {
+    m::counter!("soroban_pulse_replay_jobs_total", 1u64);
+}
+
 /// Record HTTP request duration
 pub fn record_http_request_duration(duration: std::time::Duration, method: &str, route: &str, status: &str) {
     m::histogram!("soroban_pulse_http_request_duration_seconds", duration.as_secs_f64(), "method" => method.to_string(), "route" => route.to_string(), "status" => status.to_string());

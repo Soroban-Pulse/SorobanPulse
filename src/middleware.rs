@@ -66,7 +66,7 @@ pub async fn security_headers_middleware(
     req: Request,
     next: Next,
 ) -> Response {
-    let path = req.uri().path();
+    let path = req.uri().path().to_owned();
     let mut response = next.run(req).await;
     
     // Set standard security headers for all responses

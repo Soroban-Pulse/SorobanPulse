@@ -1,7 +1,6 @@
 use axum::{body::Body, routing::get, Router};
 use axum::http::{HeaderValue, Method, Request};
 use axum::extract::MatchedPath;
-use reqwest::Client as HttpClient;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -23,7 +22,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use uuid::Uuid;
 use utoipa::OpenApi;
 
-use crate::{config::{HealthState, IndexerState}, handlers, middleware, metrics, models::SorobanEvent, subscriptions};
+use crate::{config::{Config, HealthState, IndexerState}, handlers, middleware, metrics, models::SorobanEvent, subscriptions};
 
 type ContractCountCache = moka::future::Cache<String, i64>;
 
@@ -68,9 +67,11 @@ pub struct AppState {
         handlers::health,
         handlers::status,
         handlers::get_events,
+        handlers::get_event_stats,
         handlers::export_events,
         handlers::get_events_by_contract,
         handlers::get_events_by_tx,
+        handlers::get_events_by_tx_batch,
         handlers::stream_events,
         handlers::stream_events_by_contract,
         handlers::stream_events_multi,
@@ -84,7 +85,10 @@ pub struct AppState {
         crate::models::SortOrder,
         crate::models::PaginationParams,
         crate::models::ContractSummary,
+        crate::models::EventStats,
+        crate::models::ContractStatEntry,
         crate::models::ReplayRequest,
+        crate::models::BatchTxRequest,
         crate::models::ErrorResponse,
     )),
     tags(
@@ -104,13 +108,8 @@ pub fn create_router(
     indexer_state: Arc<IndexerState>,
     prometheus_handle: PrometheusHandle,
     health_check_timeout_ms: u64,
-    config: crate::config::Config,
 ) -> Router {
-
-    create_router_with_tx(pool.clone(), pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms)
-
-    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None)
-
+    create_router_with_tx(pool.clone(), pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None, config)
 }
 
 pub fn create_router_with_tx(
@@ -163,22 +162,19 @@ pub fn create_router_with_tx(
     // Versioned v1 routes
     let v1 = Router::new()
         .route("/events", get(handlers::get_events))
+        .route("/events/stats", get(handlers::get_event_stats))
         .route("/events/export", get(handlers::export_events))
         .route("/events/stream", get(handlers::stream_events))
-
+        .route("/events/stream/multi", get(handlers::stream_events_multi))
         .route("/events/contract/{contract_id}", get(handlers::get_events_by_contract))
         .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
+        .route("/events/tx/batch", axum::routing::post(handlers::get_events_by_tx_batch))
         .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
-        .route("/contracts", get(handlers::get_contracts));
-
-        .route("/events/contract/:contract_id", get(handlers::get_events_by_contract))
-        .route("/events/contract/:contract_id/stream", get(handlers::stream_events_by_contract))
-        .route("/events/tx/:tx_hash", get(handlers::get_events_by_tx))
         .route("/contracts", get(handlers::get_contracts))
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
         .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
-        .route("/subscriptions/:id", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
-        .route("/subscriptions/:id/ack", axum::routing::post(subscriptions::ack_subscription));
+        .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
+        .route("/subscriptions/{id}/ack", axum::routing::post(subscriptions::ack_subscription));
 
 
     // Unversioned deprecated aliases (same handlers, add Deprecation header via middleware)
@@ -262,7 +258,9 @@ pub fn create_router_with_tx(
             auth_state,
             middleware::auth_middleware,
         ))
-        .layer(axum::middleware::from_fn(move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
+        .layer(axum::middleware::from_fn({
+            let slow_request_threshold_ms = 1000u64;
+            move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
             let method = req.method().as_str().to_string();
             let route = req.extensions()
                 .get::<MatchedPath>()
@@ -278,7 +276,7 @@ pub fn create_router_with_tx(
             let duration = start.elapsed();
             let status = response.status().as_u16().to_string();
             metrics::record_http_request_duration(duration, &method, &route, &status);
-            if duration.as_millis() as u64 > slow_request_threshold_ms {
+            if duration.as_millis() as u64 > 500 {
                 tracing::warn!(
                     method = %method,
                     path = %route,
@@ -289,7 +287,7 @@ pub fn create_router_with_tx(
                 );
             }
             response
-        }))
+        }}))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {

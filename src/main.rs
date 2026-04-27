@@ -12,6 +12,7 @@ mod error;
 mod handlers;
 mod index_monitor;
 mod indexer;
+mod kafka;
 mod metrics;
 mod middleware;
 mod models;
@@ -131,6 +132,9 @@ async fn main() -> anyhow::Result<()> {
             config.db_max_connections,
             config.db_min_connections,
             config.db_statement_timeout_ms,
+            config.db_idle_timeout_secs,
+            config.db_max_lifetime_secs,
+            config.db_test_before_acquire,
         )
         .await
         {
@@ -203,6 +207,18 @@ async fn main() -> anyhow::Result<()> {
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
+    #[cfg(feature = "kafka")]
+    if let (Some(brokers), Some(topic)) = (&config.kafka_brokers, &config.kafka_topic) {
+        match crate::kafka::RdKafkaProducer::new(brokers, config.kafka_batch_size, config.kafka_linger_ms) {
+            Ok(producer) => {
+                info!(brokers = %brokers, topic = %topic, "Kafka publishing enabled");
+                indexer.set_kafka_publisher(std::sync::Arc::new(producer), topic.clone());
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create Kafka producer — Kafka publishing disabled");
+            }
+        }
+    }
     let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });
@@ -243,29 +259,6 @@ async fn main() -> anyhow::Result<()> {
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
     info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
 
-    let router = routes::create_router_with_tx(pool, read_pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, config.behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, 2000);
-
-    info!(addr = %addr, "Soroban Pulse listening");
-
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        error!(addr = %addr, "Address already in use");
-        e
-    })?;
-
-    info!(behind_proxy = config.behind_proxy, "Running server - trusting X-Forwarded-For");
-
-    // Use regular make_service since we handle connect_info through middleware
-    // Use the router directly as it implements Service for incoming connections
-    axum::serve(
-        listener,
-        router,
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown_rx_axum.changed().await;
-    })
-    .await?;
-
-
     // When TLS is enabled directly, BEHIND_PROXY is forced false — no proxy in front.
     let behind_proxy = match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(_), Some(_)) => {
@@ -277,7 +270,7 @@ async fn main() -> anyhow::Result<()> {
         _ => config.behind_proxy,
     };
 
-    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.health_check_timeout_ms, config.event_data_encryption_key, config.event_data_encryption_key_old, config.clone());
+    let router = routes::create_router_with_tx(pool, read_pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.health_check_timeout_ms, config.event_data_encryption_key, config.event_data_encryption_key_old, config.clone());
 
     match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(cert_path), Some(key_path)) => {

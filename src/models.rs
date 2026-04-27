@@ -58,11 +58,14 @@ pub struct PaginationParams {
     pub limit: Option<i64>,
     pub exact_count: Option<bool>,
     pub fields: Option<String>,
+    pub contract_id: Option<String>,
     pub event_type: Option<EventType>,
     pub from_ledger: Option<i64>,
     pub to_ledger: Option<i64>,
     pub cursor: Option<String>,
     pub sort: Option<SortOrder>,
+    /// Filter by the first topic symbol (uses topic_0_sym generated column index).
+    pub topic_sym: Option<String>,
 }
 
 /// Sort order for event list endpoints.
@@ -141,11 +144,46 @@ pub struct ReplayRequest {
     pub to_ledger: u64,
 }
 
+/// Request body for the batch tx-hash lookup endpoint.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchTxRequest {
+    /// List of transaction hashes to look up (max 100).
+    pub hashes: Vec<String>,
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ContractSummary {
     pub contract_id: String,
     pub event_count: i64,
     pub latest_ledger: i64,
+}
+
+/// Aggregate statistics for indexed events.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EventStats {
+    /// Total number of indexed events.
+    pub total_events: i64,
+    /// Events indexed in the last 24 hours.
+    pub events_last_24h: i64,
+    /// Events indexed in the last 7 days.
+    pub events_last_7d: i64,
+    /// Top 10 most active contracts by event count.
+    pub top_contracts: Vec<ContractStatEntry>,
+    /// Event count broken down by type.
+    pub events_by_type: std::collections::HashMap<String, i64>,
+    /// Minimum ledger sequence number in the dataset.
+    pub min_ledger: Option<i64>,
+    /// Maximum ledger sequence number in the dataset.
+    pub max_ledger: Option<i64>,
+    /// Timestamp when these statistics were computed.
+    pub computed_at: DateTime<Utc>,
+}
+
+/// A single entry in the top-contracts list.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ContractStatEntry {
+    pub contract_id: String,
+    pub event_count: i64,
 }
 
 impl PaginationParams {
@@ -242,11 +280,13 @@ mod tests {
             limit,
             exact_count: None,
             fields: None,
+            contract_id: None,
             event_type: None,
             from_ledger: None,
             to_ledger: None,
             cursor: None,
             sort: None,
+            topic_sym: None,
         }
     }
 
