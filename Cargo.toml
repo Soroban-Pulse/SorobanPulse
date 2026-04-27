@@ -32,6 +32,7 @@ async-trait = "0.1"
 tower_governor = { version = "0.8", features = ["axum"] }
 base64 = "0.22"
 sha2 = "0.10"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]

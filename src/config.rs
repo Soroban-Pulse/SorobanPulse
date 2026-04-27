@@ -133,6 +133,8 @@ pub struct Config {
     pub environment: Environment,
     pub max_body_size_bytes: usize,
     pub log_sample_rate: u32,
+    pub tls_cert_file: Option<String>,
+    pub tls_key_file: Option<String>,
 }
 
 impl Default for Config {
@@ -161,6 +163,8 @@ impl Default for Config {
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
             log_sample_rate: 1,
+            tls_cert_file: None,
+            tls_key_file: None,
         }
     }
 }
@@ -384,6 +388,8 @@ impl Config {
                 assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
                 v
             },
+            tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
+            tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),
         }
     }
 }
