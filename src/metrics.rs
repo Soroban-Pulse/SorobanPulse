@@ -177,7 +177,8 @@ mod tests {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
             .min_connections(1)
-            .connect_lazy("postgres://localhost/test");
+            .connect_lazy("postgres://localhost/test")
+            .unwrap();
         
         // This should not panic
         update_db_pool_metrics(&pool);

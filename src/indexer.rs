@@ -18,7 +18,7 @@ use crate::{
 #[async_trait::async_trait]
 pub trait RpcClient: Send + Sync {
     async fn get_latest_ledger(&self, rpc_url: &str) -> Result<u64, String>;
-    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>) -> Result<GetEventsResult, String>;
+    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String>;
 }
 
 /// Postgres advisory lock key for the indexer singleton.
@@ -35,6 +35,8 @@ enum IndexerFetchError {
 
 pub struct SorobanRpcClient {
     client: reqwest::Client,
+    /// Custom headers injected into every RPC request. Values are never logged.
+    headers: reqwest::header::HeaderMap,
 }
 
 impl SorobanRpcClient {
@@ -47,7 +49,17 @@ impl SorobanRpcClient {
             .tcp_keepalive(Duration::from_secs(60))
             .build()
             .expect("Failed to build HTTP client");
-        Self { client }
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in &config.rpc_headers {
+            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .unwrap_or_else(|_| panic!("Invalid RPC header name: {name}"));
+            let header_value = reqwest::header::HeaderValue::from_str(value)
+                .unwrap_or_else(|_| panic!("Invalid RPC header value for '{name}'"));
+            headers.insert(header_name, header_value);
+        }
+
+        Self { client, headers }
     }
 }
 
@@ -66,6 +78,7 @@ impl RpcClient for SorobanRpcClient {
         let resp: RpcResponse<LatestLedgerResult> = self
             .client
             .post(rpc_url)
+            .headers(self.headers.clone())
             .json(&body)
             .send()
             .await
@@ -97,9 +110,20 @@ impl RpcClient for SorobanRpcClient {
         }
     }
 
-    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>) -> Result<GetEventsResult, String> {
+    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String> {
+        // Build filters: one filter object per type when event_types is non-empty.
+        let filters: serde_json::Value = if event_types.is_empty() {
+            json!([])
+        } else {
+            let filter_list: Vec<serde_json::Value> = event_types
+                .iter()
+                .map(|t| json!({ "type": t }))
+                .collect();
+            json!(filter_list)
+        };
+
         let mut params = json!({
-            "filters": [],
+            "filters": filters,
             "pagination": { "limit": 100 }
         });
 
@@ -119,6 +143,7 @@ impl RpcClient for SorobanRpcClient {
         let resp: RpcResponse<GetEventsResult> = self
             .client
             .post(rpc_url)
+            .headers(self.headers.clone())
             .json(&body)
             .send()
             .await
@@ -373,7 +398,12 @@ impl<R: RpcClient> Indexer<R> {
         let mut total_skipped = 0;
 
         loop {
-            let result = match self.rpc_client.get_events(&self.config.stellar_rpc_url, start_ledger, cursor.clone()).await {
+            let result = match self.rpc_client.get_events(
+                &self.config.stellar_rpc_url,
+                start_ledger,
+                cursor,
+                &self.config.indexer_event_types,
+            ).await {
                 Ok(r) => r,
                 Err(msg) => {
                     warn!(message = %msg, "RPC error");
@@ -395,7 +425,7 @@ impl<R: RpcClient> Indexer<R> {
                         total_inserted += rows;
                         if rows == 0 {
                             total_skipped += 1;
-                            metrics::record_duplicate_event();
+                            // duplicate — skipped via ON CONFLICT DO NOTHING
                         } else if let Some(ref tx) = self.event_tx {
                             let _ = tx.send(event);
                         }
@@ -657,7 +687,7 @@ mod tests {
             responses.pop_front().unwrap_or(Ok(100))
         }
 
-        async fn get_events(&self, _rpc_url: &str, _start_ledger: u64, _cursor: Option<String>) -> Result<GetEventsResult, String> {
+        async fn get_events(&self, _rpc_url: &str, _start_ledger: u64, _cursor: Option<String>, _event_types: &[String]) -> Result<GetEventsResult, String> {
             let mut responses = self.get_events_responses.lock().unwrap();
             responses.pop_front().unwrap_or(Ok(GetEventsResult {
                 events: vec![],
@@ -737,7 +767,6 @@ mod tests {
         assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
     }
 
-
     #[sqlx::test(migrations = "./migrations")]
     async fn invalid_event_data_is_skipped(pool: PgPool) {
         let indexer = indexer(pool.clone());
@@ -760,7 +789,9 @@ mod tests {
             pool,
             Config {
                 database_url: String::new(),
+                database_replica_url: None,
                 stellar_rpc_url: String::new(),
+                rpc_headers: Vec::new(),
                 start_ledger: 0,
                 port: 3000,
                 behind_proxy: false,
@@ -785,10 +816,12 @@ mod tests {
                 environment: crate::config::Environment::Development,
                 max_body_size_bytes: 1024 * 1024,
                 log_sample_rate: 1,
+
+                indexer_event_types: Vec::new(),
+
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
-                contract_count_cache_size: 1000,
-                contract_count_cache_ttl_secs: 30,
+
             },
             shutdown_rx,
             MockRpcClient::new(),
@@ -919,12 +952,40 @@ mod tests {
             Err("Network error".to_string()),
         ]);
 
-        let result1 = mock_client.get_events("http://test", 1, None).await.unwrap();
+        let result1 = mock_client.get_events("http://test", 1, None, &[]).await.unwrap();
         assert_eq!(result1.events.len(), 1);
         assert_eq!(result1.latest_ledger, 50);
 
-        let result2 = mock_client.get_events("http://test", 2, None).await;
+        let result2 = mock_client.get_events("http://test", 2, None, &[]).await;
         assert!(result2.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_events_passes_event_types_filter() {
+        // Verify that the event_types parameter is forwarded to the RPC call.
+        // We use a mock that records what was passed.
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        #[derive(Clone)]
+        struct RecordingMock {
+            called_with_types: Arc<Mutex<Vec<Vec<String>>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl RpcClient for RecordingMock {
+            async fn get_latest_ledger(&self, _: &str) -> Result<u64, String> { Ok(100) }
+            async fn get_events(&self, _: &str, _: u64, _: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String> {
+                self.called_with_types.lock().unwrap().push(event_types.to_vec());
+                Ok(GetEventsResult { events: vec![], latest_ledger: 100, rpc_cursor: None })
+            }
+        }
+
+        let recording = RecordingMock { called_with_types: Arc::new(Mutex::new(vec![])) };
+        let types_ref = recording.called_with_types.clone();
+
+        recording.get_events("http://test", 1, None, &["contract".to_string()]).await.unwrap();
+        let calls = types_ref.lock().unwrap();
+        assert_eq!(calls[0], vec!["contract"]);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -944,7 +1005,9 @@ mod tests {
             pool,
             Config {
                 database_url: String::new(),
+                database_replica_url: None,
                 stellar_rpc_url: String::new(),
+                rpc_headers: Vec::new(),
                 start_ledger: 100,
                 port: 3000,
                 behind_proxy: false,
@@ -969,10 +1032,12 @@ mod tests {
                 environment: crate::config::Environment::Development,
                 max_body_size_bytes: 1024 * 1024,
                 log_sample_rate: 1,
+
+                indexer_event_types: Vec::new(),
+
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
-                contract_count_cache_size: 1000,
-                contract_count_cache_ttl_secs: 30,
+
             },
             shutdown_rx,
             mock_client,

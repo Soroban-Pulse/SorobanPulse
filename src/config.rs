@@ -145,7 +145,11 @@ impl HealthState {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
+    /// Optional read replica URL. When set, HTTP handlers use this pool; indexer uses primary.
+    pub database_replica_url: Option<String>,
     pub stellar_rpc_url: String,
+    /// Custom headers to inject into every RPC request (name, value). Values are never logged.
+    pub rpc_headers: Vec<(String, String)>,
     pub start_ledger: u64,
     pub start_ledger_fallback: bool,
     pub port: u16,
@@ -170,26 +174,29 @@ pub struct Config {
     pub environment: Environment,
     pub max_body_size_bytes: usize,
     pub log_sample_rate: u32,
+
+    /// Event types the indexer fetches from RPC. Empty means all types.
+    pub indexer_event_types: Vec<String>,
+
     pub tls_cert_file: Option<String>,
     pub tls_key_file: Option<String>,
+
     /// AES-256-GCM key for encrypting event_data at the application level.
     /// Set via EVENT_DATA_ENCRYPTION_KEY (64 hex chars = 32 bytes).
     pub event_data_encryption_key: Option<[u8; 32]>,
     /// Previous encryption key for key rotation support.
     /// Set via EVENT_DATA_ENCRYPTION_KEY_OLD.
     pub event_data_encryption_key_old: Option<[u8; 32]>,
-    pub contract_count_cache_size: u64,
-    pub contract_count_cache_ttl_secs: u64,
-    /// How often to check index usage (hours). Default: 24.
-    pub index_check_interval_hours: u64,
-    pub health_check_timeout_ms: u64,
+
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             database_url: "postgres://localhost/soroban_pulse".to_string(),
+            database_replica_url: None,
             stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+            rpc_headers: Vec::new(),
             start_ledger: 0,
             start_ledger_fallback: false,
             port: 3000,
@@ -214,14 +221,15 @@ impl Default for Config {
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
             log_sample_rate: 1,
+
+            indexer_event_types: Vec::new(),
+
             tls_cert_file: None,
             tls_key_file: None,
+
             event_data_encryption_key: None,
             event_data_encryption_key_old: None,
-            contract_count_cache_size: 1000,
-            contract_count_cache_ttl_secs: 30,
-            index_check_interval_hours: 24,
-            health_check_timeout_ms: 2000,
+
         }
     }
 }
@@ -286,6 +294,51 @@ fn resolve_database_url() -> String {
     }
 }
 
+
+/// Parse STELLAR_RPC_HEADERS: semicolon-separated "Name: Value" pairs.
+/// Panics with a descriptive message on invalid format.
+fn parse_rpc_headers() -> Vec<(String, String)> {
+    let raw = match env::var("STELLAR_RPC_HEADERS") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return Vec::new(),
+    };
+    raw.split(';')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once(':').unwrap_or_else(|| {
+                panic!(
+                    "STELLAR_RPC_HEADERS: invalid header '{pair}' — expected 'Name: Value' format"
+                )
+            });
+            let name = name.trim().to_string();
+            let value = value.trim().to_string();
+            assert!(!name.is_empty(), "STELLAR_RPC_HEADERS: header name must not be empty in '{pair}'");
+            (name, value)
+        })
+        .collect()
+}
+
+/// Parse INDEXER_EVENT_TYPES: comma-separated list of event types.
+/// Defaults to empty (all types). Panics on unknown values.
+fn parse_indexer_event_types() -> Vec<String> {
+    let raw = match env::var("INDEXER_EVENT_TYPES") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return Vec::new(),
+    };
+    let valid = ["contract", "diagnostic", "system"];
+    raw.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .map(|t| {
+            assert!(
+                valid.contains(&t.as_str()),
+                "INDEXER_EVENT_TYPES: unknown event type '{t}' — valid values are: contract, diagnostic, system"
+            );
+            t
+        })
+        .collect()
+
 /// Parse a 64-hex-char string into a 32-byte key, panicking with a clear message on failure.
 fn parse_hex_key(var: &str, value: &str) -> [u8; 32] {
     if value.len() != 64 {
@@ -298,6 +351,7 @@ fn parse_hex_key(var: &str, value: &str) -> [u8; 32] {
             .unwrap_or_else(|_| panic!("{var} contains non-hex character in byte {i}"));
     }
     key
+
 }
 
 impl Config {
@@ -310,6 +364,11 @@ impl Config {
                 u.to_string()
             })
             .unwrap_or_else(|_| "<unparseable>".to_string())
+    }
+
+    /// Returns only header names (no values) — safe to log.
+    pub fn safe_rpc_headers(&self) -> Vec<&str> {
+        self.rpc_headers.iter().map(|(name, _)| name.as_str()).collect()
     }
 
     pub fn from_env() -> Self {
@@ -353,9 +412,11 @@ impl Config {
 
         Self {
             database_url: resolve_database_url(),
+            database_replica_url: env::var("DATABASE_REPLICA_URL").ok().filter(|s| !s.is_empty()),
             stellar_rpc_url: validate_rpc_url(
                 &env_or_file_or("STELLAR_RPC_URL", &file, "https://soroban-testnet.stellar.org"),
             ),
+            rpc_headers: parse_rpc_headers(),
             start_ledger,
             start_ledger_fallback,
             port,
@@ -449,31 +510,19 @@ impl Config {
                 assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
                 v
             },
-            event_data_encryption_key: env_or_file("EVENT_DATA_ENCRYPTION_KEY", &file)
+
+            indexer_event_types: parse_indexer_event_types(),
+
             tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
             tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),
+
             event_data_encryption_key: env::var("EVENT_DATA_ENCRYPTION_KEY")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY", &s)),
             event_data_encryption_key_old: env_or_file("EVENT_DATA_ENCRYPTION_KEY_OLD", &file)
                 .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY_OLD", &s)),
-            contract_count_cache_size: env::var("CONTRACT_COUNT_CACHE_SIZE")
-                .unwrap_or_else(|_| "1000".to_string())
-                .parse()
-                .expect("CONTRACT_COUNT_CACHE_SIZE must be a number"),
-            contract_count_cache_ttl_secs: env::var("CONTRACT_COUNT_CACHE_TTL_SECS")
-                .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .expect("CONTRACT_COUNT_CACHE_TTL_SECS must be a number"),
-            index_check_interval_hours: env::var("INDEX_CHECK_INTERVAL_HOURS")
-                .unwrap_or_else(|_| "24".to_string())
-                .parse()
-                .expect("INDEX_CHECK_INTERVAL_HOURS must be a number"),
-            health_check_timeout_ms: env::var("HEALTH_CHECK_TIMEOUT_MS")
-                .unwrap_or_else(|_| "2000".to_string())
-                .parse()
-                .expect("HEALTH_CHECK_TIMEOUT_MS must be a number"),
+
         }
     }
 }
@@ -572,6 +621,71 @@ mod tests {
     }
 
     #[test]
+
+    fn test_parse_rpc_headers_empty() {
+        std::env::remove_var("STELLAR_RPC_HEADERS");
+        let headers = super::parse_rpc_headers();
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_rpc_headers_single() {
+        std::env::set_var("STELLAR_RPC_HEADERS", "X-API-Key: mykey");
+        let headers = super::parse_rpc_headers();
+        std::env::remove_var("STELLAR_RPC_HEADERS");
+        assert_eq!(headers, vec![("X-API-Key".to_string(), "mykey".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_rpc_headers_multiple() {
+        std::env::set_var("STELLAR_RPC_HEADERS", "X-API-Key: mykey; X-Custom: value");
+        let headers = super::parse_rpc_headers();
+        std::env::remove_var("STELLAR_RPC_HEADERS");
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0], ("X-API-Key".to_string(), "mykey".to_string()));
+        assert_eq!(headers[1], ("X-Custom".to_string(), "value".to_string()));
+    }
+
+    #[test]
+    fn test_safe_rpc_headers_returns_names_only() {
+        let mut config = Config::default();
+        config.rpc_headers = vec![
+            ("X-API-Key".to_string(), "secret".to_string()),
+            ("Authorization".to_string(), "Bearer token".to_string()),
+        ];
+        let safe = config.safe_rpc_headers();
+        assert_eq!(safe, vec!["X-API-Key", "Authorization"]);
+    }
+
+    #[test]
+    fn test_parse_indexer_event_types_empty() {
+        std::env::remove_var("INDEXER_EVENT_TYPES");
+        let types = super::parse_indexer_event_types();
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn test_parse_indexer_event_types_single() {
+        std::env::set_var("INDEXER_EVENT_TYPES", "contract");
+        let types = super::parse_indexer_event_types();
+        std::env::remove_var("INDEXER_EVENT_TYPES");
+        assert_eq!(types, vec!["contract"]);
+    }
+
+    #[test]
+    fn test_parse_indexer_event_types_multiple() {
+        std::env::set_var("INDEXER_EVENT_TYPES", "contract,diagnostic");
+        let types = super::parse_indexer_event_types();
+        std::env::remove_var("INDEXER_EVENT_TYPES");
+        assert_eq!(types, vec!["contract", "diagnostic"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown event type 'invalid'")]
+    fn test_parse_indexer_event_types_invalid_panics() {
+        std::env::set_var("INDEXER_EVENT_TYPES", "contract,invalid");
+        let _ = super::parse_indexer_event_types();
+
     fn startup_log_fields_do_not_contain_credentials() {
         // Verify that the fields logged at startup are safe.
         // safe_db_url() must strip credentials.
@@ -587,6 +701,7 @@ mod tests {
         // confirm the stored value has no credentials.
         assert!(!config.stellar_rpc_url.contains("token"), "stellar_rpc_url must not contain token");
         assert!(!config.stellar_rpc_url.contains("user:"), "stellar_rpc_url must not contain user credentials");
+
     }
 
     #[test]

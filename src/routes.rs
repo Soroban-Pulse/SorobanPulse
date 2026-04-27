@@ -40,6 +40,8 @@ impl MakeRequestId for UuidMakeRequestId {
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    /// Read pool: points to replica when DATABASE_REPLICA_URL is set, otherwise same as pool.
+    pub read_pool: PgPool,
     pub health_state: Arc<HealthState>,
     pub indexer_state: Arc<IndexerState>,
     pub prometheus_handle: PrometheusHandle,
@@ -102,13 +104,16 @@ pub fn create_router(
     health_check_timeout_ms: u64,
     config: crate::config::Config,
 ) -> Router {
-    let mut cfg = config;
-    cfg.api_keys = api_keys.clone();
-    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None, cfg)
+
+    create_router_with_tx(pool.clone(), pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms)
+
+    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None)
+
 }
 
 pub fn create_router_with_tx(
     pool: PgPool,
+    read_pool: PgPool,
     api_keys: Vec<String>,
     allowed_origins: &[String],
     rate_limit_per_minute: u32,
@@ -132,6 +137,7 @@ pub fn create_router_with_tx(
         .build();
     let app_state = AppState {
         pool,
+        read_pool,
         health_state,
         indexer_state,
         prometheus_handle,
@@ -157,7 +163,12 @@ pub fn create_router_with_tx(
         .route("/events", get(handlers::get_events))
         .route("/events/export", get(handlers::export_events))
         .route("/events/stream", get(handlers::stream_events))
-        .route("/events/stream/multi", get(handlers::stream_events_multi))
+
+        .route("/events/contract/{contract_id}", get(handlers::get_events_by_contract))
+        .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
+        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
+        .route("/contracts", get(handlers::get_contracts));
+
         .route("/events/contract/:contract_id", get(handlers::get_events_by_contract))
         .route("/events/contract/:contract_id/stream", get(handlers::stream_events_by_contract))
         .route("/events/tx/:tx_hash", get(handlers::get_events_by_tx))
@@ -167,13 +178,14 @@ pub fn create_router_with_tx(
         .route("/subscriptions/:id", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
         .route("/subscriptions/:id/ack", axum::routing::post(subscriptions::ack_subscription));
 
+
     // Unversioned deprecated aliases (same handlers, add Deprecation header via middleware)
     let deprecated = Router::new()
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::stream_events))
-        .route("/events/contract/:contract_id", get(handlers::get_events_by_contract))
-        .route("/events/contract/:contract_id/stream", get(handlers::stream_events_by_contract))
-        .route("/events/tx/:tx_hash", get(handlers::get_events_by_tx))
+        .route("/events/contract/{contract_id}", get(handlers::get_events_by_contract))
+        .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
+        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
         .route("/contracts", get(handlers::get_contracts))
         .layer(axum::middleware::from_fn(|req: Request<Body>, next: axum::middleware::Next| async move {
             let path = req.uri().path().to_string();

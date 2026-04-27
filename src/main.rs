@@ -80,11 +80,13 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         rpc_url = %config.stellar_rpc_url,
+        rpc_headers = ?config.safe_rpc_headers(),
         start_ledger = config.start_ledger,
         port = config.port,
         db_url = %config.safe_db_url(),
         db_max_connections = config.db_max_connections,
         db_min_connections = config.db_min_connections,
+        indexer_event_types = ?config.indexer_event_types,
         "Resolved configuration",
     );
 
@@ -117,6 +119,27 @@ async fn main() -> anyhow::Result<()> {
     };
     
     let _ = db::run_migrations(&pool).await;
+
+    // Create read pool: use replica URL if configured, otherwise reuse primary pool.
+    let read_pool = if let Some(ref replica_url) = config.database_replica_url {
+        info!("DATABASE_REPLICA_URL set — HTTP handlers will use read replica");
+        match db::create_pool(
+            replica_url,
+            config.db_max_connections,
+            config.db_min_connections,
+            config.db_statement_timeout_ms,
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to connect to read replica, falling back to primary");
+                pool.clone()
+            }
+        }
+    } else {
+        pool.clone()
+    };
 
     info!("Migrations applied successfully");
     info!(environment = ?config.environment, "Running environment");
@@ -179,6 +202,29 @@ async fn main() -> anyhow::Result<()> {
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
     info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
 
+    let router = routes::create_router_with_tx(pool, read_pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, config.behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, 2000);
+
+    info!(addr = %addr, "Soroban Pulse listening");
+
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        error!(addr = %addr, "Address already in use");
+        e
+    })?;
+
+    info!(behind_proxy = config.behind_proxy, "Running server - trusting X-Forwarded-For");
+
+    // Use regular make_service since we handle connect_info through middleware
+    // Use the router directly as it implements Service for incoming connections
+    axum::serve(
+        listener,
+        router,
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown_rx_axum.changed().await;
+    })
+    .await?;
+
+
     // When TLS is enabled directly, BEHIND_PROXY is forced false — no proxy in front.
     let behind_proxy = match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(_), Some(_)) => {
@@ -234,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
         }
     }
+
     let _ = indexer_handle.await;
 
     #[cfg(feature = "otel")]
