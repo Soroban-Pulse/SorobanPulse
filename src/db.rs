@@ -1,6 +1,6 @@
 use sqlx::{postgres::PgPoolOptions, Executor, PgPool};
 use std::time::Duration;
-use tracing::info;
+use tracing::{debug, info, info_span, Instrument};
 
 /// Per-endpoint query timeout configuration (in milliseconds)
 pub struct QueryTimeouts {

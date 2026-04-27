@@ -149,6 +149,26 @@
               "format": "int64",
               "nullable": true
             }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort order: asc (oldest first) or desc (newest first, default)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "topic_sym",
+            "in": "query",
+            "description": "Filter by first topic symbol (uses topic_0_sym generated column index)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
           }
         ],
         "responses": {
@@ -290,6 +310,41 @@
           }
         }
       }
+    },
+    "/v1/events/tx/batch": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "get_events_by_tx_batch",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchTxRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Map of tx_hash -> events for all requested hashes"
+          },
+          "400": {
+            "description": "Invalid hashes or too many hashes"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "429": {
+            "description": "Too many requests"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -356,6 +411,10 @@
       "PaginationParams": {
         "type": "object",
         "properties": {
+          "contract_id": {
+            "type": "string",
+            "nullable": true
+          },
           "cursor": {
             "type": "string",
             "nullable": true
@@ -391,10 +450,38 @@
             "format": "int64",
             "nullable": true
           },
+          "sort": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/SortOrder"
+              }
+            ],
+            "nullable": true
+          },
           "to_ledger": {
             "type": "integer",
             "format": "int64",
             "nullable": true
+          },
+          "topic_sym": {
+            "type": "string",
+            "description": "Filter by first topic symbol (uses topic_0_sym generated column index).",
+            "nullable": true
+          }
+        }
+      },
+      "BatchTxRequest": {
+        "type": "object",
+        "required": [
+          "hashes"
+        ],
+        "properties": {
+          "hashes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "List of transaction hashes to look up (max 100)."
           }
         }
       }

@@ -41,6 +41,7 @@ rand = { version = "0.8", optional = true }
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
 encryption = ["aes-gcm", "rand"]
+archive = []
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }

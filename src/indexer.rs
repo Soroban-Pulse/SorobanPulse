@@ -184,6 +184,10 @@ pub struct Indexer<R: RpcClient> {
     indexer_state: Option<Arc<IndexerState>>,
     event_tx: Option<broadcast::Sender<SorobanEvent>>,
     event_counter: AtomicU64,
+    #[cfg(feature = "kafka")]
+    kafka_publisher: Option<Arc<dyn crate::kafka::KafkaPublisher>>,
+    #[cfg(feature = "kafka")]
+    kafka_topic: Option<String>,
 }
 
 impl<R: RpcClient> Indexer<R> {
@@ -197,6 +201,10 @@ impl<R: RpcClient> Indexer<R> {
             indexer_state: None,
             event_tx: None,
             event_counter: AtomicU64::new(0),
+            #[cfg(feature = "kafka")]
+            kafka_publisher: None,
+            #[cfg(feature = "kafka")]
+            kafka_topic: None,
         }
     }
 
@@ -213,6 +221,17 @@ impl<R: RpcClient> Indexer<R> {
     /// Set the broadcast sender for real-time SSE streaming.
     pub fn set_event_tx(&mut self, event_tx: broadcast::Sender<SorobanEvent>) {
         self.event_tx = Some(event_tx);
+    }
+
+    /// Set the Kafka publisher and topic for event streaming.
+    #[cfg(feature = "kafka")]
+    pub fn set_kafka_publisher(
+        &mut self,
+        publisher: Arc<dyn crate::kafka::KafkaPublisher>,
+        topic: String,
+    ) {
+        self.kafka_publisher = Some(publisher);
+        self.kafka_topic = Some(topic);
     }
 
     pub async fn run(&self) {
@@ -266,6 +285,21 @@ impl<R: RpcClient> Indexer<R> {
         let mut current_ledger = self.config.start_ledger;
         let mut consecutive_db_errors = 0u32;
         let mut rpc_backoff_ms = 1000u64; // Start with 1 second backoff
+
+        // Restore persisted state so /status is accurate before the first poll.
+        if let Some((persisted_current, persisted_latest)) = self.load_indexer_state().await {
+            if persisted_current > 0 {
+                if current_ledger == 0 {
+                    current_ledger = persisted_current;
+                }
+                if let Some(ref s) = self.indexer_state {
+                    s.current_ledger.store(persisted_current, std::sync::atomic::Ordering::Relaxed);
+                    s.latest_ledger.store(persisted_latest, std::sync::atomic::Ordering::Relaxed);
+                }
+                metrics::update_current_ledger(persisted_current);
+                info!(current_ledger = persisted_current, latest_ledger = persisted_latest, "Restored persisted indexer state");
+            }
+        }
 
         if current_ledger == 0 {
             loop {
@@ -327,8 +361,7 @@ impl<R: RpcClient> Indexer<R> {
                                     "Indexer is falling behind"
                                 );
                             }
-                        }
-                    } else {
+                        }                    } else {
                         sleep(Duration::from_millis(self.config.indexer_poll_interval_ms)).await;
                     }
                 }
@@ -370,6 +403,39 @@ impl<R: RpcClient> Indexer<R> {
         .await
         .ok()
         .flatten()
+    }
+
+    /// Load the last persisted indexer state (current_ledger, latest_ledger) from the DB.
+    async fn load_indexer_state(&self) -> Option<(u64, u64)> {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT current_ledger, latest_ledger FROM indexer_state WHERE id = 'singleton'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(c, l)| (c as u64, l as u64))
+    }
+
+    /// Persist current_ledger and latest_ledger atomically inside an existing transaction.
+    async fn save_indexer_state(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        current_ledger: u64,
+        latest_ledger: u64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO indexer_state (id, current_ledger, latest_ledger, updated_at)
+             VALUES ('singleton', $1, $2, NOW())
+             ON CONFLICT (id) DO UPDATE
+               SET current_ledger = EXCLUDED.current_ledger,
+                   latest_ledger  = EXCLUDED.latest_ledger,
+                   updated_at     = NOW()",
+        )
+        .bind(current_ledger as i64)
+        .bind(latest_ledger as i64)
+        .execute(&mut **tx)
+        .await
+        .map(|_| ())
     }
 
     /// Persist the cursor atomically alongside the event inserts.
@@ -449,8 +515,19 @@ impl<R: RpcClient> Indexer<R> {
                         if rows == 0 {
                             total_skipped += 1;
                             // duplicate — skipped via ON CONFLICT DO NOTHING
-                        } else if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(event);
+                        } else {
+                            if let Some(ref tx) = self.event_tx {
+                                let _ = tx.send(event.clone());
+                            }
+                            #[cfg(feature = "kafka")]
+                            if let (Some(ref publisher), Some(ref topic)) =
+                                (&self.kafka_publisher, &self.kafka_topic)
+                            {
+                                if let Err(e) = publisher.publish(topic, &event).await {
+                                    tracing::warn!(error = %e, contract_id = %event.contract_id, "Kafka publish failed");
+                                    crate::metrics::record_kafka_publish_error();
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -465,6 +542,8 @@ impl<R: RpcClient> Indexer<R> {
             if let Some(ref c) = next_cursor.as_ref().or(cursor.as_ref()) {
                 let _ = Self::save_checkpoint(&mut db_tx, c).await;
             }
+            // Persist ledger state so /status is accurate after a restart.
+            let _ = Self::save_indexer_state(&mut db_tx, start_ledger, latest_ledger).await;
             db_tx.commit().await?;
 
             total_db_ms += db_start.elapsed().as_millis();
@@ -658,6 +737,22 @@ impl<R: RpcClient> Indexer<R> {
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .map_err(|_| anyhow::anyhow!("Unparseable ledger_closed_at"))?;
         let event_data = json!({ "value": event.value, "topic": event.topic });
+
+        // Enforce size limit before INSERT.
+        let serialized = serde_json::to_vec(&event_data)?;
+        if serialized.len() > self.config.max_event_data_bytes {
+            warn!(
+                tx_hash = %event.tx_hash,
+                contract_id = %event.contract_id,
+                ledger = event.ledger,
+                size_bytes = serialized.len(),
+                limit_bytes = self.config.max_event_data_bytes,
+                "event_data exceeds size limit, skipping",
+            );
+            metrics::record_oversized_event();
+            return Ok(0);
+        }
+
         let result = sqlx::query(
             r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
                VALUES ($1, $2, $3, $4, $5, $6)
@@ -868,15 +963,21 @@ mod tests {
 
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
+                max_event_data_bytes: 65536,
 
+                #[cfg(feature = "kafka")]
+                kafka_brokers: None,
+                #[cfg(feature = "kafka")]
+                kafka_topic: None,
+                #[cfg(feature = "kafka")]
+                kafka_batch_size: 16384,
+                #[cfg(feature = "kafka")]
+                kafka_linger_ms: 5,
             },
             shutdown_rx,
             MockRpcClient::new(),
         )
     }
-
-    #[tokio::test]
-    async fn test_should_log_debug_sampling() {
         let pool = PgPool::connect("postgres://localhost/soroban_pulse").await.unwrap_or_else(|_| {
             // Fallback for environments where PG is not available
             // In a real test environment we'd have a pool.
@@ -1086,6 +1187,7 @@ mod tests {
 
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
+                max_event_data_bytes: 65536,
 
             },
             shutdown_rx,
@@ -1095,5 +1197,46 @@ mod tests {
         // Test that the indexer can use the mock client
         let latest_ledger = indexer.get_latest_ledger().await.unwrap();
         assert_eq!(latest_ledger, 100);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn oversized_event_is_skipped(pool: PgPool) {
+        let mut idx = indexer(pool.clone());
+        idx.config.max_event_data_bytes = 10; // tiny limit
+
+        let mut event = make_event(1);
+        // value large enough to exceed 10 bytes when serialized
+        event.value = json!({"k": "a very long string value that exceeds the limit"});
+
+        let mut tx = pool.begin().await.unwrap();
+        let rows = idx.store_event_in_tx(&mut tx, &event).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(rows, 0, "oversized event must be skipped");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn event_within_size_limit_is_stored(pool: PgPool) {
+        let idx = indexer(pool.clone()); // default 65536 limit
+
+        let event = make_event(1); // tiny event, well within limit
+
+        let mut tx = pool.begin().await.unwrap();
+        let rows = idx.store_event_in_tx(&mut tx, &event).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(rows, 1);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }

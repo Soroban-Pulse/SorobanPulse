@@ -10,4 +10,5 @@ pub mod models;
 pub mod normalizer;
 pub mod rpc_client;
 pub mod routes;
+pub mod subscriptions;
 pub mod webhook;
