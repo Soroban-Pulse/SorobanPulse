@@ -178,7 +178,7 @@ async fn main() -> anyhow::Result<()> {
         _ => config.behind_proxy,
     };
 
-    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.clone());
+    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.health_check_timeout_ms, None, None, config.slow_request_threshold_ms);
 
     match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(cert_path), Some(key_path)) => {

@@ -133,6 +133,8 @@ pub struct Config {
     pub environment: Environment,
     pub max_body_size_bytes: usize,
     pub log_sample_rate: u32,
+    pub slow_request_threshold_ms: u64,
+    pub health_check_timeout_ms: u64,
 <<<<<<< feature/issue-196-direct-tls
     pub tls_cert_file: Option<String>,
     pub tls_key_file: Option<String>,
@@ -172,6 +174,8 @@ impl Default for Config {
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
             log_sample_rate: 1,
+            slow_request_threshold_ms: 500,
+            health_check_timeout_ms: 2000,
 <<<<<<< feature/issue-196-direct-tls
             tls_cert_file: None,
             tls_key_file: None,
@@ -416,6 +420,14 @@ impl Config {
                 assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
                 v
             },
+            slow_request_threshold_ms: env::var("SLOW_REQUEST_THRESHOLD_MS")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()
+                .expect("SLOW_REQUEST_THRESHOLD_MS must be a number"),
+            health_check_timeout_ms: env::var("HEALTH_CHECK_TIMEOUT_MS")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()
+                .expect("HEALTH_CHECK_TIMEOUT_MS must be a number"),
 <<<<<<< feature/issue-196-direct-tls
             tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
             tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),

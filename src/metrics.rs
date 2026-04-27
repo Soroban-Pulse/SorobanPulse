@@ -5,9 +5,19 @@ use sqlx::PgPool;
 // of the same name. Use an explicit extern-crate alias to disambiguate.
 extern crate metrics as m;
 
+/// SLO-aligned histogram buckets for HTTP request duration (seconds).
+const HTTP_DURATION_BUCKETS: &[f64] = &[0.05, 0.1, 0.2, 0.5, 1.0, 5.0];
+
 /// Initialize the Prometheus metrics exporter
 pub fn init_metrics() -> PrometheusHandle {
     PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full(
+                "soroban_pulse_http_request_duration_seconds".to_string(),
+            ),
+            HTTP_DURATION_BUCKETS,
+        )
+        .expect("Failed to set histogram buckets")
         .install_recorder()
         .expect("Failed to install Prometheus exporter")
 }
