@@ -480,4 +480,22 @@ mod tests {
         config.database_url = "not-a-url".to_string();
         assert_eq!(config.safe_db_url(), "<unparseable>");
     }
+
+    #[test]
+    fn startup_log_fields_do_not_contain_credentials() {
+        // Verify that the fields logged at startup are safe.
+        // safe_db_url() must strip credentials.
+        let mut config = Config::default();
+        config.database_url = "postgres://admin:supersecret@db.example.com/mydb".to_string();
+        config.stellar_rpc_url = "https://user:token@rpc.example.com".to_string();
+
+        let safe_db = config.safe_db_url();
+        assert!(!safe_db.contains("supersecret"), "safe_db_url must not contain password");
+        assert!(!safe_db.contains("admin"), "safe_db_url must not contain username");
+
+        // stellar_rpc_url is already sanitized by validate_rpc_url() at parse time;
+        // confirm the stored value has no credentials.
+        assert!(!config.stellar_rpc_url.contains("token"), "stellar_rpc_url must not contain token");
+        assert!(!config.stellar_rpc_url.contains("user:"), "stellar_rpc_url must not contain user credentials");
+    }
 }
