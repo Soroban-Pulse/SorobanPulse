@@ -12,6 +12,7 @@ mod error;
 mod handlers;
 mod index_monitor;
 mod indexer;
+mod kafka;
 mod metrics;
 mod middleware;
 mod models;
@@ -206,6 +207,18 @@ async fn main() -> anyhow::Result<()> {
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
+    #[cfg(feature = "kafka")]
+    if let (Some(brokers), Some(topic)) = (&config.kafka_brokers, &config.kafka_topic) {
+        match crate::kafka::RdKafkaProducer::new(brokers, config.kafka_batch_size, config.kafka_linger_ms) {
+            Ok(producer) => {
+                info!(brokers = %brokers, topic = %topic, "Kafka publishing enabled");
+                indexer.set_kafka_publisher(std::sync::Arc::new(producer), topic.clone());
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to create Kafka producer — Kafka publishing disabled");
+            }
+        }
+    }
     let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });

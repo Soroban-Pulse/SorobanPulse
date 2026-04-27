@@ -184,6 +184,10 @@ pub struct Indexer<R: RpcClient> {
     indexer_state: Option<Arc<IndexerState>>,
     event_tx: Option<broadcast::Sender<SorobanEvent>>,
     event_counter: AtomicU64,
+    #[cfg(feature = "kafka")]
+    kafka_publisher: Option<Arc<dyn crate::kafka::KafkaPublisher>>,
+    #[cfg(feature = "kafka")]
+    kafka_topic: Option<String>,
 }
 
 impl<R: RpcClient> Indexer<R> {
@@ -197,6 +201,10 @@ impl<R: RpcClient> Indexer<R> {
             indexer_state: None,
             event_tx: None,
             event_counter: AtomicU64::new(0),
+            #[cfg(feature = "kafka")]
+            kafka_publisher: None,
+            #[cfg(feature = "kafka")]
+            kafka_topic: None,
         }
     }
 
@@ -213,6 +221,17 @@ impl<R: RpcClient> Indexer<R> {
     /// Set the broadcast sender for real-time SSE streaming.
     pub fn set_event_tx(&mut self, event_tx: broadcast::Sender<SorobanEvent>) {
         self.event_tx = Some(event_tx);
+    }
+
+    /// Set the Kafka publisher and topic for event streaming.
+    #[cfg(feature = "kafka")]
+    pub fn set_kafka_publisher(
+        &mut self,
+        publisher: Arc<dyn crate::kafka::KafkaPublisher>,
+        topic: String,
+    ) {
+        self.kafka_publisher = Some(publisher);
+        self.kafka_topic = Some(topic);
     }
 
     pub async fn run(&self) {
@@ -266,6 +285,21 @@ impl<R: RpcClient> Indexer<R> {
         let mut current_ledger = self.config.start_ledger;
         let mut consecutive_db_errors = 0u32;
         let mut rpc_backoff_ms = 1000u64; // Start with 1 second backoff
+
+        // Restore persisted state so /status is accurate before the first poll.
+        if let Some((persisted_current, persisted_latest)) = self.load_indexer_state().await {
+            if persisted_current > 0 {
+                if current_ledger == 0 {
+                    current_ledger = persisted_current;
+                }
+                if let Some(ref s) = self.indexer_state {
+                    s.current_ledger.store(persisted_current, std::sync::atomic::Ordering::Relaxed);
+                    s.latest_ledger.store(persisted_latest, std::sync::atomic::Ordering::Relaxed);
+                }
+                metrics::update_current_ledger(persisted_current);
+                info!(current_ledger = persisted_current, latest_ledger = persisted_latest, "Restored persisted indexer state");
+            }
+        }
 
         if current_ledger == 0 {
             loop {
@@ -327,8 +361,7 @@ impl<R: RpcClient> Indexer<R> {
                                     "Indexer is falling behind"
                                 );
                             }
-                        }
-                    } else {
+                        }                    } else {
                         sleep(Duration::from_millis(self.config.indexer_poll_interval_ms)).await;
                     }
                 }
@@ -370,6 +403,39 @@ impl<R: RpcClient> Indexer<R> {
         .await
         .ok()
         .flatten()
+    }
+
+    /// Load the last persisted indexer state (current_ledger, latest_ledger) from the DB.
+    async fn load_indexer_state(&self) -> Option<(u64, u64)> {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT current_ledger, latest_ledger FROM indexer_state WHERE id = 'singleton'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(c, l)| (c as u64, l as u64))
+    }
+
+    /// Persist current_ledger and latest_ledger atomically inside an existing transaction.
+    async fn save_indexer_state(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        current_ledger: u64,
+        latest_ledger: u64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO indexer_state (id, current_ledger, latest_ledger, updated_at)
+             VALUES ('singleton', $1, $2, NOW())
+             ON CONFLICT (id) DO UPDATE
+               SET current_ledger = EXCLUDED.current_ledger,
+                   latest_ledger  = EXCLUDED.latest_ledger,
+                   updated_at     = NOW()",
+        )
+        .bind(current_ledger as i64)
+        .bind(latest_ledger as i64)
+        .execute(&mut **tx)
+        .await
+        .map(|_| ())
     }
 
     /// Persist the cursor atomically alongside the event inserts.
@@ -426,8 +492,19 @@ impl<R: RpcClient> Indexer<R> {
                         if rows == 0 {
                             total_skipped += 1;
                             // duplicate — skipped via ON CONFLICT DO NOTHING
-                        } else if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(event);
+                        } else {
+                            if let Some(ref tx) = self.event_tx {
+                                let _ = tx.send(event.clone());
+                            }
+                            #[cfg(feature = "kafka")]
+                            if let (Some(ref publisher), Some(ref topic)) =
+                                (&self.kafka_publisher, &self.kafka_topic)
+                            {
+                                if let Err(e) = publisher.publish(topic, &event).await {
+                                    tracing::warn!(error = %e, contract_id = %event.contract_id, "Kafka publish failed");
+                                    crate::metrics::record_kafka_publish_error();
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -442,6 +519,8 @@ impl<R: RpcClient> Indexer<R> {
             if let Some(ref c) = next_cursor.as_ref().or(cursor.as_ref()) {
                 let _ = Self::save_checkpoint(&mut db_tx, c).await;
             }
+            // Persist ledger state so /status is accurate after a restart.
+            let _ = Self::save_indexer_state(&mut db_tx, start_ledger, latest_ledger).await;
             db_tx.commit().await?;
 
             cursor = next_cursor;
@@ -822,6 +901,14 @@ mod tests {
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
 
+                #[cfg(feature = "kafka")]
+                kafka_brokers: None,
+                #[cfg(feature = "kafka")]
+                kafka_topic: None,
+                #[cfg(feature = "kafka")]
+                kafka_batch_size: 16384,
+                #[cfg(feature = "kafka")]
+                kafka_linger_ms: 5,
             },
             shutdown_rx,
             MockRpcClient::new(),
@@ -830,17 +917,57 @@ mod tests {
 
     #[tokio::test]
     async fn test_should_log_debug_sampling() {
-        let pool = PgPool::connect("postgres://localhost/soroban_pulse").await.unwrap_or_else(|_| {
-            // Fallback for environments where PG is not available
-            // In a real test environment we'd have a pool.
-            // Since this is specifically testing business logic in Indexer, 
-            // we can just use an uninitialized pool or skip if needed.
-            // But Indexer::new needs a pool.
-            // Actually, we can use the same pattern as in `indexer` helper.
-            return;
-        });
-
-        let mut indexer = indexer(pool);
+        let (_, shutdown_rx) = watch::channel(false);
+        // Use a lazy pool that won't actually connect for this logic-only test.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/soroban_pulse")
+            .unwrap();
+        let mut indexer = Indexer::new(
+            pool,
+            Config {
+                database_url: String::new(),
+                database_replica_url: None,
+                stellar_rpc_url: String::new(),
+                rpc_headers: Vec::new(),
+                start_ledger: 0,
+                port: 3000,
+                behind_proxy: false,
+                start_ledger_fallback: true,
+                indexer_lag_warn_threshold: 1000,
+                rpc_connect_timeout_secs: 30,
+                rpc_request_timeout_secs: 60,
+                api_keys: Vec::new(),
+                db_max_connections: 10,
+                db_min_connections: 2,
+                db_idle_timeout_secs: 600,
+                db_max_lifetime_secs: 1800,
+                db_test_before_acquire: true,
+                allowed_origins: vec!["*".to_string()],
+                rate_limit_per_minute: 60,
+                indexer_stall_timeout_secs: 60,
+                db_statement_timeout_ms: 5000,
+                indexer_poll_interval_ms: 5000,
+                indexer_error_backoff_ms: 10000,
+                sse_keepalive_interval_ms: 15000,
+                sse_max_connections: 1000,
+                environment: crate::config::Environment::Development,
+                max_body_size_bytes: 1024 * 1024,
+                log_sample_rate: 1,
+                indexer_event_types: Vec::new(),
+                event_data_encryption_key: None,
+                event_data_encryption_key_old: None,
+                #[cfg(feature = "kafka")]
+                kafka_brokers: None,
+                #[cfg(feature = "kafka")]
+                kafka_topic: None,
+                #[cfg(feature = "kafka")]
+                kafka_batch_size: 16384,
+                #[cfg(feature = "kafka")]
+                kafka_linger_ms: 5,
+            },
+            shutdown_rx,
+            MockRpcClient::new(),
+        );
         
         // Test with sample_rate = 1 (should log everything)
         indexer.config.log_sample_rate = 1;
@@ -1046,5 +1173,147 @@ mod tests {
         // Test that the indexer can use the mock client
         let latest_ledger = indexer.get_latest_ledger().await.unwrap();
         assert_eq!(latest_ledger, 100);
+    }
+
+    #[cfg(feature = "kafka")]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn kafka_publisher_called_on_new_event(pool: PgPool) {
+        use crate::kafka::tests::MockKafkaPublisher;
+        use std::sync::Arc;
+
+        // Kafka publish happens in fetch_and_store_events, not store_event_in_tx.
+        // Test via fetch_and_store_events with a mock RPC that returns one event.
+        let mock_rpc = MockRpcClient::with_get_events_responses(vec![Ok(GetEventsResult {
+            events: vec![make_event(1)],
+            latest_ledger: 1,
+            rpc_cursor: None,
+        })]);
+        let (_, shutdown_rx) = watch::channel(false);
+        let mut idx = Indexer::new(
+            pool.clone(),
+            Config {
+                database_url: String::new(),
+                database_replica_url: None,
+                stellar_rpc_url: String::new(),
+                rpc_headers: Vec::new(),
+                start_ledger: 1,
+                port: 3000,
+                behind_proxy: false,
+                start_ledger_fallback: true,
+                indexer_lag_warn_threshold: 1000,
+                rpc_connect_timeout_secs: 30,
+                rpc_request_timeout_secs: 60,
+                api_keys: Vec::new(),
+                db_max_connections: 10,
+                db_min_connections: 2,
+                db_idle_timeout_secs: 600,
+                db_max_lifetime_secs: 1800,
+                db_test_before_acquire: true,
+                allowed_origins: vec!["*".to_string()],
+                rate_limit_per_minute: 60,
+                indexer_stall_timeout_secs: 60,
+                db_statement_timeout_ms: 5000,
+                indexer_poll_interval_ms: 5000,
+                indexer_error_backoff_ms: 10000,
+                sse_keepalive_interval_ms: 15000,
+                sse_max_connections: 1000,
+                environment: crate::config::Environment::Development,
+                max_body_size_bytes: 1024 * 1024,
+                log_sample_rate: 1,
+                indexer_event_types: Vec::new(),
+                event_data_encryption_key: None,
+                event_data_encryption_key_old: None,
+                kafka_brokers: None,
+                kafka_topic: None,
+                kafka_batch_size: 16384,
+                kafka_linger_ms: 5,
+            },
+            shutdown_rx,
+            mock_rpc,
+        );
+
+        let mock_kafka = MockKafkaPublisher::default();
+        let published = mock_kafka.published.clone();
+        idx.set_kafka_publisher(Arc::new(mock_kafka), "test-topic".to_string());
+
+        idx.fetch_and_store_events(1).await.unwrap();
+
+        let msgs = published.lock().unwrap();
+        assert_eq!(msgs.len(), 1, "expected one Kafka message for the new event");
+        assert_eq!(msgs[0].0, "test-topic");
+        assert_eq!(msgs[0].1.ledger, 1);
+    }
+
+    #[cfg(feature = "kafka")]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn kafka_not_called_for_duplicate_event(pool: PgPool) {
+        use crate::kafka::tests::MockKafkaPublisher;
+        use std::sync::Arc;
+
+        // Insert the event once so the second fetch sees a duplicate.
+        let idx = indexer(pool.clone());
+        let mut tx = pool.begin().await.unwrap();
+        idx.store_event_in_tx(&mut tx, &make_event(1)).await.unwrap();
+        tx.commit().await.unwrap();
+
+        let mock_rpc = MockRpcClient::with_get_events_responses(vec![Ok(GetEventsResult {
+            events: vec![make_event(1)], // same event — duplicate
+            latest_ledger: 1,
+            rpc_cursor: None,
+        })]);
+        let (_, shutdown_rx) = watch::channel(false);
+        let mut idx2 = Indexer::new(
+            pool.clone(),
+            Config {
+                database_url: String::new(),
+                database_replica_url: None,
+                stellar_rpc_url: String::new(),
+                rpc_headers: Vec::new(),
+                start_ledger: 1,
+                port: 3000,
+                behind_proxy: false,
+                start_ledger_fallback: true,
+                indexer_lag_warn_threshold: 1000,
+                rpc_connect_timeout_secs: 30,
+                rpc_request_timeout_secs: 60,
+                api_keys: Vec::new(),
+                db_max_connections: 10,
+                db_min_connections: 2,
+                db_idle_timeout_secs: 600,
+                db_max_lifetime_secs: 1800,
+                db_test_before_acquire: true,
+                allowed_origins: vec!["*".to_string()],
+                rate_limit_per_minute: 60,
+                indexer_stall_timeout_secs: 60,
+                db_statement_timeout_ms: 5000,
+                indexer_poll_interval_ms: 5000,
+                indexer_error_backoff_ms: 10000,
+                sse_keepalive_interval_ms: 15000,
+                sse_max_connections: 1000,
+                environment: crate::config::Environment::Development,
+                max_body_size_bytes: 1024 * 1024,
+                log_sample_rate: 1,
+                indexer_event_types: Vec::new(),
+                event_data_encryption_key: None,
+                event_data_encryption_key_old: None,
+                kafka_brokers: None,
+                kafka_topic: None,
+                kafka_batch_size: 16384,
+                kafka_linger_ms: 5,
+            },
+            shutdown_rx,
+            mock_rpc,
+        );
+
+        let mock_kafka = MockKafkaPublisher::default();
+        let published = mock_kafka.published.clone();
+        idx2.set_kafka_publisher(Arc::new(mock_kafka), "test-topic".to_string());
+
+        idx2.fetch_and_store_events(1).await.unwrap();
+
+        assert!(
+            published.lock().unwrap().is_empty(),
+            "Kafka must not be called for duplicate events"
+        );
     }
 }
