@@ -92,6 +92,22 @@ pub struct StreamParams {
     pub fields: Option<String>,
 }
 
+/// Query parameters for the multi-contract SSE stream endpoint.
+#[derive(Debug, Deserialize)]
+pub struct MultiStreamParams {
+    /// Comma-separated list of contract IDs to subscribe to.
+    pub contract_ids: Option<String>,
+}
+
+/// Standard error response body returned by all error responses.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ErrorResponse {
+    /// Human-readable error description.
+    pub error: String,
+    /// Machine-readable error code.
+    pub code: String,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ReplayRequest {
     pub from_ledger: u64,
@@ -202,6 +218,7 @@ mod tests {
             from_ledger: None,
             to_ledger: None,
             cursor: None,
+            contract_id: None,
         }
     }
 
