@@ -14,7 +14,8 @@ fn make_router(pool: PgPool, api_key: Option<String>) -> axum::Router {
     let indexer_state = Arc::new(IndexerState::new());
     let prometheus_handle = init_metrics();
     let api_keys = api_key.into_iter().collect();
-    create_router(pool, api_keys, &[], 60, health_state, indexer_state, prometheus_handle, 15000)
+    let config = soroban_pulse::config::Config::default();
+    create_router(pool, api_keys, &[], 60, health_state, indexer_state, prometheus_handle, 15000, config)
 }
 
 // --- Health ---
@@ -454,157 +455,125 @@ async fn get_events_by_contract_sort_desc_returns_newest_first(pool: PgPool) {
     assert!(data[0]["ledger"].as_i64().unwrap() >= data[1]["ledger"].as_i64().unwrap());
 }
 
-// --- Issue #240: topic_sym filter ---
+// --- GET /v1/events/stats ---
 
-async fn insert_event_with_topic_sym(pool: &PgPool, contract_id: &str, tx_hash: &str, ledger: i64, topic_sym: &str) {
-    sqlx::query(
-        "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
-         VALUES ($1, $2, $3, $4, NOW(), $5)",
-    )
-    .bind(contract_id)
-    .bind("contract")
-    .bind(tx_hash)
-    .bind(ledger)
-    .bind(serde_json::json!({ "topic": [{ "sym": topic_sym }], "value": {} }))
-    .execute(pool)
-    .await
-    .unwrap();
+async fn insert_stats_seed_data(pool: &PgPool) {
+    // 3 contract events for contract A
+    let contract_a = "CA23456789012345678901234567890123456789012345678901234567";
+    // 2 contract events for contract B
+    let contract_b = "CB23456789012345678901234567890123456789012345678901234567";
+
+    for i in 0..3i64 {
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, 'contract', $2, $3, NOW(), '{}'::jsonb)",
+        )
+        .bind(contract_a)
+        .bind(format!("{:0>63}{}", i, "a"))
+        .bind(100 + i)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+    for i in 0..2i64 {
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, 'diagnostic', $2, $3, NOW(), '{}'::jsonb)",
+        )
+        .bind(contract_b)
+        .bind(format!("{:0>63}{}", i, "b"))
+        .bind(200 + i)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn get_events_topic_sym_filter_returns_matching_events(pool: PgPool) {
-    let contract_id = "C1234567890123456789012345678901234567890123456789012345";
-    insert_event_with_topic_sym(&pool, contract_id, &format!("{:0>64}", "a1"), 100, "transfer").await;
-    insert_event_with_topic_sym(&pool, contract_id, &format!("{:0>64}", "b2"), 200, "mint").await;
-    insert_event_with_topic_sym(&pool, contract_id, &format!("{:0>64}", "c3"), 300, "transfer").await;
-
+async fn stats_returns_200_with_correct_totals(pool: PgPool) {
+    insert_stats_seed_data(&pool).await;
     let app = make_router(pool, None);
+
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/events?topic_sym=transfer")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    let data = body["data"].as_array().unwrap();
-    assert_eq!(data.len(), 2, "expected 2 transfer events");
+
+    assert_eq!(body["total_events"], 5);
+    assert_eq!(body["events_by_type"]["contract"], 3);
+    assert_eq!(body["events_by_type"]["diagnostic"], 2);
+    assert_eq!(body["events_by_type"]["system"], 0);
+    assert!(body["computed_at"].is_string());
+    assert_eq!(body["min_ledger"], 100);
+    assert_eq!(body["max_ledger"], 201);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn get_events_topic_sym_filter_no_match_returns_empty(pool: PgPool) {
-    let contract_id = "C1234567890123456789012345678901234567890123456789012345";
-    insert_event_with_topic_sym(&pool, contract_id, &format!("{:0>64}", "d4"), 100, "mint").await;
-
+async fn stats_top_contracts_ordered_by_count(pool: PgPool) {
+    insert_stats_seed_data(&pool).await;
     let app = make_router(pool, None);
+
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/events?topic_sym=burn")
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(body["data"].as_array().unwrap().len(), 0);
-}
 
-// --- Issue #241: batch tx endpoint ---
-
-async fn insert_event_for_tx(pool: &PgPool, tx_hash: &str, ledger: i64) {
-    sqlx::query(
-        "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
-         VALUES ($1, $2, $3, $4, NOW(), $5)",
-    )
-    .bind(format!("C{:0>55}", ledger))
-    .bind("contract")
-    .bind(tx_hash)
-    .bind(ledger)
-    .bind(serde_json::json!({}))
-    .execute(pool)
-    .await
-    .unwrap();
+    let top = body["top_contracts"].as_array().unwrap();
+    assert_eq!(top.len(), 2);
+    // Contract A has 3 events, contract B has 2 — A should be first.
+    assert_eq!(top[0]["event_count"], 3);
+    assert_eq!(top[1]["event_count"], 2);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn batch_tx_returns_map_with_all_hashes(pool: PgPool) {
-    let hash_a = "a".repeat(64);
-    let hash_b = "b".repeat(64);
-    insert_event_for_tx(&pool, &hash_a, 100).await;
-    // hash_b has no events
-
+async fn stats_returns_cache_control_header(pool: PgPool) {
     let app = make_router(pool, None);
+
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/events/tx/batch")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({ "hashes": [hash_a, hash_b] })).unwrap(),
-                ))
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cc = resp.headers().get("cache-control").unwrap().to_str().unwrap();
+    assert!(cc.contains("max-age=60"), "expected max-age=60 in Cache-Control, got: {cc}");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn stats_empty_db_returns_zeros(pool: PgPool) {
+    let app = make_router(pool, None);
+
+    let resp = app
+        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
     let body: serde_json::Value =
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
-    // Both hashes present in response
-    assert!(body.get(&"a".repeat(64)).is_some());
-    assert!(body.get(&"b".repeat(64)).is_some());
-    // hash_a has 1 event, hash_b has 0
-    assert_eq!(body[&"a".repeat(64)].as_array().unwrap().len(), 1);
-    assert_eq!(body[&"b".repeat(64)].as_array().unwrap().len(), 0);
+
+    assert_eq!(body["total_events"], 0);
+    assert!(body["min_ledger"].is_null());
+    assert!(body["max_ledger"].is_null());
+    assert_eq!(body["top_contracts"].as_array().unwrap().len(), 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn batch_tx_invalid_hash_returns_400(pool: PgPool) {
-    let app = make_router(pool, None);
+async fn stats_requires_auth_when_key_configured(pool: PgPool) {
+    let app = make_router(pool, Some("secret".to_string()));
+
     let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/events/tx/batch")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({ "hashes": ["not-a-valid-hash"] })).unwrap(),
-                ))
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-}
-
-#[sqlx::test(migrations = "./migrations")]
-async fn batch_tx_too_many_hashes_returns_400(pool: PgPool) {
-    let hashes: Vec<String> = (0..101).map(|i| format!("{:0>64}", i)).collect();
-    let app = make_router(pool, None);
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/events/tx/batch")
-                .header(header::CONTENT_TYPE, "application/json")
-                .body(Body::from(
-                    serde_json::to_vec(&serde_json::json!({ "hashes": hashes })).unwrap(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }

@@ -158,6 +158,34 @@ pub struct ContractSummary {
     pub latest_ledger: i64,
 }
 
+/// Aggregate statistics for indexed events.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EventStats {
+    /// Total number of indexed events.
+    pub total_events: i64,
+    /// Events indexed in the last 24 hours.
+    pub events_last_24h: i64,
+    /// Events indexed in the last 7 days.
+    pub events_last_7d: i64,
+    /// Top 10 most active contracts by event count.
+    pub top_contracts: Vec<ContractStatEntry>,
+    /// Event count broken down by type.
+    pub events_by_type: std::collections::HashMap<String, i64>,
+    /// Minimum ledger sequence number in the dataset.
+    pub min_ledger: Option<i64>,
+    /// Maximum ledger sequence number in the dataset.
+    pub max_ledger: Option<i64>,
+    /// Timestamp when these statistics were computed.
+    pub computed_at: DateTime<Utc>,
+}
+
+/// A single entry in the top-contracts list.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ContractStatEntry {
+    pub contract_id: String,
+    pub event_count: i64,
+}
+
 impl PaginationParams {
     pub const ALLOWED_FIELDS: &'static [&'static str] = &[
         "id",

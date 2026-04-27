@@ -259,25 +259,61 @@ async fn main() -> anyhow::Result<()> {
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
     info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
 
-    let router = routes::create_router_with_tx(pool, read_pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, config.behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.health_check_timeout_ms, None, None, config.clone());
+    // When TLS is enabled directly, BEHIND_PROXY is forced false — no proxy in front.
+    let behind_proxy = match (&config.tls_cert_file, &config.tls_key_file) {
+        (Some(_), Some(_)) => {
+            if config.behind_proxy {
+                warn!("TLS_CERT_FILE and TLS_KEY_FILE are set — overriding BEHIND_PROXY=false (no proxy in front of direct TLS)");
+            }
+            false
+        }
+        _ => config.behind_proxy,
+    };
 
-    info!(addr = %addr, "Soroban Pulse listening");
+    let router = routes::create_router_with_tx(pool, read_pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.health_check_timeout_ms, config.event_data_encryption_key, config.event_data_encryption_key_old, config.clone());
 
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        error!(addr = %addr, "Address already in use");
-        e
-    })?;
+    match (&config.tls_cert_file, &config.tls_key_file) {
+        (Some(cert_path), Some(key_path)) => {
+            // Validate that the cert and key files exist and are readable at startup.
+            std::fs::metadata(cert_path)
+                .unwrap_or_else(|e| panic!("TLS_CERT_FILE '{}' is not accessible: {}", cert_path, e));
+            std::fs::metadata(key_path)
+                .unwrap_or_else(|e| panic!("TLS_KEY_FILE '{}' is not accessible: {}", key_path, e));
 
-    info!(behind_proxy = config.behind_proxy, "Running server - trusting X-Forwarded-For");
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .unwrap_or_else(|e| panic!("Failed to load TLS certificate/key: {}", e));
 
-    axum::serve(
-        listener,
-        router,
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown_rx_axum.changed().await;
-    })
-    .await?;
+            info!(addr = %addr, cert = %cert_path, "Soroban Pulse listening (HTTPS/TLS)");
+
+            axum_server::bind_rustls(addr, tls_config)
+                .serve(router.into_make_service())
+                .await?;
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            warn!("Only one of TLS_CERT_FILE / TLS_KEY_FILE is set — both are required for TLS. Falling back to plain HTTP.");
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                error!(addr = %addr, "Address already in use");
+                e
+            })?;
+            info!(addr = %addr, "Soroban Pulse listening (HTTP)");
+            info!(behind_proxy = behind_proxy, "Running server - trusting X-Forwarded-For");
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move { let _ = shutdown_rx_axum.changed().await; })
+                .await?;
+        }
+        (None, None) => {
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                error!(addr = %addr, "Address already in use");
+                e
+            })?;
+            info!(addr = %addr, "Soroban Pulse listening (HTTP)");
+            info!(behind_proxy = behind_proxy, "Running server - trusting X-Forwarded-For");
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move { let _ = shutdown_rx_axum.changed().await; })
+                .await?;
+        }
+    }
 
     let _ = indexer_handle.await;
 

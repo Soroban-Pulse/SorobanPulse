@@ -299,6 +299,82 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
     }))
 }
 
+/// Returns aggregate statistics about indexed events.
+#[utoipa::path(
+    get,
+    path = "/v1/events/stats",
+    tag = "events",
+    responses(
+        (status = 200, description = "Aggregate event statistics", body = crate::models::EventStats),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
+    )
+)]
+pub async fn get_event_stats(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    use std::collections::HashMap;
+
+    // Single query: total, 24h, 7d, ledger range, per-type counts, top 10 contracts
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*)                                                        AS total_events,
+            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '24 hours') AS events_last_24h,
+            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '7 days')   AS events_last_7d,
+            MIN(ledger)                                                     AS min_ledger,
+            MAX(ledger)                                                     AS max_ledger,
+            COUNT(*) FILTER (WHERE event_type = 'contract')                 AS type_contract,
+            COUNT(*) FILTER (WHERE event_type = 'diagnostic')               AS type_diagnostic,
+            COUNT(*) FILTER (WHERE event_type = 'system')                   AS type_system
+        FROM events
+        "#,
+    )
+    .fetch_one(&state.read_pool)
+    .await?;
+
+    let total_events: i64 = rows.try_get("total_events")?;
+    let events_last_24h: i64 = rows.try_get("events_last_24h")?;
+    let events_last_7d: i64 = rows.try_get("events_last_7d")?;
+    let min_ledger: Option<i64> = rows.try_get("min_ledger")?;
+    let max_ledger: Option<i64> = rows.try_get("max_ledger")?;
+
+    let mut events_by_type = HashMap::new();
+    events_by_type.insert("contract".to_string(), rows.try_get::<i64, _>("type_contract")?);
+    events_by_type.insert("diagnostic".to_string(), rows.try_get::<i64, _>("type_diagnostic")?);
+    events_by_type.insert("system".to_string(), rows.try_get::<i64, _>("type_system")?);
+
+    let top_rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT contract_id, COUNT(*) AS event_count FROM events GROUP BY contract_id ORDER BY event_count DESC LIMIT 10",
+    )
+    .fetch_all(&state.read_pool)
+    .await?;
+
+    let top_contracts = top_rows
+        .into_iter()
+        .map(|(contract_id, event_count)| crate::models::ContractStatEntry { contract_id, event_count })
+        .collect();
+
+    let stats = crate::models::EventStats {
+        total_events,
+        events_last_24h,
+        events_last_7d,
+        top_contracts,
+        events_by_type,
+        min_ledger,
+        max_ledger,
+        computed_at: Utc::now(),
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("public, max-age=60"),
+    );
+
+    Ok((headers, Json(stats)))
+}
+
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     crate::metrics::update_db_pool_metrics(&state.pool);
     state.prometheus_handle.render()
@@ -1055,7 +1131,7 @@ pub async fn export_events(
         }
     }
 
-    let max_rows = 100_000i64;
+    let max_rows = state.config.export_max_rows as i64;
 
     let mut conditions: Vec<String> = Vec::new();
     let mut bind_idx: i32 = 1;
@@ -1617,8 +1693,8 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let indexer_state = Arc::new(IndexerState::new());
         let prometheus_handle = crate::metrics::init_metrics();
-
-        crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000)
+        let config = crate::config::Config::default();
+        crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000, config)
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2019,7 +2095,8 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let prometheus_handle = crate::metrics::init_metrics();
         let indexer_state = Arc::new(IndexerState::new());
-        let app = crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000);
+        let config = crate::config::Config::default();
+        let app = crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000, config);
 
         let response = app
             .oneshot(
@@ -2088,7 +2165,8 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let prometheus_handle = crate::metrics::init_metrics();
         let indexer_state = Arc::new(IndexerState::new());
-        let app = crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000);
+        let config = crate::config::Config::default();
+        let app = crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000, config);
 
         let response = app
             .oneshot(
@@ -2113,7 +2191,8 @@ mod tests {
         // never updated, treated as stalled
         let prometheus_handle = crate::metrics::init_metrics();
         let indexer_state = Arc::new(IndexerState::new());
-        let app = crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000);
+        let config = crate::config::Config::default();
+        let app = crate::routes::create_router(pool, Vec::new(), &[], 60, health_state, indexer_state, prometheus_handle, 2000, config);
 
         let response = app
             .oneshot(
@@ -3153,16 +3232,18 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let indexer_state = Arc::new(IndexerState::new());
         let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
         // Create router with API key to bypass auth
         let app = crate::routes::create_router(
-            pool, 
-            vec!["test-key".to_string()], 
-            &[], 
-            60, 
-            health_state, 
-            indexer_state, 
-            prometheus_handle, 
-            2000
+            pool,
+            vec!["test-key".to_string()],
+            &[],
+            60,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            2000,
+            config
         );
 
         // Test invalid range: from_ledger > to_ledger
@@ -3195,16 +3276,18 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let indexer_state = Arc::new(IndexerState::new());
         let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
         // Create router with API key to bypass auth
         let app = crate::routes::create_router(
-            pool, 
-            vec!["test-key".to_string()], 
-            &[], 
-            60, 
-            health_state, 
-            indexer_state, 
-            prometheus_handle, 
-            2000
+            pool,
+            vec!["test-key".to_string()],
+            &[],
+            60,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            2000,
+            config
         );
 
         // Test range too large: > 10,000 ledgers
@@ -3241,16 +3324,18 @@ mod tests {
         indexer_state.is_active_indexer.store(false, std::sync::atomic::Ordering::Relaxed);
         
         let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
         // Create router with API key to bypass auth
         let app = crate::routes::create_router(
-            pool, 
-            vec!["test-key".to_string()], 
-            &[], 
-            60, 
-            health_state, 
-            indexer_state, 
-            prometheus_handle, 
-            2000
+            pool,
+            vec!["test-key".to_string()],
+            &[],
+            60,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            2000,
+            config
         );
 
         let replay_request = ReplayRequest {
@@ -3286,16 +3371,18 @@ mod tests {
         indexer_state.is_active_indexer.store(true, std::sync::atomic::Ordering::Relaxed);
         
         let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
         // Create router with API key to bypass auth
         let app = crate::routes::create_router(
-            pool, 
-            vec!["test-key".to_string()], 
-            &[], 
-            60, 
-            health_state, 
-            indexer_state, 
-            prometheus_handle, 
-            2000
+            pool,
+            vec!["test-key".to_string()],
+            &[],
+            60,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            2000,
+            config
         );
 
         let replay_request = ReplayRequest {
@@ -3333,16 +3420,18 @@ mod tests {
         indexer_state.is_active_indexer.store(true, std::sync::atomic::Ordering::Relaxed);
         
         let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
         // Create router with API key to bypass auth
         let app = crate::routes::create_router(
-            pool, 
-            vec!["test-key".to_string()], 
-            &[], 
-            60, 
-            health_state, 
-            indexer_state, 
-            prometheus_handle, 
-            2000
+            pool,
+            vec!["test-key".to_string()],
+            &[],
+            60,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            2000,
+            config
         );
 
         let replay_request = ReplayRequest {
@@ -3374,16 +3463,18 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let indexer_state = Arc::new(IndexerState::new());
         let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
         // Create router with API key
         let app = crate::routes::create_router(
-            pool, 
-            vec!["correct-key".to_string()], 
-            &[], 
-            60, 
-            health_state, 
-            indexer_state, 
-            prometheus_handle, 
-            2000
+            pool,
+            vec!["correct-key".to_string()],
+            &[],
+            60,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            2000,
+            config
         );
 
         let replay_request = ReplayRequest {
@@ -3417,8 +3508,9 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let indexer_state = Arc::new(IndexerState::new());
         let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
         // Export requires api_keys to be non-empty
-        crate::routes::create_router(pool, vec!["test-key".to_string()], &[], 60, health_state, indexer_state, prometheus_handle, 2000)
+        crate::routes::create_router(pool, vec!["test-key".to_string()], &[], 60, health_state, indexer_state, prometheus_handle, 2000, config)
     }
 
     #[sqlx::test(migrations = "./migrations")]
