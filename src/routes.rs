@@ -316,13 +316,22 @@ pub fn create_router_with_tx(
 
 fn build_cors(allowed_origins: &[String]) -> CorsLayer {
     let methods = [Method::GET, Method::POST];
-    let headers = [axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION];
+    let allowed_headers = [
+        axum::http::header::AUTHORIZATION,
+        axum::http::header::CONTENT_TYPE,
+        axum::http::header::HeaderName::from_static("x-api-key"),
+        axum::http::header::HeaderName::from_static("x-request-id"),
+    ];
+    let exposed_headers = [axum::http::header::HeaderName::from_static("x-request-id")];
+    let max_age = std::time::Duration::from_secs(86400);
 
     if allowed_origins.iter().any(|o| o == "*") {
         return CorsLayer::new()
             .allow_origin(tower_http::cors::Any)
             .allow_methods(methods)
-            .allow_headers(headers);
+            .allow_headers(allowed_headers)
+            .expose_headers(exposed_headers)
+            .max_age(max_age);
     }
 
     let origins: Vec<HeaderValue> = allowed_origins
@@ -333,7 +342,9 @@ fn build_cors(allowed_origins: &[String]) -> CorsLayer {
     CorsLayer::new()
         .allow_origin(origins)
         .allow_methods(methods)
-        .allow_headers(headers)
+        .allow_headers(allowed_headers)
+        .expose_headers(exposed_headers)
+        .max_age(max_age)
         .vary([axum::http::header::ORIGIN])
 }
 
@@ -543,5 +554,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    fn cors_test_app(origins: &[&str]) -> Router {
+        let origins: Vec<String> = origins.iter().map(|s| s.to_string()).collect();
+        let cors = build_cors(&origins);
+        Router::new()
+            .route("/test", get(|| async { "ok" }))
+            .layer(cors)
+    }
+
+    #[tokio::test]
+    async fn preflight_includes_max_age() {
+        let app = cors_test_app(&["http://example.com"]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/test")
+                    .header("Origin", "http://example.com")
+                    .header("Access-Control-Request-Method", "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let max_age = resp.headers().get("access-control-max-age")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(max_age, "86400");
+    }
+
+    #[tokio::test]
+    async fn preflight_exposes_x_request_id() {
+        let app = cors_test_app(&["http://example.com"]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/test")
+                    .header("Origin", "http://example.com")
+                    .header("Access-Control-Request-Method", "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let expose = resp.headers().get("access-control-expose-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(expose.to_lowercase().contains("x-request-id"), "expose headers: {expose}");
     }
 }
