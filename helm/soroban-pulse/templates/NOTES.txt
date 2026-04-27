@@ -1,0 +1,20 @@
+Soroban Pulse has been deployed!
+
+1. Get the application URL:
+{{- if .Values.ingress.enabled }}
+  http{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else }}
+  kubectl port-forward svc/{{ include "soroban-pulse.fullname" . }} 3000:{{ .Values.service.port }}
+  Then visit: http://localhost:3000
+{{- end }}
+
+2. Check the health endpoint:
+  curl http://<HOST>/healthz/ready
+
+3. View logs:
+  kubectl logs -l app.kubernetes.io/name={{ include "soroban-pulse.name" . }} -f
+
+4. Before deploying to production, set real secret values:
+  helm upgrade {{ .Release.Name }} ./helm/soroban-pulse \
+    --set secrets.databaseUrl="postgres://user:pass@host:5432/db" \
+    --set secrets.apiKey="your-api-key"

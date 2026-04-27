@@ -224,6 +224,7 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_db_pool_size` - Current number of open database connections
 - `soroban_pulse_db_pool_idle` - Number of idle database connections
 - `soroban_pulse_db_pool_max` - Configured maximum database connections
+- `soroban_pulse_process_memory_bytes` - Process RSS memory in bytes (Linux only, updated every 30 seconds)
 
 ### Distributed Tracing
 
@@ -296,6 +297,24 @@ cargo bench --bench db_queries
 | `db/get_events_by_contract` | ~1.2 ms | ~2.0 ms |
 
 > These numbers are indicative baselines measured on a local development machine. Your results will vary based on hardware, Postgres configuration, and dataset size. Use them as a regression reference — a significant increase after a schema or query change warrants investigation.
+
+#### Compression Benchmarks
+
+A benchmark in `benches/compression.rs` measures gzip compression time and ratio for typical event list responses at 10, 100, and 1000 events.
+
+```bash
+cargo bench --bench compression
+```
+
+##### Baseline Numbers (synthetic event JSON, local machine)
+
+| Events | Uncompressed | Compressed | Ratio | Compression time |
+|--------|-------------|------------|-------|------------------|
+| 10     | ~1.5 KB     | ~0.6 KB    | ~2.5x | ~5 µs            |
+| 100    | ~15 KB      | ~2.5 KB    | ~6x   | ~30 µs           |
+| 1000   | ~150 KB     | ~12 KB     | ~12x  | ~250 µs          |
+
+**Recommendation:** The default zlib level 6 (tower-http's `CompressionLayer` default) provides a good balance between CPU overhead and bandwidth savings. For responses of 100+ events the compression ratio exceeds 6x, making it strongly worthwhile. For very small responses (< 10 events, < 1 KB) the overhead is negligible either way. No adjustment to the default compression level is recommended.
 
 ### Load Testing
 

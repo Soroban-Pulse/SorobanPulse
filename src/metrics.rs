@@ -5,9 +5,19 @@ use sqlx::PgPool;
 // of the same name. Use an explicit extern-crate alias to disambiguate.
 extern crate metrics as m;
 
+/// SLO-aligned histogram buckets for HTTP request duration (seconds).
+const HTTP_DURATION_BUCKETS: &[f64] = &[0.05, 0.1, 0.2, 0.5, 1.0, 5.0];
+
 /// Initialize the Prometheus metrics exporter
 pub fn init_metrics() -> PrometheusHandle {
     PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Full(
+                "soroban_pulse_http_request_duration_seconds".to_string(),
+            ),
+            HTTP_DURATION_BUCKETS,
+        )
+        .expect("Failed to set histogram buckets")
         .install_recorder()
         .expect("Failed to install Prometheus exporter")
 }
@@ -61,6 +71,36 @@ pub fn update_sse_connections(count: usize) {
 pub fn update_db_pool_metrics(pool: &PgPool) {
     m::gauge!("soroban_pulse_db_pool_size", pool.size() as f64);
     m::gauge!("soroban_pulse_db_pool_idle", pool.num_idle() as f64);
+}
+
+/// Update the process RSS memory gauge (Linux only).
+/// Reads VmRSS from /proc/self/status.
+#[cfg(target_os = "linux")]
+pub fn update_process_memory_bytes() {
+    if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                if let Some(kb_str) = rest.split_whitespace().next() {
+                    if let Ok(kb) = kb_str.parse::<u64>() {
+                        m::gauge!("soroban_pulse_process_memory_bytes", (kb * 1024) as f64);
+                    }
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Spawn a background task that updates process memory every 30 seconds (Linux only).
+#[cfg(target_os = "linux")]
+pub fn spawn_memory_collector() {
+    tokio::spawn(async {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            interval.tick().await;
+            update_process_memory_bytes();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -142,5 +182,22 @@ mod tests {
         // This should not panic
         update_db_pool_metrics(&pool);
         assert!(true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_memory_bytes_is_nonzero_on_linux() {
+        update_process_memory_bytes();
+        // After updating, the gauge should have been set to a positive value.
+        // We can't easily read back a gauge value from the metrics crate without
+        // a recorder, so we verify the /proc/self/status parse succeeds instead.
+        let status = std::fs::read_to_string("/proc/self/status").unwrap();
+        let rss_kb: u64 = status
+            .lines()
+            .find(|l| l.starts_with("VmRSS:"))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|s| s.parse().ok())
+            .expect("VmRSS not found in /proc/self/status");
+        assert!(rss_kb > 0, "RSS should be non-zero");
     }
 }

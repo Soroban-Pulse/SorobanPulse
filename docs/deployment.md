@@ -1,5 +1,20 @@
 # Deployment Guide
 
+## Healthcheck Configuration
+
+The `app` service in `docker-compose.yml` includes a Docker healthcheck that polls `GET /healthz/ready` every 10 seconds. The check is configured with:
+
+- `interval: 10s` — time between checks
+- `timeout: 5s` — maximum time for a single check to respond
+- `retries: 5` — consecutive failures before the container is marked unhealthy
+- `start_period: 30s` — grace period on startup to allow migrations to complete
+
+The `db` service uses `pg_isready` as its healthcheck, and the `app` service declares `depends_on: db: condition: service_healthy`, so Docker Compose will not start the application until PostgreSQL is accepting connections.
+
+`make docker-up` runs `docker-compose wait app` after starting the stack, blocking until the app container reports healthy.
+
+---
+
 ## Direct TLS
 
 By default, Soroban Pulse serves plain HTTP and relies on an external reverse proxy (nginx, Caddy, AWS ALB, etc.) for TLS termination. For simpler deployments — a single VPS, a development environment with self-signed certificates, or any setup where adding a proxy is impractical — the service can handle TLS directly.

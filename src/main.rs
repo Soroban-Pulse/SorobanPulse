@@ -70,6 +70,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize metrics exporter
     let prometheus_handle = metrics::init_metrics();
 
+    #[cfg(target_os = "linux")]
+    metrics::spawn_memory_collector();
+
     let config = config::Config::from_env();
 
     info!(
@@ -91,6 +94,9 @@ async fn main() -> anyhow::Result<()> {
                 config.db_max_connections,
                 config.db_min_connections,
                 config.db_statement_timeout_ms,
+                config.db_idle_timeout_secs,
+                config.db_max_lifetime_secs,
+                config.db_test_before_acquire,
             )
             .await
             {
@@ -178,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
         _ => config.behind_proxy,
     };
 
-    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.clone());
+    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, 2000, config.event_data_encryption_key, config.event_data_encryption_key_old, config.contract_count_cache_size, config.contract_count_cache_ttl_secs);
 
     match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(cert_path), Some(key_path)) => {

@@ -24,6 +24,8 @@ use utoipa::OpenApi;
 
 use crate::{config::{HealthState, IndexerState}, handlers, middleware, metrics, models::SorobanEvent};
 
+type ContractCountCache = moka::future::Cache<String, i64>;
+
 #[derive(Clone, Default)]
 struct UuidMakeRequestId;
 
@@ -47,6 +49,7 @@ pub struct AppState {
     pub health_check_timeout_ms: u64,
     pub encryption_key: Option<[u8; 32]>,
     pub encryption_key_old: Option<[u8; 32]>,
+    pub contract_count_cache: ContractCountCache,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -61,6 +64,7 @@ pub struct AppState {
         handlers::health,
         handlers::status,
         handlers::get_events,
+        handlers::export_events,
         handlers::get_events_by_contract,
         handlers::get_events_by_tx,
         handlers::stream_events,
@@ -93,7 +97,7 @@ pub fn create_router(
     prometheus_handle: PrometheusHandle,
     health_check_timeout_ms: u64,
 ) -> Router {
-    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None)
+    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None, 1000, 30)
 }
 
 pub fn create_router_with_tx(
@@ -111,9 +115,15 @@ pub fn create_router_with_tx(
     health_check_timeout_ms: u64,
     encryption_key: Option<[u8; 32]>,
     encryption_key_old: Option<[u8; 32]>,
+    contract_count_cache_size: u64,
+    contract_count_cache_ttl_secs: u64,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_keys });
+    let contract_count_cache = moka::future::Cache::builder()
+        .max_capacity(contract_count_cache_size)
+        .time_to_live(std::time::Duration::from_secs(contract_count_cache_ttl_secs))
+        .build();
     let app_state = AppState {
         pool,
         health_state,
@@ -126,6 +136,7 @@ pub fn create_router_with_tx(
         health_check_timeout_ms,
         encryption_key,
         encryption_key_old,
+        contract_count_cache,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.
@@ -137,6 +148,7 @@ pub fn create_router_with_tx(
     // Versioned v1 routes
     let v1 = Router::new()
         .route("/events", get(handlers::get_events))
+        .route("/events/export", get(handlers::export_events))
         .route("/events/stream", get(handlers::stream_events))
         .route("/events/contract/:contract_id", get(handlers::get_events_by_contract))
         .route("/events/contract/:contract_id/stream", get(handlers::stream_events_by_contract))
@@ -225,17 +237,32 @@ pub fn create_router_with_tx(
             auth_state,
             middleware::auth_middleware,
         ))
-        .layer(axum::middleware::from_fn(|req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
+        .layer(axum::middleware::from_fn(move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
             let method = req.method().as_str().to_string();
             let route = req.extensions()
                 .get::<MatchedPath>()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_else(|| "<unknown>".to_string());
+            let request_id = req.headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown")
+                .to_owned();
             let start = Instant::now();
             let response = next.run(req).await;
             let duration = start.elapsed();
             let status = response.status().as_u16().to_string();
             metrics::record_http_request_duration(duration, &method, &route, &status);
+            if duration.as_millis() as u64 > slow_request_threshold_ms {
+                tracing::warn!(
+                    method = %method,
+                    path = %route,
+                    status = %status,
+                    duration_ms = duration.as_millis(),
+                    request_id = %request_id,
+                    "slow request"
+                );
+            }
             response
         }))
         .layer(cors)
@@ -291,6 +318,81 @@ mod tests {
     use axum::http::{header, Request, StatusCode};
     use axum::body::Body;
     use tower::ServiceExt;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Build a minimal router that sleeps for `delay_ms` and runs the metrics
+    /// middleware with the given `threshold_ms`.
+    fn slow_request_test_app(delay_ms: u64, threshold_ms: u64) -> Router {
+        Router::new()
+            .route("/slow", get(move || async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                "ok"
+            }))
+            .layer(axum::middleware::from_fn(move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
+                let method = req.method().as_str().to_string();
+                let route = req.extensions()
+                    .get::<MatchedPath>()
+                    .map(|p| p.as_str().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let request_id = req.headers()
+                    .get("x-request-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let start = std::time::Instant::now();
+                let response = next.run(req).await;
+                let duration = start.elapsed();
+                let status = response.status().as_u16().to_string();
+                if duration.as_millis() as u64 > threshold_ms {
+                    tracing::warn!(
+                        method = %method,
+                        path = %route,
+                        status = %status,
+                        duration_ms = duration.as_millis(),
+                        request_id = %request_id,
+                        "slow request"
+                    );
+                }
+                response
+            }))
+    }
+
+    #[tokio::test]
+    async fn slow_request_warn_is_emitted() {
+        // Capture warn-level events.
+        let (writer, output) = tracing_subscriber::fmt::TestWriter::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(writer)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let app = slow_request_test_app(20, 0); // threshold=0 → always warn
+        app.oneshot(
+            Request::builder().uri("/slow").body(Body::empty()).unwrap()
+        ).await.unwrap();
+
+        let logs = output.into_string();
+        assert!(logs.contains("slow request"), "expected 'slow request' warn, got: {logs}");
+    }
+
+    #[tokio::test]
+    async fn fast_request_no_warn() {
+        let (writer, output) = tracing_subscriber::fmt::TestWriter::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(writer)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let app = slow_request_test_app(0, 60_000); // threshold=60s → never warn
+        app.oneshot(
+            Request::builder().uri("/slow").body(Body::empty()).unwrap()
+        ).await.unwrap();
+
+        let logs = output.into_string();
+        assert!(!logs.contains("slow request"), "unexpected 'slow request' warn: {logs}");
+    }
 
     #[tokio::test]
     async fn test_compression_header() {
