@@ -10,6 +10,7 @@ mod db;
 mod encryption;
 mod error;
 mod handlers;
+mod index_monitor;
 mod indexer;
 mod metrics;
 mod middleware;
@@ -134,13 +135,16 @@ async fn main() -> anyhow::Result<()> {
 
     // Spawn background indexer with health state
     let rpc_client = indexer::SorobanRpcClient::new(&config);
-    let mut indexer = indexer::Indexer::new(pool.clone(), config.clone(), shutdown_rx, rpc_client);
+    let mut indexer = indexer::Indexer::new(pool.clone(), config.clone(), shutdown_rx.clone(), rpc_client);
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
     let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });
+
+    // Spawn index usage monitoring background task
+    index_monitor::spawn(pool.clone(), config.index_check_interval_hours, shutdown_rx.clone());
 
     async fn shutdown_signal() {
         #[cfg(unix)]
@@ -186,7 +190,7 @@ async fn main() -> anyhow::Result<()> {
         _ => config.behind_proxy,
     };
 
-    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, 2000, config.event_data_encryption_key, config.event_data_encryption_key_old, config.contract_count_cache_size, config.contract_count_cache_ttl_secs);
+    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.health_check_timeout_ms, config.event_data_encryption_key, config.event_data_encryption_key_old, config.clone());
 
     match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(cert_path), Some(key_path)) => {

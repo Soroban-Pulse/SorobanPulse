@@ -180,6 +180,9 @@ pub struct Config {
     pub event_data_encryption_key_old: Option<[u8; 32]>,
     pub contract_count_cache_size: u64,
     pub contract_count_cache_ttl_secs: u64,
+    /// How often to check index usage (hours). Default: 24.
+    pub index_check_interval_hours: u64,
+    pub health_check_timeout_ms: u64,
 }
 
 impl Default for Config {
@@ -217,6 +220,8 @@ impl Default for Config {
             event_data_encryption_key_old: None,
             contract_count_cache_size: 1000,
             contract_count_cache_ttl_secs: 30,
+            index_check_interval_hours: 24,
+            health_check_timeout_ms: 2000,
         }
     }
 }
@@ -461,6 +466,14 @@ impl Config {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .expect("CONTRACT_COUNT_CACHE_TTL_SECS must be a number"),
+            index_check_interval_hours: env::var("INDEX_CHECK_INTERVAL_HOURS")
+                .unwrap_or_else(|_| "24".to_string())
+                .parse()
+                .expect("INDEX_CHECK_INTERVAL_HOURS must be a number"),
+            health_check_timeout_ms: env::var("HEALTH_CHECK_TIMEOUT_MS")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()
+                .expect("HEALTH_CHECK_TIMEOUT_MS must be a number"),
         }
     }
 }

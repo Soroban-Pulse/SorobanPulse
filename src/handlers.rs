@@ -185,7 +185,7 @@ async fn build_health_response(state: &AppState) -> (StatusCode, Value) {
     tag = "system",
     responses(
         (status = 200, description = "Service is healthy"),
-        (status = 503, description = "Service is degraded"),
+        (status = 503, description = "Service is degraded", body = ErrorResponse),
     )
 )]
 pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
@@ -211,7 +211,7 @@ pub async fn health_live() -> (StatusCode, Json<Value>) {
     tag = "system",
     responses(
         (status = 200, description = "Service is ready"),
-        (status = 503, description = "Service is not ready"),
+        (status = 503, description = "Service is not ready", body = ErrorResponse),
     )
 )]
 pub async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
@@ -323,7 +323,10 @@ pub async fn swagger_ui() -> impl IntoResponse {
     ),
     responses(
         (status = 200, description = "SSE stream of new events (text/event-stream)"),
-        (status = 400, description = "Invalid contract_id format"),
+        (status = 400, description = "Invalid contract_id format", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 429, description = "Too many requests", body = ErrorResponse),
+        (status = 503, description = "Too many SSE connections", body = ErrorResponse),
     )
 )]
 pub async fn stream_events(
@@ -345,7 +348,10 @@ pub async fn stream_events(
     ),
     responses(
         (status = 200, description = "SSE stream of contract events (text/event-stream)"),
-        (status = 400, description = "Invalid contract_id format"),
+        (status = 400, description = "Invalid contract_id format", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 429, description = "Too many requests", body = ErrorResponse),
+        (status = 503, description = "Too many SSE connections", body = ErrorResponse),
     )
 )]
 pub async fn stream_events_by_contract(
@@ -359,6 +365,158 @@ pub async fn stream_events_by_contract(
         (status, body)
     })?;
     stream_events_internal(State(state), Some(contract_id), params.fields, headers).await
+}
+
+/// Stream events for multiple contracts simultaneously via Server-Sent Events.
+#[utoipa::path(
+    get,
+    path = "/v1/events/stream/multi",
+    tag = "events",
+    params(
+        ("contract_ids" = String, Query, description = "Comma-separated list of contract IDs to subscribe to"),
+    ),
+    responses(
+        (status = 200, description = "SSE stream of events from the specified contracts (text/event-stream)"),
+        (status = 400, description = "Invalid or empty contract_ids", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 429, description = "Too many requests", body = ErrorResponse),
+        (status = 503, description = "Too many SSE connections", body = ErrorResponse),
+    )
+)]
+pub async fn stream_events_multi(
+    State(state): State<AppState>,
+    Query(params): Query<crate::models::MultiStreamParams>,
+    headers: axum::http::HeaderMap,
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
+    let raw = params.contract_ids.unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "contract_ids must not be empty", "code": "VALIDATION_ERROR" })),
+        ));
+    }
+
+    let ids: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).collect();
+
+    // Validate every ID; collect all invalid ones for a helpful error message.
+    let invalid: Vec<String> = ids
+        .iter()
+        .filter(|id| validate_contract_id(id).is_err())
+        .cloned()
+        .collect();
+
+    if !invalid.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid contract_id(s)",
+                "code": "VALIDATION_ERROR",
+                "invalid_ids": invalid,
+            })),
+        ));
+    }
+
+    // Check connection limit
+    let current_connections = state.sse_connections.load(std::sync::atomic::Ordering::Relaxed);
+    if current_connections >= state.sse_max_connections {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": "too many SSE connections", "code": "SSE_LIMIT_EXCEEDED" })),
+        ));
+    }
+
+    state.sse_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let new_count = state.sse_connections.load(std::sync::atomic::Ordering::Relaxed);
+    crate::metrics::update_sse_connections(new_count);
+
+    let keepalive_ms = state.sse_keepalive_interval_ms;
+    let sse_connections = state.sse_connections.clone();
+
+    // Replay missed events for any of the subscribed contracts.
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok());
+
+    let replay: Vec<crate::models::Event> = if let Some(last_id) = last_event_id {
+        let placeholders: String = ids
+            .iter()
+            .enumerate()
+            .map(|(i, _)| format!("${}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, created_at, 0::bigint AS total_count \
+             FROM events WHERE created_at > (SELECT created_at FROM events WHERE id = $1) \
+             AND contract_id IN ({}) ORDER BY created_at ASC",
+            placeholders
+        );
+        let mut q = sqlx::query_as::<_, crate::models::Event>(&sql).bind(last_id);
+        for id in &ids {
+            q = q.bind(id);
+        }
+        q.fetch_all(&state.pool).await.unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let rx = state.event_tx.subscribe();
+    let enc_key = state.encryption_key;
+    let enc_key_old = state.encryption_key_old;
+
+    let replay_stream = futures::stream::iter(replay.into_iter().map(move |mut ev| {
+        ev.event_data = decrypt_event_data(&ev.event_data, enc_key.as_ref(), enc_key_old.as_ref());
+        let data = serde_json::to_string(&ev).unwrap_or_default();
+        Ok(Event::default()
+            .id(ev.id.to_string())
+            .retry(Duration::from_millis(keepalive_ms))
+            .data(data))
+    }));
+
+    let live_stream = futures::stream::unfold(
+        (rx, ids, keepalive_ms),
+        move |(mut rx, filter_ids, ka)| async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if !filter_ids.contains(&event.contract_id) {
+                            continue;
+                        }
+                        let data = serde_json::to_string(&event).unwrap_or_default();
+                        let sse = Event::default()
+                            .id(format!("{}-{}", event.tx_hash, event.ledger))
+                            .retry(Duration::from_millis(ka))
+                            .data(data);
+                        return Some((Ok(sse), (rx, filter_ids, ka)));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        },
+    );
+
+    let combined = replay_stream.chain(live_stream);
+
+    let stream_with_cleanup = futures::stream::unfold(
+        (Box::pin(combined), sse_connections.clone()),
+        move |(mut stream, counter)| async move {
+            match stream.next().await {
+                Some(item) => Some((item, (stream, counter))),
+                None => {
+                    let new_count = counter.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+                    crate::metrics::update_sse_connections(new_count);
+                    None
+                }
+            }
+        },
+    );
+
+    Ok(Sse::new(stream_with_cleanup).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_millis(keepalive_ms))
+            .text("ping"),
+    ))
 }
 
 async fn stream_events_internal(
@@ -562,7 +720,10 @@ fn filter_fields(event: &models::Event, columns: &[&str], enc_key: Option<&[u8; 
     ),
     responses(
         (status = 200, description = "Paginated list of events"),
-        (status = 400, description = "Invalid query parameters"),
+        (status = 400, description = "Invalid query parameters", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 429, description = "Too many requests", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
 
@@ -735,7 +896,8 @@ pub async fn get_events(
             "SELECT reltuples::bigint FROM pg_class WHERE relname = 'events'",
         )
         .fetch_one(&state.pool)
-        .await?;
+        .await
+        .unwrap_or(0);
         (count, true)
     };
 
@@ -869,8 +1031,11 @@ pub async fn export_events(
     ),
     responses(
         (status = 200, description = "Events for the given contract"),
-        (status = 400, description = "Invalid contract_id format or ledger range"),
-        (status = 404, description = "No events found for contract"),
+        (status = 400, description = "Invalid contract_id format or ledger range", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 404, description = "No events found for contract", body = ErrorResponse),
+        (status = 429, description = "Too many requests", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
 pub async fn get_events_by_contract(
@@ -981,7 +1146,10 @@ pub async fn get_events_by_contract(
     ),
     responses(
         (status = 200, description = "Events for the given transaction (empty array if none)"),
-        (status = 400, description = "Invalid tx_hash format"),
+        (status = 400, description = "Invalid tx_hash format", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 429, description = "Too many requests", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
 pub async fn get_events_by_tx(
@@ -1024,6 +1192,9 @@ pub async fn get_events_by_tx(
     ),
     responses(
         (status = 200, description = "Paginated list of indexed contract IDs"),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+        (status = 429, description = "Too many requests", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse),
     )
 )]
 pub async fn get_contracts(
@@ -1696,7 +1867,7 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let prometheus_handle = crate::metrics::init_metrics();
         let indexer_state = Arc::new(IndexerState::new());
-        let app = crate::routes::create_router(pool, vec![], &[], 60, health_state, indexer_state, prometheus_handle, 2000);
+        let app = crate::routes::create_router(pool, vec![], &[], 60, health_state, indexer_state, prometheus_handle, 2000, crate::config::Config::default());
 
         let response = app
             .oneshot(
@@ -1765,7 +1936,7 @@ mod tests {
         let health_state = Arc::new(HealthState::new(60));
         let prometheus_handle = crate::metrics::init_metrics();
         let indexer_state = Arc::new(IndexerState::new());
-        let app = crate::routes::create_router(pool, vec![], &[], 60, health_state, indexer_state, prometheus_handle, 2000);
+        let app = crate::routes::create_router(pool, vec![], &[], 60, health_state, indexer_state, prometheus_handle, 2000, crate::config::Config::default());
 
         let response = app
             .oneshot(
@@ -1790,7 +1961,7 @@ mod tests {
         // never updated, treated as stalled
         let prometheus_handle = crate::metrics::init_metrics();
         let indexer_state = Arc::new(IndexerState::new());
-        let app = crate::routes::create_router(pool, vec![], &[], 60, health_state, indexer_state, prometheus_handle, 2000);
+        let app = crate::routes::create_router(pool, vec![], &[], 60, health_state, indexer_state, prometheus_handle, 2000, crate::config::Config::default());
 
         let response = app
             .oneshot(

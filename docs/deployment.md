@@ -565,3 +565,54 @@ make vacuum
 ```
 
 This executes `VACUUM ANALYZE events;` which cleans up dead tuples and updates statistics without taking an exclusive lock on the table (allowing application traffic to continue).
+
+---
+
+## Index Usage Monitoring
+
+Soroban Pulse includes a background task that periodically runs `EXPLAIN` on the three key query patterns and logs a warning if the query planner is not using the expected index.
+
+### Checked queries
+
+| Query | Expected index |
+|---|---|
+| `GET /v1/events` (no filters) | `idx_events_ledger_desc` |
+| `GET /v1/events/contract/:id` | `idx_events_contract_ledger` |
+| `GET /v1/events/tx/:hash` | `idx_events_tx_ledger` |
+
+### Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `INDEX_CHECK_INTERVAL_HOURS` | How often to run the check | `24` |
+
+### Log output
+
+- `DEBUG` — index is being used as expected.
+- `WARN` — a sequential scan was detected where an index scan is expected. This indicates the query planner has chosen a different execution plan, which may degrade performance at scale. Investigate with `EXPLAIN ANALYZE` and consider running `ANALYZE events;` to refresh planner statistics.
+
+---
+
+## Event Data Compression
+
+The `event_data` JSONB column uses PostgreSQL TOAST for out-of-line storage of large values. The migration `20260427000000_event_data_compression` sets the column storage to `EXTENDED` and, on PostgreSQL 14+, switches the compression algorithm to `lz4` for better compression throughput compared to the default `pglz`.
+
+This change is applied automatically on startup via SQLx migrations and requires no manual intervention. No table rewrite is performed — only the column metadata is updated.
+
+### Verifying the setting
+
+```sql
+SELECT attname, attstorage, attcompression
+FROM pg_attribute
+WHERE attrelid = 'events'::regclass AND attname = 'event_data';
+```
+
+Expected output on PostgreSQL 14+:
+
+```
+ attname    | attstorage | attcompression
+------------+------------+----------------
+ event_data | x          | l
+```
+
+(`x` = EXTENDED, `l` = lz4)
