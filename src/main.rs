@@ -18,6 +18,7 @@ mod models;
 mod normalizer;
 mod routes;
 mod rpc_client;
+mod schema_validator;
 mod webhook;
 
 #[cfg(feature = "archive")]
@@ -147,6 +148,14 @@ async fn main() -> anyhow::Result<()> {
     info!("Migrations applied successfully");
     info!(environment = ?config.environment, "Running environment");
 
+    // Initialize schema validator and load schemas
+    let schema_validator = Arc::new(soroban_pulse::schema_validator::SchemaValidator::new(pool.clone()));
+    if let Err(e) = schema_validator.load_schemas().await {
+        warn!(error = %e, "Failed to load schemas from database");
+    } else {
+        info!("Schema validator initialized");
+    }
+
     // Create shared health state for indexer and HTTP handlers
     let health_state = Arc::new(config::HealthState::new(config.indexer_stall_timeout_secs));
 
@@ -203,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
+    indexer.set_schema_validator(schema_validator.clone());
     let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });
@@ -243,29 +253,6 @@ async fn main() -> anyhow::Result<()> {
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
     info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
 
-    let router = routes::create_router_with_tx(pool, read_pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, config.behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, 2000);
-
-    info!(addr = %addr, "Soroban Pulse listening");
-
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        error!(addr = %addr, "Address already in use");
-        e
-    })?;
-
-    info!(behind_proxy = config.behind_proxy, "Running server - trusting X-Forwarded-For");
-
-    // Use regular make_service since we handle connect_info through middleware
-    // Use the router directly as it implements Service for incoming connections
-    axum::serve(
-        listener,
-        router,
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown_rx_axum.changed().await;
-    })
-    .await?;
-
-
     // When TLS is enabled directly, BEHIND_PROXY is forced false — no proxy in front.
     let behind_proxy = match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(_), Some(_)) => {
@@ -277,7 +264,25 @@ async fn main() -> anyhow::Result<()> {
         _ => config.behind_proxy,
     };
 
-    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.health_check_timeout_ms, config.event_data_encryption_key, config.event_data_encryption_key_old, config.clone());
+    let router = routes::create_router_with_tx(
+        pool.clone(), 
+        read_pool, 
+        config.api_keys.clone(), 
+        &config.allowed_origins, 
+        config.rate_limit_per_minute, 
+        behind_proxy, 
+        health_state.clone(), 
+        indexer_state.clone(), 
+        prometheus_handle.clone(), 
+        event_tx.clone(), 
+        config.sse_keepalive_interval_ms, 
+        config.sse_max_connections, 
+        config.health_check_timeout_ms,
+        config.event_data_encryption_key,
+        config.event_data_encryption_key_old,
+        config.clone(),
+        Some(schema_validator.clone())
+    );
 
     match (&config.tls_cert_file, &config.tls_key_file) {
         (Some(cert_path), Some(key_path)) => {

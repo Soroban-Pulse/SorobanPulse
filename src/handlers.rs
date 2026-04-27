@@ -3439,3 +3439,139 @@ pub async fn list_archive(State(state): State<AppState>) -> Result<Json<Value>, 
         Err(AppError::Internal("archive feature not enabled".to_string()))
     }
 }
+
+// ============================================================================
+// Schema Management Endpoints
+// ============================================================================
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct RegisterSchemaRequest {
+    /// JSON Schema definition (Draft 7)
+    pub schema: Value,
+}
+
+/// Register or update a JSON Schema for a contract
+#[utoipa::path(
+    post,
+    path = "/v1/admin/contracts/{contract_id}/schema",
+    tag = "admin",
+    params(
+        ("contract_id" = String, Path, description = "Contract ID")
+    ),
+    request_body = RegisterSchemaRequest,
+    responses(
+        (status = 200, description = "Schema registered successfully"),
+        (status = 400, description = "Invalid schema or contract ID"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("api_key" = [])
+    )
+)]
+pub async fn register_contract_schema(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+    Json(payload): Json<RegisterSchemaRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_contract_id(&contract_id)?;
+
+    let validator = state.schema_validator
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Schema validator not initialized".to_string()))?;
+
+    validator
+        .register_schema(&contract_id, &payload.schema)
+        .await
+        .map_err(|e| AppError::Validation(format!("Invalid schema: {}", e)))?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "message": "Schema registered successfully"
+        }))
+    ))
+}
+
+/// Get the JSON Schema for a contract
+#[utoipa::path(
+    get,
+    path = "/v1/admin/contracts/{contract_id}/schema",
+    tag = "admin",
+    params(
+        ("contract_id" = String, Path, description = "Contract ID")
+    ),
+    responses(
+        (status = 200, description = "Schema retrieved successfully"),
+        (status = 404, description = "No schema registered for this contract"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("api_key" = [])
+    )
+)]
+pub async fn get_contract_schema(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_contract_id(&contract_id)?;
+
+    let validator = state.schema_validator
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Schema validator not initialized".to_string()))?;
+
+    let schema = validator
+        .get_schema(&contract_id)
+        .await
+        .ok_or(AppError::NotFound)?;
+
+    Ok((StatusCode::OK, Json(json!({ "schema": schema }))))
+}
+
+/// Delete the JSON Schema for a contract
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/contracts/{contract_id}/schema",
+    tag = "admin",
+    params(
+        ("contract_id" = String, Path, description = "Contract ID")
+    ),
+    responses(
+        (status = 200, description = "Schema deleted successfully"),
+        (status = 404, description = "No schema registered for this contract"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("api_key" = [])
+    )
+)]
+pub async fn delete_contract_schema(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_contract_id(&contract_id)?;
+
+    let validator = state.schema_validator
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Schema validator not initialized".to_string()))?;
+
+    let deleted = validator
+        .delete_schema(&contract_id)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if deleted {
+        Ok((
+            StatusCode::OK,
+            Json(json!({
+                "status": "ok",
+                "message": "Schema deleted successfully"
+            }))
+        ))
+    } else {
+        Err(AppError::NotFound)
+    }
+}

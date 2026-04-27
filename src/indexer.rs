@@ -184,6 +184,7 @@ pub struct Indexer<R: RpcClient> {
     indexer_state: Option<Arc<IndexerState>>,
     event_tx: Option<broadcast::Sender<SorobanEvent>>,
     event_counter: AtomicU64,
+    schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
 }
 
 impl<R: RpcClient> Indexer<R> {
@@ -197,6 +198,7 @@ impl<R: RpcClient> Indexer<R> {
             indexer_state: None,
             event_tx: None,
             event_counter: AtomicU64::new(0),
+            schema_validator: None,
         }
     }
 
@@ -213,6 +215,11 @@ impl<R: RpcClient> Indexer<R> {
     /// Set the broadcast sender for real-time SSE streaming.
     pub fn set_event_tx(&mut self, event_tx: broadcast::Sender<SorobanEvent>) {
         self.event_tx = Some(event_tx);
+    }
+
+    /// Set the schema validator for JSON Schema validation
+    pub fn set_schema_validator(&mut self, validator: Arc<crate::schema_validator::SchemaValidator>) {
+        self.schema_validator = Some(validator);
     }
 
     pub async fn run(&self) {
@@ -612,9 +619,29 @@ impl<R: RpcClient> Indexer<R> {
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .map_err(|_| anyhow::anyhow!("Unparseable ledger_closed_at"))?;
         let event_data = json!({ "value": event.value, "topic": event.topic });
+        
+        // Validate against JSON Schema if registered for this contract
+        let schema_valid = if let Some(ref validator) = self.schema_validator {
+            match validator.validate_event_data(&event.contract_id, &event_data).await {
+                Some(true) => Some(true),
+                Some(false) => {
+                    metrics::record_schema_validation_failure();
+                    warn!(
+                        contract_id = %event.contract_id,
+                        tx_hash = %event.tx_hash,
+                        "Event failed schema validation"
+                    );
+                    Some(false)
+                }
+                None => None, // No schema registered
+            }
+        } else {
+            None
+        };
+        
         let result = sqlx::query(
-            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
-               VALUES ($1, $2, $3, $4, $5, $6)
+            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, schema_valid)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
                ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING"#,
         )
         .bind(&event.contract_id)
@@ -623,6 +650,7 @@ impl<R: RpcClient> Indexer<R> {
         .bind(ledger)
         .bind(timestamp)
         .bind(event_data)
+        .bind(schema_valid)
         .execute(&mut **tx)
         .await?;
         Ok(result.rows_affected())
