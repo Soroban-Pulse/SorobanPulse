@@ -9,3 +9,7 @@ pub mod normalizer;
 pub mod rpc_client;
 pub mod routes;
 pub mod webhook;
+pub mod bloom_filter;
+pub mod xdr_validation;
+pub mod kinesis;
+pub mod pubsub;

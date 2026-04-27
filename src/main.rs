@@ -19,6 +19,10 @@ mod normalizer;
 mod routes;
 mod rpc_client;
 mod webhook;
+mod bloom_filter;
+mod xdr_validation;
+mod kinesis;
+mod pubsub;
 
 #[cfg(feature = "archive")]
 mod archiver;
@@ -203,6 +207,40 @@ async fn main() -> anyhow::Result<()> {
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
+
+    // Issue #266: Initialize and seed bloom filter
+    {
+        let bloom = std::sync::Arc::new(bloom_filter::EventBloomFilter::new(
+            config.bloom_filter_capacity,
+            config.bloom_filter_fp_rate,
+        ));
+        match bloom_filter::seed_from_db(&bloom, &pool, 100_000).await {
+            Ok(n) => info!(seeded = n, "Bloom filter seeded from DB"),
+            Err(e) => tracing::warn!(error = %e, "Failed to seed bloom filter from DB"),
+        }
+        indexer.set_bloom_filter(bloom);
+    }
+
+    // Issue #265: Initialize Kinesis publisher if configured
+    #[cfg(feature = "kinesis")]
+    if let (Some(stream_name), Some(region)) = (config.kinesis_stream_name.clone(), config.aws_region.clone()) {
+        let publisher = kinesis::aws::AwsKinesisPublisher::from_env(stream_name, region).await;
+        indexer.set_kinesis_publisher(std::sync::Arc::new(publisher));
+        info!("Kinesis publisher enabled");
+    }
+
+    // Issue #264: Initialize Pub/Sub publisher if configured
+    #[cfg(feature = "pubsub")]
+    if let (Some(project_id), Some(topic_id)) = (config.pubsub_project_id.clone(), config.pubsub_topic_id.clone()) {
+        match pubsub::gcp::GcpPubSubPublisher::from_env(project_id, topic_id).await {
+            Ok(publisher) => {
+                indexer.set_pubsub_publisher(std::sync::Arc::new(publisher));
+                info!("Pub/Sub publisher enabled");
+            }
+            Err(e) => tracing::warn!(error = %e, "Failed to initialize Pub/Sub publisher"),
+        }
+    }
+
     let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });

@@ -177,6 +177,29 @@ pub struct Config {
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
     pub webhook_contract_filter: Vec<String>,
+    /// Event types to index (empty = all types)
+    pub indexer_event_types: Vec<String>,
+    /// AES-GCM encryption key for event_data (32 bytes, hex-encoded)
+    pub event_data_encryption_key: Option<[u8; 32]>,
+    /// Previous encryption key for rotation
+    pub event_data_encryption_key_old: Option<[u8; 32]>,
+    /// How often the index usage monitor runs (hours)
+    pub index_check_interval_hours: u64,
+    /// Health check timeout in milliseconds
+    pub health_check_timeout_ms: u64,
+    /// TLS certificate file path
+    pub tls_cert_file: Option<String>,
+    /// TLS key file path
+    pub tls_key_file: Option<String>,
+    // Issue #266: Bloom filter deduplication
+    pub bloom_filter_fp_rate: f64,
+    pub bloom_filter_capacity: usize,
+    // Issue #265: AWS Kinesis streaming
+    pub kinesis_stream_name: Option<String>,
+    pub aws_region: Option<String>,
+    // Issue #264: GCP Pub/Sub streaming
+    pub pubsub_project_id: Option<String>,
+    pub pubsub_topic_id: Option<String>,
 }
 
 impl Default for Config {
@@ -213,6 +236,19 @@ impl Default for Config {
             webhook_url: None,
             webhook_secret: None,
             webhook_contract_filter: Vec::new(),
+            indexer_event_types: Vec::new(),
+            event_data_encryption_key: None,
+            event_data_encryption_key_old: None,
+            index_check_interval_hours: 24,
+            health_check_timeout_ms: 2000,
+            tls_cert_file: None,
+            tls_key_file: None,
+            bloom_filter_fp_rate: 0.001,
+            bloom_filter_capacity: 1_000_000,
+            kinesis_stream_name: None,
+            aws_region: None,
+            pubsub_project_id: None,
+            pubsub_topic_id: None,
         }
     }
 }
@@ -321,6 +357,7 @@ fn parse_indexer_event_types() -> Vec<String> {
             t
         })
         .collect()
+}
 
 /// Parse a 64-hex-char string into a 32-byte key, panicking with a clear message on failure.
 fn parse_hex_key(var: &str, value: &str) -> [u8; 32] {
@@ -501,6 +538,37 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            indexer_event_types: parse_indexer_event_types(),
+            event_data_encryption_key: env::var("EVENT_DATA_ENCRYPTION_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|v| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY", &v)),
+            event_data_encryption_key_old: env::var("EVENT_DATA_ENCRYPTION_KEY_OLD")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|v| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY_OLD", &v)),
+            index_check_interval_hours: env::var("INDEX_CHECK_INTERVAL_HOURS")
+                .unwrap_or_else(|_| "24".to_string())
+                .parse()
+                .expect("INDEX_CHECK_INTERVAL_HOURS must be a number"),
+            health_check_timeout_ms: env::var("HEALTH_CHECK_TIMEOUT_MS")
+                .unwrap_or_else(|_| "2000".to_string())
+                .parse()
+                .expect("HEALTH_CHECK_TIMEOUT_MS must be a number"),
+            tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
+            tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),
+            bloom_filter_fp_rate: env::var("BLOOM_FILTER_FP_RATE")
+                .unwrap_or_else(|_| "0.001".to_string())
+                .parse()
+                .expect("BLOOM_FILTER_FP_RATE must be a float"),
+            bloom_filter_capacity: env::var("BLOOM_FILTER_CAPACITY")
+                .unwrap_or_else(|_| "1000000".to_string())
+                .parse()
+                .expect("BLOOM_FILTER_CAPACITY must be a positive integer"),
+            kinesis_stream_name: env::var("KINESIS_STREAM_NAME").ok().filter(|s| !s.is_empty()),
+            aws_region: env::var("AWS_REGION").ok().filter(|s| !s.is_empty()),
+            pubsub_project_id: env::var("PUBSUB_PROJECT_ID").ok().filter(|s| !s.is_empty()),
+            pubsub_topic_id: env::var("PUBSUB_TOPIC_ID").ok().filter(|s| !s.is_empty()),
         }
     }
 }

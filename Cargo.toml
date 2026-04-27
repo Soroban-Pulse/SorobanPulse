@@ -36,9 +36,24 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 
+# Issue #267: XDR validation
+stellar-xdr = { version = "26", features = ["std", "curr", "serde"] }
+
+# Issue #266: Bloom filter deduplication
+bloomfilter = "3"
+
+# Issue #265: AWS Kinesis streaming (optional, behind kinesis feature flag)
+aws-sdk-kinesis = { version = "1", optional = true }
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+
+# Issue #264: GCP Pub/Sub streaming (optional, behind pubsub feature flag)
+google-cloud-pubsub = { version = "0.33", optional = true }
+
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
 encryption = ["aes-gcm", "rand"]
+kinesis = ["aws-sdk-kinesis", "aws-config"]
+pubsub = ["google-cloud-pubsub"]
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }

@@ -9,10 +9,13 @@ use tokio::time::sleep;
 use tracing::{error, info, warn, instrument, span, Level};
 
 use crate::{
+    bloom_filter::EventBloomFilter,
     config::{Config, HealthState, IndexerState},
+    kinesis::KinesisPublisher,
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
-    normalizer,
+    pubsub::PubSubPublisher,
+    xdr_validation,
 };
 
 #[async_trait::async_trait]
@@ -184,6 +187,9 @@ pub struct Indexer<R: RpcClient> {
     indexer_state: Option<Arc<IndexerState>>,
     event_tx: Option<broadcast::Sender<SorobanEvent>>,
     event_counter: AtomicU64,
+    bloom_filter: Option<Arc<EventBloomFilter>>,
+    kinesis_publisher: Option<Arc<dyn KinesisPublisher>>,
+    pubsub_publisher: Option<Arc<dyn PubSubPublisher>>,
 }
 
 impl<R: RpcClient> Indexer<R> {
@@ -197,6 +203,9 @@ impl<R: RpcClient> Indexer<R> {
             indexer_state: None,
             event_tx: None,
             event_counter: AtomicU64::new(0),
+            bloom_filter: None,
+            kinesis_publisher: None,
+            pubsub_publisher: None,
         }
     }
 
@@ -213,6 +222,21 @@ impl<R: RpcClient> Indexer<R> {
     /// Set the broadcast sender for real-time SSE streaming.
     pub fn set_event_tx(&mut self, event_tx: broadcast::Sender<SorobanEvent>) {
         self.event_tx = Some(event_tx);
+    }
+
+    /// Set the bloom filter for pre-filtering duplicate events (issue #266).
+    pub fn set_bloom_filter(&mut self, bloom_filter: Arc<EventBloomFilter>) {
+        self.bloom_filter = Some(bloom_filter);
+    }
+
+    /// Set the Kinesis publisher for streaming events (issue #265).
+    pub fn set_kinesis_publisher(&mut self, publisher: Arc<dyn KinesisPublisher>) {
+        self.kinesis_publisher = Some(publisher);
+    }
+
+    /// Set the Pub/Sub publisher for streaming events (issue #264).
+    pub fn set_pubsub_publisher(&mut self, publisher: Arc<dyn PubSubPublisher>) {
+        self.pubsub_publisher = Some(publisher);
     }
 
     pub async fn run(&self) {
@@ -426,8 +450,18 @@ impl<R: RpcClient> Indexer<R> {
                         if rows == 0 {
                             total_skipped += 1;
                             // duplicate — skipped via ON CONFLICT DO NOTHING
-                        } else if let Some(ref tx) = self.event_tx {
-                            let _ = tx.send(event);
+                        } else {
+                            if let Some(ref tx) = self.event_tx {
+                                let _ = tx.send(event.clone());
+                            }
+                            // Issue #265: publish to Kinesis
+                            if let Some(ref publisher) = self.kinesis_publisher {
+                                crate::kinesis::publish_event(publisher.as_ref(), &event).await;
+                            }
+                            // Issue #264: publish to Pub/Sub
+                            if let Some(ref publisher) = self.pubsub_publisher {
+                                crate::pubsub::publish_event(publisher.as_ref(), &event).await;
+                            }
                         }
                     }
                     Err(e) => {
@@ -506,6 +540,17 @@ impl<R: RpcClient> Indexer<R> {
             // The original code was trying to validate it was a JSON Array.
             // If it's Vec<Value>, it's already structured.
             let _ = topic;
+        }
+
+        // Issue #267: XDR/ScVal validation
+        if !xdr_validation::validate_xdr(
+            &event.tx_hash,
+            &event.contract_id,
+            event.ledger,
+            &event.value,
+            event.topic.as_ref(),
+        ) {
+            return false;
         }
 
         true
@@ -601,6 +646,13 @@ impl<R: RpcClient> Indexer<R> {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         event: &SorobanEvent,
     ) -> Result<u64, anyhow::Error> {
+        // Issue #266: bloom filter pre-filter
+        if let Some(ref bloom) = self.bloom_filter {
+            if bloom.check(&event.tx_hash, &event.contract_id, &event.event_type) {
+                return Ok(0);
+            }
+        }
+
         if !Self::validate_event_data(event) {
             return Ok(0);
         }
@@ -625,7 +677,15 @@ impl<R: RpcClient> Indexer<R> {
         .bind(event_data)
         .execute(&mut **tx)
         .await?;
-        Ok(result.rows_affected())
+
+        let rows = result.rows_affected();
+        if rows > 0 {
+            // Record in bloom filter after successful insert
+            if let Some(ref bloom) = self.bloom_filter {
+                bloom.set(&event.tx_hash, &event.contract_id, &event.event_type);
+            }
+        }
+        Ok(rows)
     }
 }
 
@@ -816,12 +876,22 @@ mod tests {
                 environment: crate::config::Environment::Development,
                 max_body_size_bytes: 1024 * 1024,
                 log_sample_rate: 1,
-
+                webhook_url: None,
+                webhook_secret: None,
+                webhook_contract_filter: Vec::new(),
                 indexer_event_types: Vec::new(),
-
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
-
+                index_check_interval_hours: 24,
+                health_check_timeout_ms: 2000,
+                tls_cert_file: None,
+                tls_key_file: None,
+                bloom_filter_fp_rate: 0.001,
+                bloom_filter_capacity: 100_000,
+                kinesis_stream_name: None,
+                aws_region: None,
+                pubsub_project_id: None,
+                pubsub_topic_id: None,
             },
             shutdown_rx,
             MockRpcClient::new(),
@@ -1032,12 +1102,22 @@ mod tests {
                 environment: crate::config::Environment::Development,
                 max_body_size_bytes: 1024 * 1024,
                 log_sample_rate: 1,
-
+                webhook_url: None,
+                webhook_secret: None,
+                webhook_contract_filter: Vec::new(),
                 indexer_event_types: Vec::new(),
-
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
-
+                index_check_interval_hours: 24,
+                health_check_timeout_ms: 2000,
+                tls_cert_file: None,
+                tls_key_file: None,
+                bloom_filter_fp_rate: 0.001,
+                bloom_filter_capacity: 100_000,
+                kinesis_stream_name: None,
+                aws_region: None,
+                pubsub_project_id: None,
+                pubsub_topic_id: None,
             },
             shutdown_rx,
             mock_client,
