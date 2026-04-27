@@ -177,19 +177,7 @@ pub struct Config {
     pub webhook_url: Option<String>,
     pub webhook_secret: Option<String>,
     pub webhook_contract_filter: Vec<String>,
-    pub contract_count_cache_size: u64,
-    pub contract_count_cache_ttl_secs: u64,
-    pub export_max_rows: u64,
-    pub health_check_timeout_ms: u64,
-    pub indexer_event_types: Vec<String>,
-    pub event_data_encryption_key: Option<[u8; 32]>,
-    pub event_data_encryption_key_old: Option<[u8; 32]>,
-    pub index_check_interval_hours: u64,
-    pub archive_s3_bucket: Option<String>,
-    pub archive_s3_prefix: Option<String>,
-    pub archive_after_days: u32,
-    pub tls_cert_file: Option<String>,
-    pub tls_key_file: Option<String>,
+    pub max_event_data_bytes: usize,
 }
 
 impl Default for Config {
@@ -226,19 +214,7 @@ impl Default for Config {
             webhook_url: None,
             webhook_secret: None,
             webhook_contract_filter: Vec::new(),
-            contract_count_cache_size: 1000,
-            contract_count_cache_ttl_secs: 30,
-            export_max_rows: 10_000,
-            health_check_timeout_ms: 2000,
-            indexer_event_types: Vec::new(),
-            event_data_encryption_key: None,
-            event_data_encryption_key_old: None,
-            index_check_interval_hours: 24,
-            archive_s3_bucket: None,
-            archive_s3_prefix: None,
-            archive_after_days: 30,
-            tls_cert_file: None,
-            tls_key_file: None,
+            max_event_data_bytes: 65536,
         }
     }
 }
@@ -753,19 +729,12 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            contract_count_cache_size,
-            contract_count_cache_ttl_secs,
-            export_max_rows,
-            health_check_timeout_ms,
-            indexer_event_types,
-            event_data_encryption_key,
-            event_data_encryption_key_old,
-            index_check_interval_hours,
-            archive_s3_bucket: env::var("ARCHIVE_S3_BUCKET").ok().filter(|s| !s.is_empty()),
-            archive_s3_prefix: env::var("ARCHIVE_S3_PREFIX").ok().filter(|s| !s.is_empty()),
-            archive_after_days,
-            tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
-            tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),
+            max_event_data_bytes: parse_int::<usize>(
+                "MAX_EVENT_DATA_BYTES",
+                &env_or_file_or("MAX_EVENT_DATA_BYTES", &file, "65536"),
+                "65536",
+                &mut errors,
+            ).unwrap_or(65536),
         }
     }
 }

@@ -52,6 +52,11 @@ pub fn record_validation_failure() {
     m::counter!("soroban_pulse_events_validation_failed_total", 1u64);
 }
 
+/// Record an oversized event that was skipped due to exceeding MAX_EVENT_DATA_BYTES.
+pub fn record_oversized_event() {
+    m::counter!("soroban_pulse_events_oversized_total", 1u64);
+}
+
 /// Record a duplicate event
 pub fn record_duplicate_event() {
     m::counter!("soroban_pulse_events_duplicate_total", 1u64);
