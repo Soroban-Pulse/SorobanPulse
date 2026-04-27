@@ -1,0 +1,67 @@
+replicaCount: 2
+
+image:
+  repository: soroban-pulse
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 3000
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+env:
+  PORT: "3000"
+  STELLAR_RPC_URL: "https://soroban-testnet.stellar.org"
+  INDEXER_LAG_WARN_THRESHOLD: "100"
+  INDEXER_STALL_TIMEOUT_SECS: "60"
+  DB_MAX_CONNECTIONS: "10"
+  DB_MIN_CONNECTIONS: "2"
+  ALLOWED_ORIGINS: "*"
+  RATE_LIMIT_PER_MINUTE: "60"
+  ENVIRONMENT: "production"
+  BEHIND_PROXY: "false"
+  CONTRACT_COUNT_CACHE_SIZE: "1000"
+  CONTRACT_COUNT_CACHE_TTL_SECS: "30"
+
+# Sensitive values — set via --set or a separate secrets file; never commit real values.
+secrets:
+  databaseUrl: "postgres://<USER>:<PASSWORD>@<HOST>:5432/<DATABASE>"
+  apiKey: ""
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: soroban-pulse.example.com
+  tls: []
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+livenessProbe:
+  path: /healthz/live
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+
+readinessProbe:
+  path: /healthz/ready
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3

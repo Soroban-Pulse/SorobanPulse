@@ -25,6 +25,8 @@ use utoipa::OpenApi;
 
 use crate::{config::{HealthState, IndexerState}, handlers, middleware, metrics, models::SorobanEvent, subscriptions};
 
+type ContractCountCache = moka::future::Cache<String, i64>;
+
 #[derive(Clone, Default)]
 struct UuidMakeRequestId;
 
@@ -46,7 +48,9 @@ pub struct AppState {
     pub sse_connections: Arc<AtomicUsize>,
     pub sse_max_connections: usize,
     pub health_check_timeout_ms: u64,
-    pub http_client: HttpClient,
+    pub encryption_key: Option<[u8; 32]>,
+    pub encryption_key_old: Option<[u8; 32]>,
+    pub contract_count_cache: ContractCountCache,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -93,7 +97,7 @@ pub fn create_router(
     prometheus_handle: PrometheusHandle,
     health_check_timeout_ms: u64,
 ) -> Router {
-    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, HttpClient::new())
+    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None, 1000, 30)
 }
 
 pub fn create_router_with_tx(
@@ -109,10 +113,17 @@ pub fn create_router_with_tx(
     sse_keepalive_interval_ms: u64,
     sse_max_connections: usize,
     health_check_timeout_ms: u64,
-    http_client: HttpClient,
+    encryption_key: Option<[u8; 32]>,
+    encryption_key_old: Option<[u8; 32]>,
+    contract_count_cache_size: u64,
+    contract_count_cache_ttl_secs: u64,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_keys });
+    let contract_count_cache = moka::future::Cache::builder()
+        .max_capacity(contract_count_cache_size)
+        .time_to_live(std::time::Duration::from_secs(contract_count_cache_ttl_secs))
+        .build();
     let app_state = AppState {
         pool,
         health_state,
@@ -123,7 +134,9 @@ pub fn create_router_with_tx(
         sse_connections: Arc::new(AtomicUsize::new(0)),
         sse_max_connections,
         health_check_timeout_ms,
-        http_client,
+        encryption_key,
+        encryption_key_old,
+        contract_count_cache,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.

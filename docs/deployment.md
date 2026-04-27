@@ -1,5 +1,46 @@
 # Deployment Guide
 
+## Direct TLS
+
+By default, Soroban Pulse serves plain HTTP and relies on an external reverse proxy (nginx, Caddy, AWS ALB, etc.) for TLS termination. For simpler deployments — a single VPS, a development environment with self-signed certificates, or any setup where adding a proxy is impractical — the service can handle TLS directly.
+
+### Enabling direct TLS
+
+Set both `TLS_CERT_FILE` and `TLS_KEY_FILE` to PEM-encoded certificate and key files:
+
+```bash
+TLS_CERT_FILE=/etc/ssl/certs/soroban-pulse.crt
+TLS_KEY_FILE=/etc/ssl/private/soroban-pulse.key
+PORT=443
+```
+
+When both variables are set, the service starts an HTTPS listener using `axum-server` with `rustls`. The certificate and key files are validated at startup — if either file is missing or the TLS handshake configuration fails, the service panics with a descriptive error.
+
+When only one of the two variables is set, the service logs a warning and falls back to plain HTTP.
+
+**`BEHIND_PROXY` is automatically forced to `false` when direct TLS is enabled**, since there is no proxy in front of the service. Any explicit `BEHIND_PROXY=true` setting is overridden and a warning is logged.
+
+### Self-signed certificate (development)
+
+```bash
+# Generate a self-signed cert valid for 365 days
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem \
+  -days 365 -nodes -subj '/CN=localhost'
+
+TLS_CERT_FILE=cert.pem TLS_KEY_FILE=key.pem PORT=3443 cargo run
+```
+
+### Production recommendation
+
+For production deployments, prefer a reverse proxy (nginx, Caddy, AWS ALB) for TLS termination. This allows:
+- Automatic certificate renewal (e.g., Let's Encrypt via Caddy)
+- HTTP/2 and connection multiplexing
+- Load balancing across multiple replicas
+
+Set `BEHIND_PROXY=true` when running behind a proxy so the service trusts `X-Forwarded-For` headers for rate limiting.
+
+---
+
 ## Horizontal Scaling
 
 Soroban Pulse supports running multiple replicas safely. Only one replica will run the indexer loop at a time; all others serve HTTP traffic in read-only mode.

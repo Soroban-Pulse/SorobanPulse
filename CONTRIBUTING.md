@@ -66,6 +66,17 @@ lefthook install
 
 Hooks typically complete in under 30 seconds on a typical change. If a hook fails, fix the reported issue and re-commit.
 
+## Security: Never Log Sensitive Values
+
+Never log passwords, API keys, tokens, or other credentials at any log level. This includes:
+
+- `DATABASE_URL` — use `config.safe_db_url()` which strips credentials before logging
+- `STELLAR_RPC_URL` — already sanitized by `validate_rpc_url()` before being stored in `Config`; the stored `config.stellar_rpc_url` is safe to log
+- `API_KEY` / `API_KEY_SECONDARY` — never log these values
+- Any request header that may contain `Authorization` or `X-Api-Key` values
+
+When adding new log statements, double-check that no field contains a raw secret. If in doubt, strip credentials before logging (see `Config::safe_db_url()` for the pattern).
+
 ## Code Style
 
 - Formatting is enforced by `rustfmt` using the project's `rustfmt.toml` (`max_width = 100`, `edition = "2021"`).
