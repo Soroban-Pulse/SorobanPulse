@@ -47,6 +47,40 @@ make migrate     # Run pending database migrations
 make clean       # Remove build artifacts
 ```
 
+## Fuzzing
+
+Fuzz targets live in `fuzz/fuzz_targets/` and cover the primary input-validation boundary:
+
+| Target | What it tests |
+|--------|---------------|
+| `fuzz_validate_contract_id` | `validate_contract_id` — no panics, deterministic, valid inputs accepted |
+| `fuzz_validate_tx_hash` | `validate_tx_hash` — no panics, deterministic, valid inputs accepted |
+| `fuzz_pagination_params` | `PaginationParams` deserialization — no panics, `limit`/`offset` in range |
+
+Requires a nightly toolchain and `cargo-fuzz`:
+
+```bash
+rustup toolchain install nightly
+cargo install cargo-fuzz
+```
+
+Run a target (30-second smoke run):
+
+```bash
+cd fuzz
+cargo fuzz run fuzz_validate_contract_id -- -max_total_time=30
+cargo fuzz run fuzz_validate_tx_hash     -- -max_total_time=30
+cargo fuzz run fuzz_pagination_params   -- -max_total_time=30
+```
+
+To run indefinitely (until a crash is found):
+
+```bash
+cargo fuzz run fuzz_validate_contract_id
+```
+
+Corpus and crash artifacts are stored under `fuzz/corpus/` and `fuzz/artifacts/` respectively (both git-ignored).
+
 ## Pre-commit Hooks
 
 This project uses [lefthook](https://github.com/evilmartians/lefthook) to run `cargo check`, `cargo fmt --check`, and `cargo clippy` before every commit.

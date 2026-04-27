@@ -85,7 +85,7 @@ fn resolve_columns<'a>(params: &'a PaginationParams) -> Result<Vec<&'a str>, App
     })
 }
 
-fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
+pub(crate) fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
     if contract_id.len() != 56 {
         return Err(AppError::Validation("invalid contract_id format".to_string()));
     }
@@ -98,7 +98,7 @@ fn validate_contract_id(contract_id: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_tx_hash(tx_hash: &str) -> Result<(), AppError> {
+pub(crate) fn validate_tx_hash(tx_hash: &str) -> Result<(), AppError> {
     if tx_hash.len() != 64 {
         return Err(AppError::Validation("invalid tx_hash format".to_string()));
     }
@@ -1922,6 +1922,73 @@ mod tests {
             response.headers().get("content-type").unwrap(),
             "text/event-stream"
         );
+    }
+
+    // --- Validation edge-case unit tests (discovered via fuzzing review) ---
+
+    #[test]
+    fn validate_contract_id_empty_returns_err() {
+        assert!(validate_contract_id("").is_err());
+    }
+
+    #[test]
+    fn validate_contract_id_55_chars_returns_err() {
+        let s = format!("C{}", "A".repeat(54));
+        assert!(validate_contract_id(&s).is_err());
+    }
+
+    #[test]
+    fn validate_contract_id_57_chars_returns_err() {
+        let s = format!("C{}", "A".repeat(56));
+        assert!(validate_contract_id(&s).is_err());
+    }
+
+    #[test]
+    fn validate_contract_id_starts_with_lowercase_c_returns_err() {
+        let s = format!("c{}", "A".repeat(55));
+        assert!(validate_contract_id(&s).is_err());
+    }
+
+    #[test]
+    fn validate_contract_id_with_special_chars_returns_err() {
+        let s = format!("C{}!", "A".repeat(54));
+        assert!(validate_contract_id(&s).is_err());
+    }
+
+    #[test]
+    fn validate_contract_id_valid_returns_ok() {
+        let s = format!("C{}", "A".repeat(55));
+        assert!(validate_contract_id(&s).is_ok());
+    }
+
+    #[test]
+    fn validate_tx_hash_empty_returns_err() {
+        assert!(validate_tx_hash("").is_err());
+    }
+
+    #[test]
+    fn validate_tx_hash_63_chars_returns_err() {
+        assert!(validate_tx_hash(&"a".repeat(63)).is_err());
+    }
+
+    #[test]
+    fn validate_tx_hash_65_chars_returns_err() {
+        assert!(validate_tx_hash(&"a".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn validate_tx_hash_non_hex_returns_err() {
+        assert!(validate_tx_hash(&"g".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn validate_tx_hash_valid_lowercase_returns_ok() {
+        assert!(validate_tx_hash(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn validate_tx_hash_valid_uppercase_returns_ok() {
+        assert!(validate_tx_hash(&"A".repeat(64)).is_ok());
     }
 
     #[sqlx::test(migrations = "./migrations")]
