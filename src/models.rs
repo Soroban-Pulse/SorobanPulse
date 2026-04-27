@@ -45,6 +45,7 @@ pub struct Event {
     pub ledger: i64,
     pub timestamp: DateTime<Utc>,
     pub event_data: Value,
+    pub event_data_normalized: Option<Value>,
     pub created_at: DateTime<Utc>,
     #[sqlx(default)]
     #[serde(skip)]
@@ -112,6 +113,7 @@ impl PaginationParams {
         "ledger",
         "timestamp",
         "event_data",
+        "event_data_normalized",
         "created_at",
     ];
 

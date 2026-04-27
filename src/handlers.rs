@@ -65,6 +65,7 @@ fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str]) -> Result<Vec<
                 "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
                 "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
                 "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
+                "event_data_normalized" => { event.insert(col.to_string(), row.try_get::<Option<Value>, _>(col)?.unwrap_or(Value::Null)); }
                 "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
                 _ => {}
             }
@@ -397,7 +398,7 @@ async fn stream_events_internal(
     let replay: Vec<crate::models::Event> = if let Some(last_id) = last_event_id {
         let q = if let Some(ref cid) = contract_filter {
             sqlx::query_as::<_, crate::models::Event>(
-                "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, created_at, 0::bigint AS total_count \
+                "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, event_data_normalized, created_at, 0::bigint AS total_count \
                  FROM events WHERE created_at > (SELECT created_at FROM events WHERE id = $1) \
                  AND contract_id = $2 ORDER BY created_at ASC",
             )
@@ -407,7 +408,7 @@ async fn stream_events_internal(
             .await
         } else {
             sqlx::query_as::<_, crate::models::Event>(
-                "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, created_at, 0::bigint AS total_count \
+                "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, event_data_normalized, created_at, 0::bigint AS total_count \
                  FROM events WHERE created_at > (SELECT created_at FROM events WHERE id = $1) \
                  ORDER BY created_at ASC",
             )
@@ -492,6 +493,7 @@ fn filter_fields(event: &models::Event, columns: &[&str]) -> Value {
             "ledger"      => { map.insert(col.to_string(), json!(event.ledger)); }
             "timestamp"   => { map.insert(col.to_string(), json!(event.timestamp)); }
             "event_data"  => { map.insert(col.to_string(), event.event_data.clone()); }
+            "event_data_normalized" => { map.insert(col.to_string(), event.event_data_normalized.clone().unwrap_or(Value::Null)); }
             "created_at"  => { map.insert(col.to_string(), json!(event.created_at)); }
             _ => {}
         }
@@ -737,7 +739,7 @@ pub async fn get_events_by_contract(
 
     let where_clause = format!("WHERE {}", conditions.join(" AND "));
     let query_str = format!(
-        "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, created_at, 0::bigint AS total_count \
+        "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, event_data_normalized, created_at, 0::bigint AS total_count \
          FROM events {} ORDER BY ledger DESC LIMIT ${} OFFSET ${}",
         where_clause, bind_idx, bind_idx + 1,
     );

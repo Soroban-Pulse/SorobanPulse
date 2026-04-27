@@ -12,6 +12,7 @@ use crate::{
     config::{Config, HealthState, IndexerState},
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
+    normalizer,
 };
 
 #[async_trait::async_trait]
@@ -520,10 +521,13 @@ impl<R: RpcClient> Indexer<R> {
             "topic": event.topic
         });
 
+        let rules = normalizer::load_rules(&self.pool, &event.contract_id).await;
+        let event_data_normalized = normalizer::normalize(&rules, &event_data);
+
         let result = sqlx::query(
             r#"
-            INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, event_data_normalized)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING
             "#,
         )
@@ -532,7 +536,8 @@ impl<R: RpcClient> Indexer<R> {
         .bind(&event.tx_hash)
         .bind(ledger)
         .bind(timestamp)
-        .bind(event_data)
+        .bind(&event_data)
+        .bind(event_data_normalized.as_ref())
         .execute(&self.pool)
         .await?;
 

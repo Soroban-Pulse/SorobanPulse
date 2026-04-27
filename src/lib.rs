@@ -5,5 +5,6 @@ pub mod handlers;
 pub mod metrics;
 pub mod middleware;
 pub mod models;
+pub mod normalizer;
 pub mod rpc_client;
 pub mod routes;
