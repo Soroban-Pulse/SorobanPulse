@@ -12,6 +12,7 @@ use crate::{
     config::{Config, HealthState, IndexerState},
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
+    normalizer,
 };
 
 #[async_trait::async_trait]
