@@ -7,6 +7,7 @@
 )]
 mod config;
 mod db;
+mod encryption;
 mod error;
 mod handlers;
 mod indexer;
@@ -19,7 +20,7 @@ mod rpc_client;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[cfg(feature = "otel")]
@@ -109,7 +110,6 @@ async fn main() -> anyhow::Result<()> {
     let _ = db::run_migrations(&pool).await;
 
     info!("Migrations applied successfully");
-    info!(url = %config.stellar_rpc_url, "Soroban RPC URL");
     info!(environment = ?config.environment, "Running environment");
 
     // Create shared health state for indexer and HTTP handlers
@@ -166,27 +166,62 @@ async fn main() -> anyhow::Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
     info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
-    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, config.behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.clone());
 
-    info!(addr = %addr, "Soroban Pulse listening");
+    // When TLS is enabled directly, BEHIND_PROXY is forced false — no proxy in front.
+    let behind_proxy = match (&config.tls_cert_file, &config.tls_key_file) {
+        (Some(_), Some(_)) => {
+            if config.behind_proxy {
+                warn!("TLS_CERT_FILE and TLS_KEY_FILE are set — overriding BEHIND_PROXY=false (no proxy in front of direct TLS)");
+            }
+            false
+        }
+        _ => config.behind_proxy,
+    };
 
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        error!(addr = %addr, "Address already in use");
-        e
-    })?;
+    let router = routes::create_router_with_tx(pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, config.clone());
 
-    info!(behind_proxy = config.behind_proxy, "Running server - trusting X-Forwarded-For");
+    match (&config.tls_cert_file, &config.tls_key_file) {
+        (Some(cert_path), Some(key_path)) => {
+            // Validate that the cert and key files exist and are readable at startup.
+            std::fs::metadata(cert_path)
+                .unwrap_or_else(|e| panic!("TLS_CERT_FILE '{}' is not accessible: {}", cert_path, e));
+            std::fs::metadata(key_path)
+                .unwrap_or_else(|e| panic!("TLS_KEY_FILE '{}' is not accessible: {}", key_path, e));
 
-    // Use regular make_service since we handle connect_info through middleware
-    // Use the router directly as it implements Service for incoming connections
-    axum::serve(
-        listener,
-        router,
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown_rx_axum.changed().await;
-    })
-    .await?;
+            let tls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
+                .await
+                .unwrap_or_else(|e| panic!("Failed to load TLS certificate/key: {}", e));
+
+            info!(addr = %addr, cert = %cert_path, "Soroban Pulse listening (HTTPS/TLS)");
+
+            axum_server::bind_rustls(addr, tls_config)
+                .serve(router.into_make_service())
+                .await?;
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            warn!("Only one of TLS_CERT_FILE / TLS_KEY_FILE is set — both are required for TLS. Falling back to plain HTTP.");
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                error!(addr = %addr, "Address already in use");
+                e
+            })?;
+            info!(addr = %addr, "Soroban Pulse listening (HTTP)");
+            info!(behind_proxy = behind_proxy, "Running server - trusting X-Forwarded-For");
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move { let _ = shutdown_rx_axum.changed().await; })
+                .await?;
+        }
+        (None, None) => {
+            let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+                error!(addr = %addr, "Address already in use");
+                e
+            })?;
+            info!(addr = %addr, "Soroban Pulse listening (HTTP)");
+            info!(behind_proxy = behind_proxy, "Running server - trusting X-Forwarded-For");
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move { let _ = shutdown_rx_axum.changed().await; })
+                .await?;
+        }
+    }
     let _ = indexer_handle.await;
 
     #[cfg(feature = "otel")]
