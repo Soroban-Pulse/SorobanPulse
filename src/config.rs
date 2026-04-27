@@ -133,6 +133,12 @@ pub struct Config {
     pub environment: Environment,
     pub max_body_size_bytes: usize,
     pub log_sample_rate: u32,
+    /// AES-256-GCM key for encrypting event_data at the application level.
+    /// Set via EVENT_DATA_ENCRYPTION_KEY (64 hex chars = 32 bytes).
+    pub event_data_encryption_key: Option<[u8; 32]>,
+    /// Previous encryption key for key rotation support.
+    /// Set via EVENT_DATA_ENCRYPTION_KEY_OLD.
+    pub event_data_encryption_key_old: Option<[u8; 32]>,
 }
 
 impl Default for Config {
@@ -161,6 +167,8 @@ impl Default for Config {
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
             log_sample_rate: 1,
+            event_data_encryption_key: None,
+            event_data_encryption_key_old: None,
         }
     }
 }
@@ -223,6 +231,20 @@ fn resolve_database_url() -> String {
     } else {
         env::var("DATABASE_URL").expect("DATABASE_URL must be set (or DATABASE_URL_FILE)")
     }
+}
+
+/// Parse a 64-hex-char string into a 32-byte key, panicking with a clear message on failure.
+fn parse_hex_key(var: &str, value: &str) -> [u8; 32] {
+    if value.len() != 64 {
+        panic!("{var} must be exactly 64 hex characters (32 bytes), got {} chars", value.len());
+    }
+    let mut key = [0u8; 32];
+    for (i, chunk) in value.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).expect("valid utf8");
+        key[i] = u8::from_str_radix(hex, 16)
+            .unwrap_or_else(|_| panic!("{var} contains non-hex character in byte {i}"));
+    }
+    key
 }
 
 impl Config {
@@ -384,6 +406,14 @@ impl Config {
                 assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
                 v
             },
+            event_data_encryption_key: env::var("EVENT_DATA_ENCRYPTION_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY", &s)),
+            event_data_encryption_key_old: env::var("EVENT_DATA_ENCRYPTION_KEY_OLD")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY_OLD", &s)),
         }
     }
 }

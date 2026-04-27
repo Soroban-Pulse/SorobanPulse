@@ -32,9 +32,12 @@ async-trait = "0.1"
 tower_governor = { version = "0.8", features = ["axum"] }
 base64 = "0.22"
 sha2 = "0.10"
+aes-gcm = { version = "0.10", optional = true }
+rand = { version = "0.8", optional = true }
 
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
+encryption = ["aes-gcm", "rand"]
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
