@@ -520,6 +520,15 @@ impl<R: RpcClient> Indexer<R> {
             "topic": event.topic
         });
 
+        let event_data = if let Some(ref key) = self.config.event_data_encryption_key {
+            crate::encryption::encrypt(key, &event_data).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to encrypt event_data, storing plaintext");
+                event_data
+            })
+        } else {
+            event_data
+        };
+
         let result = sqlx::query(
             r#"
             INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
@@ -737,6 +746,8 @@ mod tests {
                 environment: crate::config::Environment::Development,
                 max_body_size_bytes: 1024 * 1024,
                 log_sample_rate: 1,
+                event_data_encryption_key: None,
+                event_data_encryption_key_old: None,
             },
             shutdown_rx,
             MockRpcClient::new(),
@@ -877,7 +888,7 @@ mod tests {
                 indexer_lag_warn_threshold: 1000,
                 rpc_connect_timeout_secs: 30,
                 rpc_request_timeout_secs: 60,
-                api_key: None,
+                api_keys: Vec::new(),
                 db_max_connections: 10,
                 db_min_connections: 2,
                 allowed_origins: vec!["*".to_string()],
@@ -886,7 +897,13 @@ mod tests {
                 db_statement_timeout_ms: 5000,
                 indexer_poll_interval_ms: 5000,
                 indexer_error_backoff_ms: 10000,
+                sse_keepalive_interval_ms: 15000,
+                sse_max_connections: 1000,
                 environment: crate::config::Environment::Development,
+                max_body_size_bytes: 1024 * 1024,
+                log_sample_rate: 1,
+                event_data_encryption_key: None,
+                event_data_encryption_key_old: None,
             },
             shutdown_rx,
             mock_client,

@@ -52,7 +52,7 @@ fn decode_cursor(cursor: &str) -> Result<(i64, Uuid), AppError> {
 }
 
 /// Map sqlx rows to a JSON array, projecting only the requested columns.
-fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str]) -> Result<Vec<Value>, AppError> {
+fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str], enc_key: Option<&[u8; 32]>, enc_key_old: Option<&[u8; 32]>) -> Result<Vec<Value>, AppError> {
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
         let mut event = serde_json::Map::new();
@@ -64,7 +64,11 @@ fn rows_to_json(rows: &[sqlx::postgres::PgRow], columns: &[&str]) -> Result<Vec<
                 "tx_hash" => { event.insert(col.to_string(), json!(row.try_get::<String, _>(col)?)); }
                 "ledger" => { event.insert(col.to_string(), json!(row.try_get::<i64, _>(col)?)); }
                 "timestamp" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
-                "event_data" => { event.insert(col.to_string(), row.try_get::<Value, _>(col)?); }
+                "event_data" => {
+                    let raw: Value = row.try_get::<Value, _>(col)?;
+                    let decrypted = decrypt_event_data(&raw, enc_key, enc_key_old);
+                    event.insert(col.to_string(), decrypted);
+                }
                 "created_at" => { event.insert(col.to_string(), json!(row.try_get::<DateTime<Utc>, _>(col)?)); }
                 _ => {}
             }
@@ -421,8 +425,11 @@ async fn stream_events_internal(
     };
 
     let rx = state.event_tx.subscribe();
+    let enc_key = state.encryption_key;
+    let enc_key_old = state.encryption_key_old;
 
-    let replay_stream = stream::iter(replay.into_iter().map(move |ev| {
+    let replay_stream = stream::iter(replay.into_iter().map(move |mut ev| {
+        ev.event_data = decrypt_event_data(&ev.event_data, enc_key.as_ref(), enc_key_old.as_ref());
         let data = serde_json::to_string(&ev).unwrap_or_default();
         Ok(Event::default()
             .id(ev.id.to_string())
@@ -480,8 +487,20 @@ async fn stream_events_internal(
     ))
 }
 
+/// Decrypt event_data if an encryption key is configured.
+fn decrypt_event_data(raw: &Value, key: Option<&[u8; 32]>, old_key: Option<&[u8; 32]>) -> Value {
+    if let Some(k) = key {
+        crate::encryption::decrypt(k, old_key, raw).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "Failed to decrypt event_data, returning raw value");
+            raw.clone()
+        })
+    } else {
+        raw.clone()
+    }
+}
+
 /// Converts an `Event` to a JSON object containing only the requested fields.
-fn filter_fields(event: &models::Event, columns: &[&str]) -> Value {
+fn filter_fields(event: &models::Event, columns: &[&str], enc_key: Option<&[u8; 32]>, enc_key_old: Option<&[u8; 32]>) -> Value {
     let mut map = serde_json::Map::new();
     for &col in columns {
         match col {
@@ -491,7 +510,10 @@ fn filter_fields(event: &models::Event, columns: &[&str]) -> Value {
             "tx_hash"     => { map.insert(col.to_string(), json!(event.tx_hash)); }
             "ledger"      => { map.insert(col.to_string(), json!(event.ledger)); }
             "timestamp"   => { map.insert(col.to_string(), json!(event.timestamp)); }
-            "event_data"  => { map.insert(col.to_string(), event.event_data.clone()); }
+            "event_data"  => {
+                let decrypted = decrypt_event_data(&event.event_data, enc_key, enc_key_old);
+                map.insert(col.to_string(), decrypted);
+            }
             "created_at"  => { map.insert(col.to_string(), json!(event.created_at)); }
             _ => {}
         }
@@ -589,7 +611,7 @@ pub async fn get_events(
             None
         };
 
-        let events = rows_to_json(&rows, &columns)?;
+        let events = rows_to_json(&rows, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())?;
 
         return Ok(Json(json!({
             "data": events,
@@ -655,7 +677,7 @@ pub async fn get_events(
         None
     };
 
-    let events = rows_to_json(&rows, &columns)?;
+    let events = rows_to_json(&rows, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())?;
 
     let (total, approximate): (i64, bool) = if exact {
         let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
@@ -753,7 +775,7 @@ pub async fn get_events_by_contract(
         return Err(AppError::NotFound);
     }
 
-    let events: Vec<Value> = rows.iter().map(|e| filter_fields(e, &columns)).collect();
+    let events: Vec<Value> = rows.iter().map(|e| filter_fields(e, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())).collect();
 
     let mut response = json!({
         "data": events,
@@ -810,7 +832,7 @@ pub async fn get_events_by_tx(
         .fetch_all(&state.pool)
         .await?;
 
-    let events = rows_to_json(&rows, &columns)?;
+    let events = rows_to_json(&rows, &columns, state.encryption_key.as_ref(), state.encryption_key_old.as_ref())?;
 
     Ok(Json(json!({ "data": events, "tx_hash": tx_hash })))
 }

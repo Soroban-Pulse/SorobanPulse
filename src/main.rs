@@ -7,6 +7,7 @@
 )]
 mod config;
 mod db;
+mod encryption;
 mod error;
 mod handlers;
 mod indexer;

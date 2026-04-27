@@ -45,6 +45,8 @@ pub struct AppState {
     pub sse_connections: Arc<AtomicUsize>,
     pub sse_max_connections: usize,
     pub health_check_timeout_ms: u64,
+    pub encryption_key: Option<[u8; 32]>,
+    pub encryption_key_old: Option<[u8; 32]>,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -91,7 +93,7 @@ pub fn create_router(
     prometheus_handle: PrometheusHandle,
     health_check_timeout_ms: u64,
 ) -> Router {
-    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms)
+    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None)
 }
 
 pub fn create_router_with_tx(
@@ -107,6 +109,8 @@ pub fn create_router_with_tx(
     sse_keepalive_interval_ms: u64,
     sse_max_connections: usize,
     health_check_timeout_ms: u64,
+    encryption_key: Option<[u8; 32]>,
+    encryption_key_old: Option<[u8; 32]>,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_keys });
@@ -120,6 +124,8 @@ pub fn create_router_with_tx(
         sse_connections: Arc::new(AtomicUsize::new(0)),
         sse_max_connections,
         health_check_timeout_ms,
+        encryption_key,
+        encryption_key_old,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.
