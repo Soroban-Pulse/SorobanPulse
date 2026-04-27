@@ -133,6 +133,17 @@ pub struct Config {
     pub environment: Environment,
     pub max_body_size_bytes: usize,
     pub log_sample_rate: u32,
+<<<<<<< feature/issue-196-direct-tls
+    pub tls_cert_file: Option<String>,
+    pub tls_key_file: Option<String>,
+=======
+    /// AES-256-GCM key for encrypting event_data at the application level.
+    /// Set via EVENT_DATA_ENCRYPTION_KEY (64 hex chars = 32 bytes).
+    pub event_data_encryption_key: Option<[u8; 32]>,
+    /// Previous encryption key for key rotation support.
+    /// Set via EVENT_DATA_ENCRYPTION_KEY_OLD.
+    pub event_data_encryption_key_old: Option<[u8; 32]>,
+>>>>>>> main
 }
 
 impl Default for Config {
@@ -161,6 +172,13 @@ impl Default for Config {
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
             log_sample_rate: 1,
+<<<<<<< feature/issue-196-direct-tls
+            tls_cert_file: None,
+            tls_key_file: None,
+=======
+            event_data_encryption_key: None,
+            event_data_encryption_key_old: None,
+>>>>>>> main
         }
     }
 }
@@ -223,6 +241,20 @@ fn resolve_database_url() -> String {
     } else {
         env::var("DATABASE_URL").expect("DATABASE_URL must be set (or DATABASE_URL_FILE)")
     }
+}
+
+/// Parse a 64-hex-char string into a 32-byte key, panicking with a clear message on failure.
+fn parse_hex_key(var: &str, value: &str) -> [u8; 32] {
+    if value.len() != 64 {
+        panic!("{var} must be exactly 64 hex characters (32 bytes), got {} chars", value.len());
+    }
+    let mut key = [0u8; 32];
+    for (i, chunk) in value.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).expect("valid utf8");
+        key[i] = u8::from_str_radix(hex, 16)
+            .unwrap_or_else(|_| panic!("{var} contains non-hex character in byte {i}"));
+    }
+    key
 }
 
 impl Config {
@@ -384,6 +416,19 @@ impl Config {
                 assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
                 v
             },
+<<<<<<< feature/issue-196-direct-tls
+            tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
+            tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),
+=======
+            event_data_encryption_key: env::var("EVENT_DATA_ENCRYPTION_KEY")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY", &s)),
+            event_data_encryption_key_old: env::var("EVENT_DATA_ENCRYPTION_KEY_OLD")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY_OLD", &s)),
+>>>>>>> main
         }
     }
 }
@@ -479,5 +524,23 @@ mod tests {
         let mut config = Config::default();
         config.database_url = "not-a-url".to_string();
         assert_eq!(config.safe_db_url(), "<unparseable>");
+    }
+
+    #[test]
+    fn startup_log_fields_do_not_contain_credentials() {
+        // Verify that the fields logged at startup are safe.
+        // safe_db_url() must strip credentials.
+        let mut config = Config::default();
+        config.database_url = "postgres://admin:supersecret@db.example.com/mydb".to_string();
+        config.stellar_rpc_url = "https://user:token@rpc.example.com".to_string();
+
+        let safe_db = config.safe_db_url();
+        assert!(!safe_db.contains("supersecret"), "safe_db_url must not contain password");
+        assert!(!safe_db.contains("admin"), "safe_db_url must not contain username");
+
+        // stellar_rpc_url is already sanitized by validate_rpc_url() at parse time;
+        // confirm the stored value has no credentials.
+        assert!(!config.stellar_rpc_url.contains("token"), "stellar_rpc_url must not contain token");
+        assert!(!config.stellar_rpc_url.contains("user:"), "stellar_rpc_url must not contain user credentials");
     }
 }

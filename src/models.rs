@@ -61,6 +61,7 @@ pub struct PaginationParams {
     pub from_ledger: Option<i64>,
     pub to_ledger: Option<i64>,
     pub cursor: Option<String>,
+    pub contract_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]

@@ -32,9 +32,16 @@ async-trait = "0.1"
 tower_governor = { version = "0.8", features = ["axum"] }
 base64 = "0.22"
 sha2 = "0.10"
+<<<<<<< feature/issue-196-direct-tls
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+=======
+aes-gcm = { version = "0.10", optional = true }
+rand = { version = "0.8", optional = true }
+>>>>>>> main
 
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
+encryption = ["aes-gcm", "rand"]
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
@@ -44,4 +51,8 @@ http-body-util = "0.1"
 
 [[bench]]
 name = "pagination"
+harness = false
+
+[[bench]]
+name = "db_queries"
 harness = false

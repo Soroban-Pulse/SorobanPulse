@@ -299,3 +299,87 @@ async fn sse_deprecated_contract_stream_unversioned_alias_works(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(resp.headers().get("Deprecation").unwrap(), "true");
 }
+
+// --- Issue #194: contract_id filter on GET /v1/events ---
+
+#[sqlx::test(migrations = "./migrations")]
+async fn events_contract_id_filter_returns_matching_events(pool: PgPool) {
+    let contract_a = "C1111111111111111111111111111111111111111111111111111111";
+    let contract_b = "C2222222222222222222222222222222222222222222222222222222";
+    
+    insert_contract_events(&pool, contract_a, &[100, 200]).await;
+    insert_contract_events(&pool, contract_b, &[150, 250]).await;
+
+    let app = make_router(pool, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/v1/events?contract_id={}", contract_a))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2);
+    for event in data {
+        assert_eq!(event["contract_id"].as_str().unwrap(), contract_a);
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn events_contract_id_with_ledger_range_filters_correctly(pool: PgPool) {
+    let contract_id = "C1234567890123456789012345678901234567890123456789012345";
+    insert_contract_events(&pool, contract_id, &[100, 200, 300, 400, 500]).await;
+
+    let app = make_router(pool, None);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/v1/events?contract_id={}&from_ledger=200&to_ledger=400",
+                    contract_id
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3);
+    for event in data {
+        assert_eq!(event["contract_id"].as_str().unwrap(), contract_id);
+        let ledger = event["ledger"].as_i64().unwrap();
+        assert!((200..=400).contains(&ledger));
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn events_invalid_contract_id_returns_400(pool: PgPool) {
+    let app = make_router(pool, None);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events?contract_id=INVALID")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(body["error"].as_str().unwrap().contains("invalid contract_id format"));
+}
