@@ -69,6 +69,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize metrics exporter
     let prometheus_handle = metrics::init_metrics();
 
+    #[cfg(target_os = "linux")]
+    metrics::spawn_memory_collector();
+
     let config = config::Config::from_env();
 
     info!(

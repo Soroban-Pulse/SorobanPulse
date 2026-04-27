@@ -211,6 +211,7 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_db_pool_size` - Current number of open database connections
 - `soroban_pulse_db_pool_idle` - Number of idle database connections
 - `soroban_pulse_db_pool_max` - Configured maximum database connections
+- `soroban_pulse_process_memory_bytes` - Process RSS memory in bytes (Linux only, updated every 30 seconds)
 
 ### Distributed Tracing
 
