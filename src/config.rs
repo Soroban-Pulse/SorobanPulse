@@ -132,6 +132,7 @@ pub struct Config {
     pub sse_max_connections: usize,
     pub environment: Environment,
     pub max_body_size_bytes: usize,
+    pub log_sample_rate: u32,
 }
 
 impl Default for Config {
@@ -159,6 +160,7 @@ impl Default for Config {
             sse_max_connections: 1000,
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
+            log_sample_rate: 1,
         }
     }
 }
@@ -374,6 +376,14 @@ impl Config {
                 .unwrap_or_else(|_| (1024 * 1024).to_string())
                 .parse()
                 .expect("MAX_BODY_SIZE_BYTES must be a number"),
+            log_sample_rate: {
+                let v: u32 = env::var("LOG_SAMPLE_RATE")
+                    .unwrap_or_else(|_| "1".to_string())
+                    .parse()
+                    .expect("LOG_SAMPLE_RATE must be a positive integer");
+                assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
+                v
+            },
         }
     }
 }

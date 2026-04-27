@@ -125,7 +125,7 @@ impl PaginationParams {
                     .map(|s| s.to_string())
                     .collect();
                 if !unknown.is_empty() {
-                    return Err((unknown, Self::ALLOWED_FIELDS));
+                    return Err((unknown, Self::ALLOWED_FIELDS.to_vec()));
                 }
                 Ok(requested)
             }

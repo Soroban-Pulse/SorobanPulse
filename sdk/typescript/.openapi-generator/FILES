@@ -1,0 +1,17 @@
+.openapi-generator-ignore
+apis/EventsApi.ts
+apis/SystemApi.ts
+apis/index.ts
+docs/ContractSummary.md
+docs/Event.md
+docs/EventType.md
+docs/EventsApi.md
+docs/PaginationParams.md
+docs/SystemApi.md
+index.ts
+models/ContractSummary.ts
+models/Event.ts
+models/EventType.ts
+models/PaginationParams.ts
+models/index.ts
+runtime.ts

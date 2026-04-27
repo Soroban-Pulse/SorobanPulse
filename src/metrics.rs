@@ -52,9 +52,10 @@ pub fn update_sse_connections(count: usize) {
     m::gauge!("soroban_pulse_sse_connections_active", count as f64);
 }
 
-/// Record a replay job execution
-pub fn record_replay_job() {
-    m::counter!("soroban_pulse_replay_jobs_total", 1u64);
+/// Update DB connection pool metrics
+pub fn update_db_pool_metrics(pool: &PgPool) {
+    m::gauge!("soroban_pulse_db_pool_size", pool.size() as f64);
+    m::gauge!("soroban_pulse_db_pool_idle", pool.num_idle() as f64);
 }
 
 #[cfg(test)]

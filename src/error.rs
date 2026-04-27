@@ -92,6 +92,41 @@ impl IntoResponse for AppError {
     }
 }
 
+impl AppError {
+    pub fn into_response_parts(self) -> (StatusCode, Json<serde_json::Value>) {
+        let correlation_id = get_request_id();
+
+        let (status, message, code) = match &self {
+            AppError::NotFound => (StatusCode::NOT_FOUND, "not found".to_string(), "NOT_FOUND"),
+            AppError::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone(), "VALIDATION_ERROR"),
+            AppError::Database(e) => {
+                if is_query_timeout(e) {
+                    let body = serde_json::json!({
+                        "error": "query timeout",
+                        "code": "DATABASE_ERROR",
+                        "correlation_id": correlation_id,
+                    });
+                    return (StatusCode::SERVICE_UNAVAILABLE, Json(body));
+                }
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "DATABASE_ERROR")
+            }
+            AppError::Http(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "INTERNAL_ERROR")
+            }
+            AppError::Internal(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "INTERNAL_ERROR")
+            }
+        };
+
+        let body = serde_json::json!({
+            "error": message,
+            "code": code,
+            "correlation_id": correlation_id,
+        });
+        (status, Json(body))
+    }
+}
+
 fn is_query_timeout(e: &sqlx::Error) -> bool {
     // Postgres error code 57014 = query_canceled (covers statement_timeout)
     if let sqlx::Error::Database(db_err) = e {
