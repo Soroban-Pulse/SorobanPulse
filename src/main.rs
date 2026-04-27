@@ -18,7 +18,7 @@ mod models;
 mod normalizer;
 mod routes;
 mod rpc_client;
-mod subscriptions;
+mod webhook;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -155,6 +155,44 @@ async fn main() -> anyhow::Result<()> {
 
     // Broadcast channel for real-time SSE streaming (capacity 256 events)
     let (event_tx, _) = tokio::sync::broadcast::channel::<models::SorobanEvent>(256);
+
+    // Spawn webhook delivery task if WEBHOOK_URL is configured.
+    if let Some(ref webhook_url) = config.webhook_url {
+        let webhook_rx = event_tx.subscribe();
+        let webhook_url = webhook_url.clone();
+        let webhook_secret = config.webhook_secret.clone();
+        let webhook_contract_filter = config.webhook_contract_filter.clone();
+        let http_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("Failed to build webhook HTTP client");
+
+        info!(url = %webhook_url, "Webhook delivery enabled");
+
+        tokio::spawn(async move {
+            let mut rx = webhook_rx;
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        // Apply contract filter if configured
+                        if !webhook_contract_filter.is_empty()
+                            && !webhook_contract_filter.contains(&event.contract_id)
+                        {
+                            continue;
+                        }
+                        let client = http_client.clone();
+                        let url = webhook_url.clone();
+                        let secret = webhook_secret.clone();
+                        tokio::spawn(webhook::deliver(client, url, secret, event));
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "Webhook subscriber lagged, some events skipped");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
 
     // Spawn background indexer with health state
     let rpc_client = indexer::SorobanRpcClient::new(&config);

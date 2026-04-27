@@ -174,20 +174,9 @@ pub struct Config {
     pub environment: Environment,
     pub max_body_size_bytes: usize,
     pub log_sample_rate: u32,
-
-    /// Event types the indexer fetches from RPC. Empty means all types.
-    pub indexer_event_types: Vec<String>,
-
-    pub tls_cert_file: Option<String>,
-    pub tls_key_file: Option<String>,
-
-    /// AES-256-GCM key for encrypting event_data at the application level.
-    /// Set via EVENT_DATA_ENCRYPTION_KEY (64 hex chars = 32 bytes).
-    pub event_data_encryption_key: Option<[u8; 32]>,
-    /// Previous encryption key for key rotation support.
-    /// Set via EVENT_DATA_ENCRYPTION_KEY_OLD.
-    pub event_data_encryption_key_old: Option<[u8; 32]>,
-
+    pub webhook_url: Option<String>,
+    pub webhook_secret: Option<String>,
+    pub webhook_contract_filter: Vec<String>,
 }
 
 impl Default for Config {
@@ -221,15 +210,9 @@ impl Default for Config {
             environment: Environment::Development,
             max_body_size_bytes: 1024 * 1024, // 1 MB default
             log_sample_rate: 1,
-
-            indexer_event_types: Vec::new(),
-
-            tls_cert_file: None,
-            tls_key_file: None,
-
-            event_data_encryption_key: None,
-            event_data_encryption_key_old: None,
-
+            webhook_url: None,
+            webhook_secret: None,
+            webhook_contract_filter: Vec::new(),
         }
     }
 }
@@ -510,19 +493,14 @@ impl Config {
                 assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
                 v
             },
-
-            indexer_event_types: parse_indexer_event_types(),
-
-            tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
-            tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),
-
-            event_data_encryption_key: env::var("EVENT_DATA_ENCRYPTION_KEY")
-                .ok()
+            webhook_url: env::var("WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
+            webhook_secret: env::var("WEBHOOK_SECRET").ok().filter(|s| !s.is_empty()),
+            webhook_contract_filter: env::var("WEBHOOK_CONTRACT_FILTER")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
-                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY", &s)),
-            event_data_encryption_key_old: env_or_file("EVENT_DATA_ENCRYPTION_KEY_OLD", &file)
-                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY_OLD", &s)),
-
+                .collect(),
         }
     }
 }
