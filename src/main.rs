@@ -90,6 +90,9 @@ async fn main() -> anyhow::Result<()> {
                 config.db_max_connections,
                 config.db_min_connections,
                 config.db_statement_timeout_ms,
+                config.db_idle_timeout_secs,
+                config.db_max_lifetime_secs,
+                config.db_test_before_acquire,
             )
             .await
             {

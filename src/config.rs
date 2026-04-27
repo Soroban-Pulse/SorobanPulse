@@ -118,6 +118,9 @@ pub struct Config {
     pub api_keys: Vec<String>,
     pub db_max_connections: u32,
     pub db_min_connections: u32,
+    pub db_idle_timeout_secs: u64,
+    pub db_max_lifetime_secs: u64,
+    pub db_test_before_acquire: bool,
     pub behind_proxy: bool,
     pub rpc_connect_timeout_secs: u64,
     pub rpc_request_timeout_secs: u64,
@@ -146,6 +149,9 @@ impl Default for Config {
             api_keys: Vec::new(),
             db_max_connections: 10,
             db_min_connections: 2,
+            db_idle_timeout_secs: 600,
+            db_max_lifetime_secs: 1800,
+            db_test_before_acquire: true,
             behind_proxy: false,
             rpc_connect_timeout_secs: 5,
             rpc_request_timeout_secs: 30,
@@ -310,6 +316,18 @@ impl Config {
                 .unwrap_or_else(|_| "2".to_string())
                 .parse()
                 .expect("DB_MIN_CONNECTIONS must be a number"),
+            db_idle_timeout_secs: env::var("DB_IDLE_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()
+                .expect("DB_IDLE_TIMEOUT_SECS must be a number"),
+            db_max_lifetime_secs: env::var("DB_MAX_LIFETIME_SECS")
+                .unwrap_or_else(|_| "1800".to_string())
+                .parse()
+                .expect("DB_MAX_LIFETIME_SECS must be a number"),
+            db_test_before_acquire: env::var("DB_TEST_BEFORE_ACQUIRE")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .expect("DB_TEST_BEFORE_ACQUIRE must be true or false"),
             behind_proxy,
             rpc_connect_timeout_secs: env::var("RPC_CONNECT_TIMEOUT_SECS")
                 .unwrap_or_else(|_| "5".to_string())
