@@ -9,11 +9,17 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   app:
     build: .
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     environment:
       DATABASE_URL: ${DATABASE_URL}
       STELLAR_RPC_URL: ${STELLAR_RPC_URL}
@@ -22,6 +28,12 @@ services:
       RUST_LOG: ${RUST_LOG}
     ports:
       - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/healthz/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   pgdata:

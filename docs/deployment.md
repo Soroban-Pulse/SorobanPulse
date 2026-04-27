@@ -1,5 +1,61 @@
 # Deployment Guide
 
+## Healthcheck Configuration
+
+The `app` service in `docker-compose.yml` includes a Docker healthcheck that polls `GET /healthz/ready` every 10 seconds. The check is configured with:
+
+- `interval: 10s` — time between checks
+- `timeout: 5s` — maximum time for a single check to respond
+- `retries: 5` — consecutive failures before the container is marked unhealthy
+- `start_period: 30s` — grace period on startup to allow migrations to complete
+
+The `db` service uses `pg_isready` as its healthcheck, and the `app` service declares `depends_on: db: condition: service_healthy`, so Docker Compose will not start the application until PostgreSQL is accepting connections.
+
+`make docker-up` runs `docker-compose wait app` after starting the stack, blocking until the app container reports healthy.
+
+---
+
+## Direct TLS
+
+By default, Soroban Pulse serves plain HTTP and relies on an external reverse proxy (nginx, Caddy, AWS ALB, etc.) for TLS termination. For simpler deployments — a single VPS, a development environment with self-signed certificates, or any setup where adding a proxy is impractical — the service can handle TLS directly.
+
+### Enabling direct TLS
+
+Set both `TLS_CERT_FILE` and `TLS_KEY_FILE` to PEM-encoded certificate and key files:
+
+```bash
+TLS_CERT_FILE=/etc/ssl/certs/soroban-pulse.crt
+TLS_KEY_FILE=/etc/ssl/private/soroban-pulse.key
+PORT=443
+```
+
+When both variables are set, the service starts an HTTPS listener using `axum-server` with `rustls`. The certificate and key files are validated at startup — if either file is missing or the TLS handshake configuration fails, the service panics with a descriptive error.
+
+When only one of the two variables is set, the service logs a warning and falls back to plain HTTP.
+
+**`BEHIND_PROXY` is automatically forced to `false` when direct TLS is enabled**, since there is no proxy in front of the service. Any explicit `BEHIND_PROXY=true` setting is overridden and a warning is logged.
+
+### Self-signed certificate (development)
+
+```bash
+# Generate a self-signed cert valid for 365 days
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem \
+  -days 365 -nodes -subj '/CN=localhost'
+
+TLS_CERT_FILE=cert.pem TLS_KEY_FILE=key.pem PORT=3443 cargo run
+```
+
+### Production recommendation
+
+For production deployments, prefer a reverse proxy (nginx, Caddy, AWS ALB) for TLS termination. This allows:
+- Automatic certificate renewal (e.g., Let's Encrypt via Caddy)
+- HTTP/2 and connection multiplexing
+- Load balancing across multiple replicas
+
+Set `BEHIND_PROXY=true` when running behind a proxy so the service trusts `X-Forwarded-For` headers for rate limiting.
+
+---
+
 ## Horizontal Scaling
 
 Soroban Pulse supports running multiple replicas safely. Only one replica will run the indexer loop at a time; all others serve HTTP traffic in read-only mode.
@@ -208,6 +264,38 @@ In staging and production, setting `ALLOWED_ORIGINS=*` will cause the service to
 
 ---
 
+## Stellar RPC Endpoints
+
+### Official endpoints
+
+| Network | URL |
+| ------- | --- |
+| Testnet | `https://soroban-testnet.stellar.org` |
+| Mainnet | `https://mainnet.stellar.validationcloud.io/v1/<YOUR_API_KEY>` |
+
+The official mainnet endpoint is provided by Validation Cloud and requires a free API key for sustained access. Register at [validationcloud.io](https://validationcloud.io).
+
+### API key requirements
+
+For low-volume or development use, the testnet endpoint accepts requests without an API key. For production mainnet traffic, an API key is required to avoid rate limiting. Set it in `STELLAR_RPC_URL` as a path segment (as shown above) or as a query parameter depending on the provider.
+
+### Third-party RPC providers
+
+For high-volume production deployments, consider a dedicated RPC provider:
+
+| Provider | URL format |
+| -------- | ---------- |
+| QuickNode | `https://<endpoint>.stellar.quiknode.pro/<token>/` |
+| Ankr | `https://rpc.ankr.com/stellar_soroban/<token>` |
+
+### `ALLOW_INSECURE_RPC`
+
+> ⚠️ **Never set this in production.**
+
+Setting `ALLOW_INSECURE_RPC=true` disables the URL validation that rejects HTTP and loopback/private-network RPC URLs. It exists only for local development against a locally-run RPC node (e.g., `http://localhost:8000`). In staging and production this variable must be unset or absent.
+
+---
+
 ## Secret Management
 
 Secrets (database password, API key, RPC URL) should never be stored in plain `.env` files in production. Use one of the following patterns.
@@ -398,6 +486,18 @@ DATABASE_URL=postgres://... ./scripts/restore.sh s3://my-bucket/backups/soroban_
 
 The restore script prompts for confirmation before overwriting data.
 
+### Automated backup verification
+
+A weekly GitHub Actions workflow (`.github/workflows/backup-verify.yml`) automatically validates that backups are restorable:
+
+1. Provisions two PostgreSQL containers (source and restore target)
+2. Seeds the source database with test data
+3. Runs `scripts/backup.sh` to create a dump
+4. Restores the dump to the target database
+5. Compares `COUNT(*) FROM events` between source and target — fails if they differ
+
+The workflow runs every Sunday at 02:00 UTC (`cron: '0 2 * * 0'`) and can also be triggered manually via `workflow_dispatch`.
+
 ### WAL archiving (for sub-minute RPO)
 
 Enable continuous archiving in `postgresql.conf`:
@@ -509,3 +609,54 @@ make vacuum
 ```
 
 This executes `VACUUM ANALYZE events;` which cleans up dead tuples and updates statistics without taking an exclusive lock on the table (allowing application traffic to continue).
+
+---
+
+## Index Usage Monitoring
+
+Soroban Pulse includes a background task that periodically runs `EXPLAIN` on the three key query patterns and logs a warning if the query planner is not using the expected index.
+
+### Checked queries
+
+| Query | Expected index |
+|---|---|
+| `GET /v1/events` (no filters) | `idx_events_ledger_desc` |
+| `GET /v1/events/contract/:id` | `idx_events_contract_ledger` |
+| `GET /v1/events/tx/:hash` | `idx_events_tx_ledger` |
+
+### Configuration
+
+| Variable | Description | Default |
+|---|---|---|
+| `INDEX_CHECK_INTERVAL_HOURS` | How often to run the check | `24` |
+
+### Log output
+
+- `DEBUG` — index is being used as expected.
+- `WARN` — a sequential scan was detected where an index scan is expected. This indicates the query planner has chosen a different execution plan, which may degrade performance at scale. Investigate with `EXPLAIN ANALYZE` and consider running `ANALYZE events;` to refresh planner statistics.
+
+---
+
+## Event Data Compression
+
+The `event_data` JSONB column uses PostgreSQL TOAST for out-of-line storage of large values. The migration `20260427000000_event_data_compression` sets the column storage to `EXTENDED` and, on PostgreSQL 14+, switches the compression algorithm to `lz4` for better compression throughput compared to the default `pglz`.
+
+This change is applied automatically on startup via SQLx migrations and requires no manual intervention. No table rewrite is performed — only the column metadata is updated.
+
+### Verifying the setting
+
+```sql
+SELECT attname, attstorage, attcompression
+FROM pg_attribute
+WHERE attrelid = 'events'::regclass AND attname = 'event_data';
+```
+
+Expected output on PostgreSQL 14+:
+
+```
+ attname    | attstorage | attcompression
+------------+------------+----------------
+ event_data | x          | l
+```
+
+(`x` = EXTENDED, `l` = lz4)

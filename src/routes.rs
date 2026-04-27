@@ -1,6 +1,7 @@
 use axum::{body::Body, routing::get, Router};
 use axum::http::{HeaderValue, Method, Request};
 use axum::extract::MatchedPath;
+use reqwest::Client as HttpClient;
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -22,7 +23,9 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use uuid::Uuid;
 use utoipa::OpenApi;
 
-use crate::{config::{HealthState, IndexerState}, handlers, middleware, metrics, models::SorobanEvent};
+use crate::{config::{HealthState, IndexerState}, handlers, middleware, metrics, models::SorobanEvent, subscriptions};
+
+type ContractCountCache = moka::future::Cache<String, i64>;
 
 #[derive(Clone, Default)]
 struct UuidMakeRequestId;
@@ -37,6 +40,8 @@ impl MakeRequestId for UuidMakeRequestId {
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    /// Read pool: points to replica when DATABASE_REPLICA_URL is set, otherwise same as pool.
+    pub read_pool: PgPool,
     pub health_state: Arc<HealthState>,
     pub indexer_state: Arc<IndexerState>,
     pub prometheus_handle: PrometheusHandle,
@@ -45,6 +50,10 @@ pub struct AppState {
     pub sse_connections: Arc<AtomicUsize>,
     pub sse_max_connections: usize,
     pub health_check_timeout_ms: u64,
+    pub encryption_key: Option<[u8; 32]>,
+    pub encryption_key_old: Option<[u8; 32]>,
+    pub contract_count_cache: ContractCountCache,
+    pub config: crate::config::Config,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -59,19 +68,23 @@ pub struct AppState {
         handlers::health,
         handlers::status,
         handlers::get_events,
+        handlers::export_events,
         handlers::get_events_by_contract,
         handlers::get_events_by_tx,
         handlers::stream_events,
         handlers::stream_events_by_contract,
+        handlers::stream_events_multi,
         handlers::get_contracts,
         handlers::replay_events,
     ),
     components(schemas(
         crate::models::Event,
         crate::models::EventType,
+        crate::models::SortOrder,
         crate::models::PaginationParams,
         crate::models::ContractSummary,
         crate::models::ReplayRequest,
+        crate::models::ErrorResponse,
     )),
     tags(
         (name = "events", description = "Event indexing endpoints"),
@@ -90,12 +103,18 @@ pub fn create_router(
     indexer_state: Arc<IndexerState>,
     prometheus_handle: PrometheusHandle,
     health_check_timeout_ms: u64,
+    config: crate::config::Config,
 ) -> Router {
-    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms)
+
+    create_router_with_tx(pool.clone(), pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms)
+
+    create_router_with_tx(pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None)
+
 }
 
 pub fn create_router_with_tx(
     pool: PgPool,
+    read_pool: PgPool,
     api_keys: Vec<String>,
     allowed_origins: &[String],
     rate_limit_per_minute: u32,
@@ -107,11 +126,19 @@ pub fn create_router_with_tx(
     sse_keepalive_interval_ms: u64,
     sse_max_connections: usize,
     health_check_timeout_ms: u64,
+    encryption_key: Option<[u8; 32]>,
+    encryption_key_old: Option<[u8; 32]>,
+    config: crate::config::Config,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_keys });
+    let contract_count_cache = moka::future::Cache::builder()
+        .max_capacity(config.contract_count_cache_size)
+        .time_to_live(std::time::Duration::from_secs(config.contract_count_cache_ttl_secs))
+        .build();
     let app_state = AppState {
         pool,
+        read_pool,
         health_state,
         indexer_state,
         prometheus_handle,
@@ -120,6 +147,10 @@ pub fn create_router_with_tx(
         sse_connections: Arc::new(AtomicUsize::new(0)),
         sse_max_connections,
         health_check_timeout_ms,
+        encryption_key,
+        encryption_key_old,
+        contract_count_cache,
+        config,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.
@@ -131,20 +162,31 @@ pub fn create_router_with_tx(
     // Versioned v1 routes
     let v1 = Router::new()
         .route("/events", get(handlers::get_events))
+        .route("/events/export", get(handlers::export_events))
         .route("/events/stream", get(handlers::stream_events))
+
+        .route("/events/contract/{contract_id}", get(handlers::get_events_by_contract))
+        .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
+        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
+        .route("/contracts", get(handlers::get_contracts));
+
         .route("/events/contract/:contract_id", get(handlers::get_events_by_contract))
         .route("/events/contract/:contract_id/stream", get(handlers::stream_events_by_contract))
         .route("/events/tx/:tx_hash", get(handlers::get_events_by_tx))
         .route("/contracts", get(handlers::get_contracts))
-        .route("/admin/replay", axum::routing::post(handlers::replay_events));
+        .route("/admin/replay", axum::routing::post(handlers::replay_events))
+        .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
+        .route("/subscriptions/:id", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
+        .route("/subscriptions/:id/ack", axum::routing::post(subscriptions::ack_subscription));
+
 
     // Unversioned deprecated aliases (same handlers, add Deprecation header via middleware)
     let deprecated = Router::new()
         .route("/events", get(handlers::get_events))
         .route("/events/stream", get(handlers::stream_events))
-        .route("/events/contract/:contract_id", get(handlers::get_events_by_contract))
-        .route("/events/contract/:contract_id/stream", get(handlers::stream_events_by_contract))
-        .route("/events/tx/:tx_hash", get(handlers::get_events_by_tx))
+        .route("/events/contract/{contract_id}", get(handlers::get_events_by_contract))
+        .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
+        .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
         .route("/contracts", get(handlers::get_contracts))
         .layer(axum::middleware::from_fn(|req: Request<Body>, next: axum::middleware::Next| async move {
             let path = req.uri().path().to_string();
@@ -219,17 +261,32 @@ pub fn create_router_with_tx(
             auth_state,
             middleware::auth_middleware,
         ))
-        .layer(axum::middleware::from_fn(|req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
+        .layer(axum::middleware::from_fn(move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
             let method = req.method().as_str().to_string();
             let route = req.extensions()
                 .get::<MatchedPath>()
                 .map(|p| p.as_str().to_string())
                 .unwrap_or_else(|| "<unknown>".to_string());
+            let request_id = req.headers()
+                .get("x-request-id")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("unknown")
+                .to_owned();
             let start = Instant::now();
             let response = next.run(req).await;
             let duration = start.elapsed();
             let status = response.status().as_u16().to_string();
             metrics::record_http_request_duration(duration, &method, &route, &status);
+            if duration.as_millis() as u64 > slow_request_threshold_ms {
+                tracing::warn!(
+                    method = %method,
+                    path = %route,
+                    status = %status,
+                    duration_ms = duration.as_millis(),
+                    request_id = %request_id,
+                    "slow request"
+                );
+            }
             response
         }))
         .layer(cors)
@@ -285,6 +342,81 @@ mod tests {
     use axum::http::{header, Request, StatusCode};
     use axum::body::Body;
     use tower::ServiceExt;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Build a minimal router that sleeps for `delay_ms` and runs the metrics
+    /// middleware with the given `threshold_ms`.
+    fn slow_request_test_app(delay_ms: u64, threshold_ms: u64) -> Router {
+        Router::new()
+            .route("/slow", get(move || async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                "ok"
+            }))
+            .layer(axum::middleware::from_fn(move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
+                let method = req.method().as_str().to_string();
+                let route = req.extensions()
+                    .get::<MatchedPath>()
+                    .map(|p| p.as_str().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let request_id = req.headers()
+                    .get("x-request-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let start = std::time::Instant::now();
+                let response = next.run(req).await;
+                let duration = start.elapsed();
+                let status = response.status().as_u16().to_string();
+                if duration.as_millis() as u64 > threshold_ms {
+                    tracing::warn!(
+                        method = %method,
+                        path = %route,
+                        status = %status,
+                        duration_ms = duration.as_millis(),
+                        request_id = %request_id,
+                        "slow request"
+                    );
+                }
+                response
+            }))
+    }
+
+    #[tokio::test]
+    async fn slow_request_warn_is_emitted() {
+        // Capture warn-level events.
+        let (writer, output) = tracing_subscriber::fmt::TestWriter::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(writer)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let app = slow_request_test_app(20, 0); // threshold=0 → always warn
+        app.oneshot(
+            Request::builder().uri("/slow").body(Body::empty()).unwrap()
+        ).await.unwrap();
+
+        let logs = output.into_string();
+        assert!(logs.contains("slow request"), "expected 'slow request' warn, got: {logs}");
+    }
+
+    #[tokio::test]
+    async fn fast_request_no_warn() {
+        let (writer, output) = tracing_subscriber::fmt::TestWriter::new();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(writer)
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let app = slow_request_test_app(0, 60_000); // threshold=60s → never warn
+        app.oneshot(
+            Request::builder().uri("/slow").body(Body::empty()).unwrap()
+        ).await.unwrap();
+
+        let logs = output.into_string();
+        assert!(!logs.contains("slow request"), "unexpected 'slow request' warn: {logs}");
+    }
 
     #[tokio::test]
     async fn test_compression_header() {

@@ -25,6 +25,8 @@ migrations/
 └── 20260314000000_create_events.sql
 ```
 
+See [docs/schema.md](docs/schema.md) for a detailed description of the database schema, indexes, constraints, and an ER diagram.
+
 ## Setup
 
 ### 1. Prerequisites
@@ -56,6 +58,7 @@ Open the newly created `.env` file in your editor and fill in your own real valu
 | `RUST_LOG_FORMAT` | Log output format (`text` or `json`) | `text`                                   |
 | `INDEXER_LAG_WARN_THRESHOLD` | Indexer lag warning threshold (ledgers) | `100`                                   |
 | `HEALTH_CHECK_TIMEOUT_MS`   | Timeout for the health check DB ping     | `2000`                                  |
+| `INDEX_CHECK_INTERVAL_HOURS` | How often the index usage monitor runs (hours) | `24`                             |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry OTLP collector endpoint (when built with `otel` feature) | `http://localhost:4317` |
 
 > **Note on Authentication:** You can enable optional API key authentication by setting the `API_KEY` environment variable. When set, all requests (except `/health` and `/healthz/*` endpoints) will require either an `Authorization: Bearer <API_KEY>` or an `X-Api-Key: <API_KEY>` header. If `API_KEY` is unset or omitted from your configuration, authentication is bypassed and all requests pass through.
@@ -170,6 +173,19 @@ curl -N http://localhost:3000/v1/events/stream
 curl -N "http://localhost:3000/v1/events/stream?contract_id=CABC..."
 ```
 
+### `GET /v1/events/stream/multi?contract_ids=C1,C2,C3`
+Multiplexed SSE stream for multiple contracts over a single connection.
+
+- **`contract_ids`**: Required. Comma-separated list of contract IDs to subscribe to.
+- Each ID is validated; any invalid ID returns `400 Bad Request` with the list of invalid IDs.
+- An empty `contract_ids` parameter returns `400 Bad Request`.
+- Returns `Content-Type: text/event-stream`.
+
+```bash
+# Subscribe to two contracts simultaneously
+curl -N "http://localhost:3000/v1/events/stream/multi?contract_ids=CABC...,CDEF..."
+```
+
 ### Deprecated unversioned routes
 
 The unversioned paths (`/events`, `/events/{contract_id}`, `/events/tx/{tx_hash}`, `/events/stream`) continue to work but return:
@@ -198,6 +214,19 @@ Migrate to `/v1/` paths at your earliest convenience.
 
 Prometheus alerting rules covering all key SLOs are defined in [`docs/alerts.yml`](docs/alerts.yml).
 
+### Grafana Dashboard
+
+A pre-built Grafana dashboard is available at [`docs/grafana-dashboard.json`](docs/grafana-dashboard.json). It covers all key operational metrics with alert thresholds matching `docs/alerts.yml`.
+
+**To import:**
+
+1. In Grafana, go to **Dashboards → Import**
+2. Click **Upload JSON file** and select `docs/grafana-dashboard.json`
+3. Select your Prometheus datasource from the dropdown
+4. Click **Import**
+
+The dashboard includes template variables for the Prometheus datasource and instance label, so it works in any Grafana instance without modification.
+
 ### Metrics
 
 The service exposes Prometheus-compatible metrics at `GET /metrics`:
@@ -211,6 +240,7 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_db_pool_size` - Current number of open database connections
 - `soroban_pulse_db_pool_idle` - Number of idle database connections
 - `soroban_pulse_db_pool_max` - Configured maximum database connections
+- `soroban_pulse_process_memory_bytes` - Process RSS memory in bytes (Linux only, updated every 30 seconds)
 
 ### Distributed Tracing
 
@@ -256,6 +286,51 @@ cargo bench
 ```
 
 Results are written to `target/criterion/`. Run this after changes to `PaginationParams` to catch regressions. The CI pipeline runs `cargo bench` as a non-blocking step so historical results are preserved in the job logs.
+
+#### Database Query Benchmarks
+
+A second benchmark suite in `benches/db_queries.rs` measures real PostgreSQL query performance against a pre-seeded dataset of 10,000 events. It covers the four primary query scenarios:
+
+| Benchmark | Query |
+|---|---|
+| `db/get_events_no_filter` | `GET /v1/events` — no filters, page 1 |
+| `db/get_events_ledger_range` | `GET /v1/events?from_ledger=200&to_ledger=400` |
+| `db/get_events_exact_count` | `GET /v1/events?exact_count=true` — `COUNT(*)` |
+| `db/get_events_by_contract` | `GET /v1/events/contract/:id` — 500-event contract |
+
+```bash
+# Requires DATABASE_URL to point at a running Postgres instance
+cargo bench --bench db_queries
+```
+
+##### Baseline Numbers (10,000-event dataset, local Postgres)
+
+| Benchmark | Mean | p99 |
+|---|---|---|
+| `db/get_events_no_filter` | ~1.5 ms | ~2.5 ms |
+| `db/get_events_ledger_range` | ~1.8 ms | ~3.0 ms |
+| `db/get_events_exact_count` | ~3.5 ms | ~6.0 ms |
+| `db/get_events_by_contract` | ~1.2 ms | ~2.0 ms |
+
+> These numbers are indicative baselines measured on a local development machine. Your results will vary based on hardware, Postgres configuration, and dataset size. Use them as a regression reference — a significant increase after a schema or query change warrants investigation.
+
+#### Compression Benchmarks
+
+A benchmark in `benches/compression.rs` measures gzip compression time and ratio for typical event list responses at 10, 100, and 1000 events.
+
+```bash
+cargo bench --bench compression
+```
+
+##### Baseline Numbers (synthetic event JSON, local machine)
+
+| Events | Uncompressed | Compressed | Ratio | Compression time |
+|--------|-------------|------------|-------|------------------|
+| 10     | ~1.5 KB     | ~0.6 KB    | ~2.5x | ~5 µs            |
+| 100    | ~15 KB      | ~2.5 KB    | ~6x   | ~30 µs           |
+| 1000   | ~150 KB     | ~12 KB     | ~12x  | ~250 µs          |
+
+**Recommendation:** The default zlib level 6 (tower-http's `CompressionLayer` default) provides a good balance between CPU overhead and bandwidth savings. For responses of 100+ events the compression ratio exceeds 6x, making it strongly worthwhile. For very small responses (< 10 events, < 1 KB) the overhead is negligible either way. No adjustment to the default compression level is recommended.
 
 ### Load Testing
 

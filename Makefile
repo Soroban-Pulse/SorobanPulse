@@ -27,8 +27,9 @@ fmt: ## Format source code
 run: ## Start the development server
 	cargo run
 
-docker-up: ## Start the full stack via Docker Compose
+docker-up: ## Start the full stack via Docker Compose and wait for app to be healthy
 	docker-compose up --build -d
+	docker-compose wait app
 
 docker-down: ## Tear down the Docker Compose stack
 	docker-compose down

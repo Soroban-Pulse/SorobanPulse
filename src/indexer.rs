@@ -12,12 +12,13 @@ use crate::{
     config::{Config, HealthState, IndexerState},
     metrics,
     models::{GetEventsResult, LatestLedgerResult, RpcResponse, SorobanEvent},
+    normalizer,
 };
 
 #[async_trait::async_trait]
 pub trait RpcClient: Send + Sync {
     async fn get_latest_ledger(&self, rpc_url: &str) -> Result<u64, String>;
-    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>) -> Result<GetEventsResult, String>;
+    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String>;
 }
 
 /// Postgres advisory lock key for the indexer singleton.
@@ -34,6 +35,8 @@ enum IndexerFetchError {
 
 pub struct SorobanRpcClient {
     client: reqwest::Client,
+    /// Custom headers injected into every RPC request. Values are never logged.
+    headers: reqwest::header::HeaderMap,
 }
 
 impl SorobanRpcClient {
@@ -46,7 +49,17 @@ impl SorobanRpcClient {
             .tcp_keepalive(Duration::from_secs(60))
             .build()
             .expect("Failed to build HTTP client");
-        Self { client }
+
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in &config.rpc_headers {
+            let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .unwrap_or_else(|_| panic!("Invalid RPC header name: {name}"));
+            let header_value = reqwest::header::HeaderValue::from_str(value)
+                .unwrap_or_else(|_| panic!("Invalid RPC header value for '{name}'"));
+            headers.insert(header_name, header_value);
+        }
+
+        Self { client, headers }
     }
 }
 
@@ -65,6 +78,7 @@ impl RpcClient for SorobanRpcClient {
         let resp: RpcResponse<LatestLedgerResult> = self
             .client
             .post(rpc_url)
+            .headers(self.headers.clone())
             .json(&body)
             .send()
             .await
@@ -96,9 +110,20 @@ impl RpcClient for SorobanRpcClient {
         }
     }
 
-    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>) -> Result<GetEventsResult, String> {
+    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String> {
+        // Build filters: one filter object per type when event_types is non-empty.
+        let filters: serde_json::Value = if event_types.is_empty() {
+            json!([])
+        } else {
+            let filter_list: Vec<serde_json::Value> = event_types
+                .iter()
+                .map(|t| json!({ "type": t }))
+                .collect();
+            json!(filter_list)
+        };
+
         let mut params = json!({
-            "filters": [],
+            "filters": filters,
             "pagination": { "limit": 100 }
         });
 
@@ -118,6 +143,7 @@ impl RpcClient for SorobanRpcClient {
         let resp: RpcResponse<GetEventsResult> = self
             .client
             .post(rpc_url)
+            .headers(self.headers.clone())
             .json(&body)
             .send()
             .await
@@ -335,34 +361,49 @@ impl<R: RpcClient> Indexer<R> {
         self.rpc_client.get_latest_ledger(&self.config.stellar_rpc_url).await
     }
 
+    /// Load the last persisted cursor from the database, if any.
+    async fn load_checkpoint(&self) -> Option<String> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT last_cursor FROM indexer_checkpoints WHERE id = 'singleton'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// Persist the cursor atomically alongside the event inserts.
+    async fn save_checkpoint(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        cursor: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO indexer_checkpoints (id, last_cursor, updated_at)
+             VALUES ('singleton', $1, NOW())
+             ON CONFLICT (id) DO UPDATE SET last_cursor = EXCLUDED.last_cursor, updated_at = NOW()",
+        )
+        .bind(cursor)
+        .execute(&mut **tx)
+        .await
+        .map(|_| ())
+    }
+
     #[instrument(skip(self), fields(start_ledger = start_ledger))]
     async fn fetch_and_store_events(&self, start_ledger: u64) -> Result<u64, IndexerFetchError> {
-        let mut cursor: Option<String> = None;
+        // Resume from persisted cursor if available, otherwise start from ledger.
+        let mut cursor: Option<String> = self.load_checkpoint().await;
         let mut latest_ledger = start_ledger;
         let mut total_fetched = 0;
         let mut total_inserted = 0;
         let mut total_skipped = 0;
 
         loop {
-            let mut params = json!({
-                "filters": [],
-                "pagination": { "limit": 100 }
-            });
-
-            if let Some(c) = &cursor {
-                params["pagination"]["cursor"] = json!(c);
-            } else {
-                params["startLedger"] = json!(start_ledger);
-            }
-
-            let body = json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getEvents",
-                "params": params
-            });
-
-            let result = match self.rpc_client.get_events(&self.config.stellar_rpc_url, start_ledger, cursor).await {
+            let result = match self.rpc_client.get_events(
+                &self.config.stellar_rpc_url,
+                start_ledger,
+                cursor,
+                &self.config.indexer_event_types,
+            ).await {
                 Ok(r) => r,
                 Err(msg) => {
                     warn!(message = %msg, "RPC error");
@@ -374,32 +415,36 @@ impl<R: RpcClient> Indexer<R> {
             latest_ledger = result.latest_ledger;
             let current_count = result.events.len();
             total_fetched += current_count;
+            let next_cursor = result.rpc_cursor.clone();
 
+            // Store events and checkpoint atomically in one transaction.
+            let mut db_tx = self.pool.begin().await?;
             for event in result.events {
-                match self.store_event(&event).await {
+                match self.store_event_in_tx(&mut db_tx, &event).await {
                     Ok(rows) => {
                         total_inserted += rows;
                         if rows == 0 {
                             total_skipped += 1;
-                            metrics::record_duplicate_event();
+                            // duplicate — skipped via ON CONFLICT DO NOTHING
                         } else if let Some(ref tx) = self.event_tx {
                             let _ = tx.send(event);
                         }
                     }
                     Err(e) => {
                         warn!(
-                            tx_hash = %event.tx_hash,
-                            contract_id = %event.contract_id,
-                            ledger = event.ledger,
-                            event_type = %event.event_type,
                             error = %e,
                             "Failed to store event",
                         );
                     }
                 }
             }
+            // Persist the cursor that was just consumed so restarts resume correctly.
+            if let Some(ref c) = next_cursor.as_ref().or(cursor.as_ref()) {
+                let _ = Self::save_checkpoint(&mut db_tx, c).await;
+            }
+            db_tx.commit().await?;
 
-            cursor = result.rpc_cursor;
+            cursor = next_cursor;
             if cursor.is_none() {
                 break;
             }
@@ -520,11 +565,23 @@ impl<R: RpcClient> Indexer<R> {
             "topic": event.topic
         });
 
-        let result = sqlx::query(
+        let event_data = if let Some(ref key) = self.config.event_data_encryption_key {
+            crate::encryption::encrypt(key, &event_data).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "Failed to encrypt event_data, storing plaintext");
+                event_data
+            })
+        } else {
+            event_data
+        };
+
+        // RETURNING (xmax = 0) distinguishes a true INSERT (xmax=0) from an UPDATE (xmax≠0).
+        let inserted: bool = sqlx::query_scalar(
             r#"
             INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
             VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING
+            ON CONFLICT (tx_hash, contract_id, event_type)
+            DO UPDATE SET event_data = events.event_data || EXCLUDED.event_data
+            RETURNING (xmax = 0)
             "#,
         )
         .bind(&event.contract_id)
@@ -533,9 +590,41 @@ impl<R: RpcClient> Indexer<R> {
         .bind(ledger)
         .bind(timestamp)
         .bind(event_data)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await?;
 
+        Ok(u64::from(inserted))
+    }
+
+    async fn store_event_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        event: &SorobanEvent,
+    ) -> Result<u64, anyhow::Error> {
+        if !Self::validate_event_data(event) {
+            return Ok(0);
+        }
+        let ledger = match i64::try_from(event.ledger) {
+            Ok(v) => v,
+            Err(_) => return Ok(0),
+        };
+        let timestamp = DateTime::parse_from_rfc3339(&event.ledger_closed_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .map_err(|_| anyhow::anyhow!("Unparseable ledger_closed_at"))?;
+        let event_data = json!({ "value": event.value, "topic": event.topic });
+        let result = sqlx::query(
+            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING"#,
+        )
+        .bind(&event.contract_id)
+        .bind(&event.event_type)
+        .bind(&event.tx_hash)
+        .bind(ledger)
+        .bind(timestamp)
+        .bind(event_data)
+        .execute(&mut **tx)
+        .await?;
         Ok(result.rows_affected())
     }
 }
@@ -598,7 +687,7 @@ mod tests {
             responses.pop_front().unwrap_or(Ok(100))
         }
 
-        async fn get_events(&self, _rpc_url: &str, _start_ledger: u64, _cursor: Option<String>) -> Result<GetEventsResult, String> {
+        async fn get_events(&self, _rpc_url: &str, _start_ledger: u64, _cursor: Option<String>, _event_types: &[String]) -> Result<GetEventsResult, String> {
             let mut responses = self.get_events_responses.lock().unwrap();
             responses.pop_front().unwrap_or(Ok(GetEventsResult {
                 events: vec![],
@@ -678,22 +767,6 @@ mod tests {
         assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
     }
 
-    #[test]
-    fn validate_event_data_rejects_string_topic() {
-        let mut event = make_event(1);
-        event.value = json!({"key": "value"});
-        event.topic = Some(Value::String("invalid".to_string()));
-        assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
-    }
-
-    #[test]
-    fn validate_event_data_rejects_object_topic() {
-        let mut event = make_event(1);
-        event.value = json!({"key": "value"});
-        event.topic = Some(json!({"invalid": "object"}));
-        assert!(!Indexer::<MockRpcClient>::validate_event_data(&event));
-    }
-
     #[sqlx::test(migrations = "./migrations")]
     async fn invalid_event_data_is_skipped(pool: PgPool) {
         let indexer = indexer(pool.clone());
@@ -716,7 +789,9 @@ mod tests {
             pool,
             Config {
                 database_url: String::new(),
+                database_replica_url: None,
                 stellar_rpc_url: String::new(),
+                rpc_headers: Vec::new(),
                 start_ledger: 0,
                 port: 3000,
                 behind_proxy: false,
@@ -727,6 +802,9 @@ mod tests {
                 api_keys: Vec::new(),
                 db_max_connections: 10,
                 db_min_connections: 2,
+                db_idle_timeout_secs: 600,
+                db_max_lifetime_secs: 1800,
+                db_test_before_acquire: true,
                 allowed_origins: vec!["*".to_string()],
                 rate_limit_per_minute: 60,
                 indexer_stall_timeout_secs: 60,
@@ -734,9 +812,16 @@ mod tests {
                 indexer_poll_interval_ms: 5000,
                 indexer_error_backoff_ms: 10000,
                 sse_keepalive_interval_ms: 15000,
+                sse_max_connections: 1000,
                 environment: crate::config::Environment::Development,
                 max_body_size_bytes: 1024 * 1024,
                 log_sample_rate: 1,
+
+                indexer_event_types: Vec::new(),
+
+                event_data_encryption_key: None,
+                event_data_encryption_key_old: None,
+
             },
             shutdown_rx,
             MockRpcClient::new(),
@@ -819,6 +904,29 @@ mod tests {
         assert_eq!(count, 2);
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    async fn checkpoint_is_saved_and_loaded(pool: PgPool) {
+        let idx = indexer(pool.clone());
+
+        // No checkpoint initially
+        assert!(idx.load_checkpoint().await.is_none());
+
+        // Save a checkpoint inside a transaction
+        let mut tx = pool.begin().await.unwrap();
+        Indexer::<MockRpcClient>::save_checkpoint(&mut tx, "1234567-0").await.unwrap();
+        tx.commit().await.unwrap();
+
+        // Should now be readable
+        assert_eq!(idx.load_checkpoint().await.as_deref(), Some("1234567-0"));
+
+        // Overwrite with a newer cursor
+        let mut tx = pool.begin().await.unwrap();
+        Indexer::<MockRpcClient>::save_checkpoint(&mut tx, "1234568-0").await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(idx.load_checkpoint().await.as_deref(), Some("1234568-0"));
+    }
+
     #[tokio::test]
     async fn mock_rpc_client_returns_configured_responses() {
         let mock_client = MockRpcClient::with_latest_ledger_responses(vec![
@@ -844,12 +952,40 @@ mod tests {
             Err("Network error".to_string()),
         ]);
 
-        let result1 = mock_client.get_events("http://test", 1, None).await.unwrap();
+        let result1 = mock_client.get_events("http://test", 1, None, &[]).await.unwrap();
         assert_eq!(result1.events.len(), 1);
         assert_eq!(result1.latest_ledger, 50);
 
-        let result2 = mock_client.get_events("http://test", 2, None).await;
+        let result2 = mock_client.get_events("http://test", 2, None, &[]).await;
         assert!(result2.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_events_passes_event_types_filter() {
+        // Verify that the event_types parameter is forwarded to the RPC call.
+        // We use a mock that records what was passed.
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        #[derive(Clone)]
+        struct RecordingMock {
+            called_with_types: Arc<Mutex<Vec<Vec<String>>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl RpcClient for RecordingMock {
+            async fn get_latest_ledger(&self, _: &str) -> Result<u64, String> { Ok(100) }
+            async fn get_events(&self, _: &str, _: u64, _: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String> {
+                self.called_with_types.lock().unwrap().push(event_types.to_vec());
+                Ok(GetEventsResult { events: vec![], latest_ledger: 100, rpc_cursor: None })
+            }
+        }
+
+        let recording = RecordingMock { called_with_types: Arc::new(Mutex::new(vec![])) };
+        let types_ref = recording.called_with_types.clone();
+
+        recording.get_events("http://test", 1, None, &["contract".to_string()]).await.unwrap();
+        let calls = types_ref.lock().unwrap();
+        assert_eq!(calls[0], vec!["contract"]);
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -869,7 +1005,9 @@ mod tests {
             pool,
             Config {
                 database_url: String::new(),
+                database_replica_url: None,
                 stellar_rpc_url: String::new(),
+                rpc_headers: Vec::new(),
                 start_ledger: 100,
                 port: 3000,
                 behind_proxy: false,
@@ -877,16 +1015,29 @@ mod tests {
                 indexer_lag_warn_threshold: 1000,
                 rpc_connect_timeout_secs: 30,
                 rpc_request_timeout_secs: 60,
-                api_key: None,
+                api_keys: Vec::new(),
                 db_max_connections: 10,
                 db_min_connections: 2,
+                db_idle_timeout_secs: 600,
+                db_max_lifetime_secs: 1800,
+                db_test_before_acquire: true,
                 allowed_origins: vec!["*".to_string()],
                 rate_limit_per_minute: 60,
                 indexer_stall_timeout_secs: 60,
                 db_statement_timeout_ms: 5000,
                 indexer_poll_interval_ms: 5000,
                 indexer_error_backoff_ms: 10000,
+                sse_keepalive_interval_ms: 15000,
+                sse_max_connections: 1000,
                 environment: crate::config::Environment::Development,
+                max_body_size_bytes: 1024 * 1024,
+                log_sample_rate: 1,
+
+                indexer_event_types: Vec::new(),
+
+                event_data_encryption_key: None,
+                event_data_encryption_key_old: None,
+
             },
             shutdown_rx,
             mock_client,

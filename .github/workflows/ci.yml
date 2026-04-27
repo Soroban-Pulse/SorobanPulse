@@ -137,6 +137,29 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - run: cargo bench
 
+  fuzz:
+    name: Fuzz (30s smoke run)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-fuzz-
+      - run: cargo install cargo-fuzz
+      - run: cargo fuzz run fuzz_validate_contract_id -- -max_total_time=30
+        working-directory: fuzz
+      - run: cargo fuzz run fuzz_validate_tx_hash -- -max_total_time=30
+        working-directory: fuzz
+      - run: cargo fuzz run fuzz_pagination_params -- -max_total_time=30
+        working-directory: fuzz
+
   build:
     name: Release Build
     runs-on: ubuntu-latest

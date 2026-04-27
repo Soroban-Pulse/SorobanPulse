@@ -5,6 +5,8 @@ target/
 .env
 .env.*
 !.env.example
+!.env.staging.example
+!.env.production.example
 
 # Docker overrides
 docker-compose.override.yml
@@ -20,3 +22,7 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Backup dumps
+*.dump
+backups/

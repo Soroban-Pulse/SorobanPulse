@@ -4,6 +4,40 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 
+/// Load an optional TOML config file. Returns an empty table if the file is
+/// absent or CONFIG_FILE is not set — never an error.
+fn load_config_file() -> toml::Table {
+    let path = match env::var("CONFIG_FILE") {
+        Ok(p) if !p.is_empty() => p,
+        _ => return toml::Table::new(),
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => contents.parse::<toml::Table>().unwrap_or_else(|e| {
+            eprintln!("Warning: failed to parse config file '{path}': {e}");
+            toml::Table::new()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => {
+            eprintln!("Warning: could not read config file '{path}': {e}");
+            toml::Table::new()
+        }
+    }
+}
+
+/// Return the env var value if set, otherwise fall back to the TOML table.
+fn env_or_file(key: &str, file: &toml::Table) -> Option<String> {
+    env::var(key).ok().filter(|v| !v.is_empty()).or_else(|| {
+        file.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+/// Like `env_or_file` but returns a default string when neither source has the key.
+fn env_or_file_or(key: &str, file: &toml::Table, default: &str) -> String {
+    env_or_file(key, file).unwrap_or_else(|| default.to_string())
+}
+
 /// Shared operational state updated by the indexer and read by the /status handler.
 pub struct IndexerState {
     pub current_ledger: AtomicU64,
@@ -111,13 +145,20 @@ impl HealthState {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
+    /// Optional read replica URL. When set, HTTP handlers use this pool; indexer uses primary.
+    pub database_replica_url: Option<String>,
     pub stellar_rpc_url: String,
+    /// Custom headers to inject into every RPC request (name, value). Values are never logged.
+    pub rpc_headers: Vec<(String, String)>,
     pub start_ledger: u64,
     pub start_ledger_fallback: bool,
     pub port: u16,
     pub api_keys: Vec<String>,
     pub db_max_connections: u32,
     pub db_min_connections: u32,
+    pub db_idle_timeout_secs: u64,
+    pub db_max_lifetime_secs: u64,
+    pub db_test_before_acquire: bool,
     pub behind_proxy: bool,
     pub rpc_connect_timeout_secs: u64,
     pub rpc_request_timeout_secs: u64,
@@ -142,13 +183,18 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             database_url: "postgres://localhost/soroban_pulse".to_string(),
+            database_replica_url: None,
             stellar_rpc_url: "https://soroban-testnet.stellar.org".to_string(),
+            rpc_headers: Vec::new(),
             start_ledger: 0,
             start_ledger_fallback: false,
             port: 3000,
             api_keys: Vec::new(),
             db_max_connections: 10,
             db_min_connections: 2,
+            db_idle_timeout_secs: 600,
+            db_max_lifetime_secs: 1800,
+            db_test_before_acquire: true,
             behind_proxy: false,
             rpc_connect_timeout_secs: 5,
             rpc_request_timeout_secs: 30,
@@ -231,6 +277,66 @@ fn resolve_database_url() -> String {
     }
 }
 
+
+/// Parse STELLAR_RPC_HEADERS: semicolon-separated "Name: Value" pairs.
+/// Panics with a descriptive message on invalid format.
+fn parse_rpc_headers() -> Vec<(String, String)> {
+    let raw = match env::var("STELLAR_RPC_HEADERS") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return Vec::new(),
+    };
+    raw.split(';')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|pair| {
+            let (name, value) = pair.split_once(':').unwrap_or_else(|| {
+                panic!(
+                    "STELLAR_RPC_HEADERS: invalid header '{pair}' — expected 'Name: Value' format"
+                )
+            });
+            let name = name.trim().to_string();
+            let value = value.trim().to_string();
+            assert!(!name.is_empty(), "STELLAR_RPC_HEADERS: header name must not be empty in '{pair}'");
+            (name, value)
+        })
+        .collect()
+}
+
+/// Parse INDEXER_EVENT_TYPES: comma-separated list of event types.
+/// Defaults to empty (all types). Panics on unknown values.
+fn parse_indexer_event_types() -> Vec<String> {
+    let raw = match env::var("INDEXER_EVENT_TYPES") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return Vec::new(),
+    };
+    let valid = ["contract", "diagnostic", "system"];
+    raw.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .map(|t| {
+            assert!(
+                valid.contains(&t.as_str()),
+                "INDEXER_EVENT_TYPES: unknown event type '{t}' — valid values are: contract, diagnostic, system"
+            );
+            t
+        })
+        .collect()
+
+/// Parse a 64-hex-char string into a 32-byte key, panicking with a clear message on failure.
+fn parse_hex_key(var: &str, value: &str) -> [u8; 32] {
+    if value.len() != 64 {
+        panic!("{var} must be exactly 64 hex characters (32 bytes), got {} chars", value.len());
+    }
+    let mut key = [0u8; 32];
+    for (i, chunk) in value.as_bytes().chunks(2).enumerate() {
+        let hex = std::str::from_utf8(chunk).expect("valid utf8");
+        key[i] = u8::from_str_radix(hex, 16)
+            .unwrap_or_else(|_| panic!("{var} contains non-hex character in byte {i}"));
+    }
+    key
+
+}
+
 impl Config {
     /// Returns the DATABASE_URL with credentials stripped — safe to log.
     pub fn safe_db_url(&self) -> String {
@@ -243,34 +349,36 @@ impl Config {
             .unwrap_or_else(|_| "<unparseable>".to_string())
     }
 
+    /// Returns only header names (no values) — safe to log.
+    pub fn safe_rpc_headers(&self) -> Vec<&str> {
+        self.rpc_headers.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
     pub fn from_env() -> Self {
+        let file = load_config_file();
+
         let environment = Environment::from_str(
-            &env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string()),
+            &env_or_file_or("ENVIRONMENT", &file, "development"),
         );
 
-        let behind_proxy = env::var("BEHIND_PROXY")
-            .ok()
+        let behind_proxy = env_or_file("BEHIND_PROXY", &file)
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
             .unwrap_or(false);
 
-        let start_ledger = env::var("START_LEDGER")
-            .unwrap_or_else(|_| "0".to_string())
+        let start_ledger = env_or_file_or("START_LEDGER", &file, "0")
             .parse()
             .expect("START_LEDGER must be a number");
 
-        let start_ledger_fallback = env::var("START_LEDGER_FALLBACK")
-            .ok()
+        let start_ledger_fallback = env_or_file("START_LEDGER_FALLBACK", &file)
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
             .unwrap_or(false);
 
-        let port = env::var("PORT")
-            .unwrap_or_else(|_| "3000".to_string())
+        let port = env_or_file_or("PORT", &file, "3000")
             .parse()
             .expect("PORT must be a number");
 
         // In production-like environments, CORS wildcard is not allowed.
-        let allowed_origins: Vec<String> = env::var("ALLOWED_ORIGINS")
-            .unwrap_or_else(|_| "*".to_string())
+        let allowed_origins: Vec<String> = env_or_file_or("ALLOWED_ORIGINS", &file, "*")
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -287,64 +395,64 @@ impl Config {
 
         Self {
             database_url: resolve_database_url(),
+            database_replica_url: env::var("DATABASE_REPLICA_URL").ok().filter(|s| !s.is_empty()),
             stellar_rpc_url: validate_rpc_url(
-                &env::var("STELLAR_RPC_URL")
-                    .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".to_string()),
+                &env_or_file_or("STELLAR_RPC_URL", &file, "https://soroban-testnet.stellar.org"),
             ),
+            rpc_headers: parse_rpc_headers(),
             start_ledger,
             start_ledger_fallback,
             port,
             api_keys: {
                 let mut keys = Vec::new();
-                if let Ok(key) = env::var("API_KEY") {
-                    if !key.is_empty() {
-                        keys.push(key);
-                    }
+                if let Some(key) = env_or_file("API_KEY", &file) {
+                    keys.push(key);
                 }
-                if let Ok(key) = env::var("API_KEY_SECONDARY") {
-                    if !key.is_empty() {
-                        keys.push(key);
-                    }
+                if let Some(key) = env_or_file("API_KEY_SECONDARY", &file) {
+                    keys.push(key);
                 }
                 keys
             },
-            db_max_connections: env::var("DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "10".to_string())
+            db_max_connections: env_or_file_or("DB_MAX_CONNECTIONS", &file, "10")
                 .parse()
                 .expect("DB_MAX_CONNECTIONS must be a number"),
-            db_min_connections: env::var("DB_MIN_CONNECTIONS")
-                .unwrap_or_else(|_| "2".to_string())
+            db_min_connections: env_or_file_or("DB_MIN_CONNECTIONS", &file, "2")
                 .parse()
                 .expect("DB_MIN_CONNECTIONS must be a number"),
+            db_idle_timeout_secs: env::var("DB_IDLE_TIMEOUT_SECS")
+                .unwrap_or_else(|_| "600".to_string())
+                .parse()
+                .expect("DB_IDLE_TIMEOUT_SECS must be a number"),
+            db_max_lifetime_secs: env::var("DB_MAX_LIFETIME_SECS")
+                .unwrap_or_else(|_| "1800".to_string())
+                .parse()
+                .expect("DB_MAX_LIFETIME_SECS must be a number"),
+            db_test_before_acquire: env::var("DB_TEST_BEFORE_ACQUIRE")
+                .unwrap_or_else(|_| "true".to_string())
+                .parse()
+                .expect("DB_TEST_BEFORE_ACQUIRE must be true or false"),
             behind_proxy,
-            rpc_connect_timeout_secs: env::var("RPC_CONNECT_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "5".to_string())
+            rpc_connect_timeout_secs: env_or_file_or("RPC_CONNECT_TIMEOUT_SECS", &file, "5")
                 .parse()
                 .expect("RPC_CONNECT_TIMEOUT_SECS must be a number"),
-            rpc_request_timeout_secs: env::var("RPC_REQUEST_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "30".to_string())
+            rpc_request_timeout_secs: env_or_file_or("RPC_REQUEST_TIMEOUT_SECS", &file, "30")
                 .parse()
                 .expect("RPC_REQUEST_TIMEOUT_SECS must be a number"),
             allowed_origins,
-            rate_limit_per_minute: env::var("RATE_LIMIT_PER_MINUTE")
-                .unwrap_or_else(|_| "60".to_string())
+            rate_limit_per_minute: env_or_file_or("RATE_LIMIT_PER_MINUTE", &file, "60")
                 .parse()
                 .expect("RATE_LIMIT_PER_MINUTE must be a positive integer"),
-            indexer_lag_warn_threshold: env::var("INDEXER_LAG_WARN_THRESHOLD")
-                .unwrap_or_else(|_| "100".to_string())
+            indexer_lag_warn_threshold: env_or_file_or("INDEXER_LAG_WARN_THRESHOLD", &file, "100")
                 .parse()
                 .expect("INDEXER_LAG_WARN_THRESHOLD must be a number"),
-            indexer_stall_timeout_secs: env::var("INDEXER_STALL_TIMEOUT_SECS")
-                .unwrap_or_else(|_| "60".to_string())
+            indexer_stall_timeout_secs: env_or_file_or("INDEXER_STALL_TIMEOUT_SECS", &file, "60")
                 .parse()
                 .expect("INDEXER_STALL_TIMEOUT_SECS must be a number"),
-            db_statement_timeout_ms: env::var("DB_STATEMENT_TIMEOUT_MS")
-                .unwrap_or_else(|_| "5000".to_string())
+            db_statement_timeout_ms: env_or_file_or("DB_STATEMENT_TIMEOUT_MS", &file, "5000")
                 .parse()
                 .expect("DB_STATEMENT_TIMEOUT_MS must be a number"),
             indexer_poll_interval_ms: {
-                let v: u64 = env::var("INDEXER_POLL_INTERVAL_MS")
-                    .unwrap_or_else(|_| "5000".to_string())
+                let v: u64 = env_or_file_or("INDEXER_POLL_INTERVAL_MS", &file, "5000")
                     .parse()
                     .expect("INDEXER_POLL_INTERVAL_MS must be a number");
                 assert!((100..=60000).contains(&v),
@@ -352,8 +460,7 @@ impl Config {
                 v
             },
             indexer_error_backoff_ms: {
-                let v: u64 = env::var("INDEXER_ERROR_BACKOFF_MS")
-                    .unwrap_or_else(|_| "10000".to_string())
+                let v: u64 = env_or_file_or("INDEXER_ERROR_BACKOFF_MS", &file, "10000")
                     .parse()
                     .expect("INDEXER_ERROR_BACKOFF_MS must be a number");
                 assert!((100..=60000).contains(&v),
@@ -361,8 +468,7 @@ impl Config {
                 v
             },
             sse_keepalive_interval_ms: {
-                let v: u64 = env::var("SSE_KEEPALIVE_INTERVAL_MS")
-                    .unwrap_or_else(|_| "15000".to_string())
+                let v: u64 = env_or_file_or("SSE_KEEPALIVE_INTERVAL_MS", &file, "15000")
                     .parse()
                     .expect("SSE_KEEPALIVE_INTERVAL_MS must be a number");
                 assert!((1000..=60000).contains(&v),
@@ -370,21 +476,18 @@ impl Config {
                 v
             },
             sse_max_connections: {
-                let v: usize = env::var("SSE_MAX_CONNECTIONS")
-                    .unwrap_or_else(|_| "1000".to_string())
+                let v: usize = env_or_file_or("SSE_MAX_CONNECTIONS", &file, "1000")
                     .parse()
                     .expect("SSE_MAX_CONNECTIONS must be a number");
                 assert!(v > 0, "SSE_MAX_CONNECTIONS must be greater than 0, got {v}");
                 v
             },
             environment,
-            max_body_size_bytes: env::var("MAX_BODY_SIZE_BYTES")
-                .unwrap_or_else(|_| (1024 * 1024).to_string())
+            max_body_size_bytes: env_or_file_or("MAX_BODY_SIZE_BYTES", &file, "1048576")
                 .parse()
                 .expect("MAX_BODY_SIZE_BYTES must be a number"),
             log_sample_rate: {
-                let v: u32 = env::var("LOG_SAMPLE_RATE")
-                    .unwrap_or_else(|_| "1".to_string())
+                let v: u32 = env_or_file_or("LOG_SAMPLE_RATE", &file, "1")
                     .parse()
                     .expect("LOG_SAMPLE_RATE must be a positive integer");
                 assert!(v > 0, "LOG_SAMPLE_RATE must be a positive integer, got {v}");
@@ -493,5 +596,126 @@ mod tests {
         let mut config = Config::default();
         config.database_url = "not-a-url".to_string();
         assert_eq!(config.safe_db_url(), "<unparseable>");
+    }
+
+    #[test]
+
+    fn test_parse_rpc_headers_empty() {
+        std::env::remove_var("STELLAR_RPC_HEADERS");
+        let headers = super::parse_rpc_headers();
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_rpc_headers_single() {
+        std::env::set_var("STELLAR_RPC_HEADERS", "X-API-Key: mykey");
+        let headers = super::parse_rpc_headers();
+        std::env::remove_var("STELLAR_RPC_HEADERS");
+        assert_eq!(headers, vec![("X-API-Key".to_string(), "mykey".to_string())]);
+    }
+
+    #[test]
+    fn test_parse_rpc_headers_multiple() {
+        std::env::set_var("STELLAR_RPC_HEADERS", "X-API-Key: mykey; X-Custom: value");
+        let headers = super::parse_rpc_headers();
+        std::env::remove_var("STELLAR_RPC_HEADERS");
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0], ("X-API-Key".to_string(), "mykey".to_string()));
+        assert_eq!(headers[1], ("X-Custom".to_string(), "value".to_string()));
+    }
+
+    #[test]
+    fn test_safe_rpc_headers_returns_names_only() {
+        let mut config = Config::default();
+        config.rpc_headers = vec![
+            ("X-API-Key".to_string(), "secret".to_string()),
+            ("Authorization".to_string(), "Bearer token".to_string()),
+        ];
+        let safe = config.safe_rpc_headers();
+        assert_eq!(safe, vec!["X-API-Key", "Authorization"]);
+    }
+
+    #[test]
+    fn test_parse_indexer_event_types_empty() {
+        std::env::remove_var("INDEXER_EVENT_TYPES");
+        let types = super::parse_indexer_event_types();
+        assert!(types.is_empty());
+    }
+
+    #[test]
+    fn test_parse_indexer_event_types_single() {
+        std::env::set_var("INDEXER_EVENT_TYPES", "contract");
+        let types = super::parse_indexer_event_types();
+        std::env::remove_var("INDEXER_EVENT_TYPES");
+        assert_eq!(types, vec!["contract"]);
+    }
+
+    #[test]
+    fn test_parse_indexer_event_types_multiple() {
+        std::env::set_var("INDEXER_EVENT_TYPES", "contract,diagnostic");
+        let types = super::parse_indexer_event_types();
+        std::env::remove_var("INDEXER_EVENT_TYPES");
+        assert_eq!(types, vec!["contract", "diagnostic"]);
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown event type 'invalid'")]
+    fn test_parse_indexer_event_types_invalid_panics() {
+        std::env::set_var("INDEXER_EVENT_TYPES", "contract,invalid");
+        let _ = super::parse_indexer_event_types();
+
+    fn startup_log_fields_do_not_contain_credentials() {
+        // Verify that the fields logged at startup are safe.
+        // safe_db_url() must strip credentials.
+        let mut config = Config::default();
+        config.database_url = "postgres://admin:supersecret@db.example.com/mydb".to_string();
+        config.stellar_rpc_url = "https://user:token@rpc.example.com".to_string();
+
+        let safe_db = config.safe_db_url();
+        assert!(!safe_db.contains("supersecret"), "safe_db_url must not contain password");
+        assert!(!safe_db.contains("admin"), "safe_db_url must not contain username");
+
+        // stellar_rpc_url is already sanitized by validate_rpc_url() at parse time;
+        // confirm the stored value has no credentials.
+        assert!(!config.stellar_rpc_url.contains("token"), "stellar_rpc_url must not contain token");
+        assert!(!config.stellar_rpc_url.contains("user:"), "stellar_rpc_url must not contain user credentials");
+
+    }
+
+    #[test]
+    fn config_file_provides_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "PORT = \"9999\"\nRUST_LOG = \"debug\"\n").unwrap();
+
+        env::remove_var("PORT");
+        env::set_var("CONFIG_FILE", path.to_str().unwrap());
+        let file = super::load_config_file();
+        let port = super::env_or_file_or("PORT", &file, "3000");
+        assert_eq!(port, "9999");
+        env::remove_var("CONFIG_FILE");
+    }
+
+    #[test]
+    fn env_var_takes_precedence_over_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "PORT = \"9999\"\n").unwrap();
+
+        env::set_var("PORT", "7777");
+        env::set_var("CONFIG_FILE", path.to_str().unwrap());
+        let file = super::load_config_file();
+        let port = super::env_or_file_or("PORT", &file, "3000");
+        assert_eq!(port, "7777");
+        env::remove_var("PORT");
+        env::remove_var("CONFIG_FILE");
+    }
+
+    #[test]
+    fn missing_config_file_is_not_an_error() {
+        env::set_var("CONFIG_FILE", "/nonexistent/path/config.toml");
+        let file = super::load_config_file();
+        assert!(file.is_empty());
+        env::remove_var("CONFIG_FILE");
     }
 }

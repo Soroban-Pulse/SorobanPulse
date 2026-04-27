@@ -18,6 +18,7 @@ tracing-opentelemetry = { version = "0.22", optional = true }
 opentelemetry = { version = "0.21", optional = true }
 opentelemetry-otlp = { version = "0.14", optional = true }
 dotenvy = "0.15"
+toml = "0.8"
 thiserror = "1"
 utoipa = { version = "4", features = ["axum_extras", "uuid", "chrono"] }
 anyhow = "1"
@@ -37,13 +38,24 @@ hex = "0.4"
 
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
+encryption = ["aes-gcm", "rand"]
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
 async-trait = "0.1"
 criterion = { version = "0.5", features = ["html_reports"] }
 http-body-util = "0.1"
+tempfile = "3"
+flate2 = "1"
 
 [[bench]]
 name = "pagination"
+harness = false
+
+[[bench]]
+name = "db_queries"
+harness = false
+
+[[bench]]
+name = "compression"
 harness = false
