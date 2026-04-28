@@ -46,7 +46,16 @@ pub struct Event {
     pub timestamp: DateTime<Utc>,
     pub event_data: Value,
     pub event_data_normalized: Option<Value>,
+    #[sqlx(default)]
+    pub event_data_decoded: Option<Value>,
+    #[sqlx(default)]
+    pub ledger_hash: Option<String>,
+    #[sqlx(default)]
+    pub in_successful_call: bool,
     pub created_at: DateTime<Utc>,
+    /// Schema version of the Soroban protocol used when this event was indexed.
+    #[sqlx(default)]
+    pub schema_version: i32,
     #[sqlx(default)]
     #[serde(skip)]
     pub total_count: i64,
@@ -58,11 +67,15 @@ pub struct PaginationParams {
     pub limit: Option<i64>,
     pub exact_count: Option<bool>,
     pub fields: Option<String>,
+    pub contract_id: Option<String>,
     pub event_type: Option<EventType>,
     pub from_ledger: Option<i64>,
     pub to_ledger: Option<i64>,
     pub cursor: Option<String>,
     pub sort: Option<SortOrder>,
+    pub in_successful_call: Option<bool>,
+    /// Filter by the first topic symbol (uses topic_0_sym generated column index).
+    pub topic_sym: Option<String>,
 }
 
 /// Sort order for event list endpoints.
@@ -141,11 +154,46 @@ pub struct ReplayRequest {
     pub to_ledger: u64,
 }
 
+/// Request body for the batch tx-hash lookup endpoint.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchTxRequest {
+    /// List of transaction hashes to look up (max 100).
+    pub hashes: Vec<String>,
+}
+
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ContractSummary {
     pub contract_id: String,
     pub event_count: i64,
     pub latest_ledger: i64,
+}
+
+/// Aggregate statistics for indexed events.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct EventStats {
+    /// Total number of indexed events.
+    pub total_events: i64,
+    /// Events indexed in the last 24 hours.
+    pub events_last_24h: i64,
+    /// Events indexed in the last 7 days.
+    pub events_last_7d: i64,
+    /// Top 10 most active contracts by event count.
+    pub top_contracts: Vec<ContractStatEntry>,
+    /// Event count broken down by type.
+    pub events_by_type: std::collections::HashMap<String, i64>,
+    /// Minimum ledger sequence number in the dataset.
+    pub min_ledger: Option<i64>,
+    /// Maximum ledger sequence number in the dataset.
+    pub max_ledger: Option<i64>,
+    /// Timestamp when these statistics were computed.
+    pub computed_at: DateTime<Utc>,
+}
+
+/// A single entry in the top-contracts list.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ContractStatEntry {
+    pub contract_id: String,
+    pub event_count: i64,
 }
 
 impl PaginationParams {
@@ -158,7 +206,11 @@ impl PaginationParams {
         "timestamp",
         "event_data",
         "event_data_normalized",
+        "event_data_decoded",
+        "ledger_hash",
+        "in_successful_call",
         "created_at",
+        "schema_version",
     ];
 
     pub fn columns(&self) -> Result<Vec<&str>, (Vec<String>, Vec<&'static str>)> {
@@ -215,6 +267,9 @@ pub struct GetEventsResult {
     pub latest_ledger: u64,
     #[serde(rename = "cursor")]
     pub rpc_cursor: Option<String>,
+    /// Soroban protocol version returned by the RPC (used as schema_version).
+    #[serde(rename = "latestLedgerCloseTime", default)]
+    pub protocol_version: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -228,9 +283,15 @@ pub struct SorobanEvent {
     pub ledger: u64,
     #[serde(rename = "ledgerClosedAt")]
     pub ledger_closed_at: String,
+    #[serde(rename = "ledgerHash", default)]
+    pub ledger_hash: Option<String>,
+    #[serde(rename = "inSuccessfulContractCall", default = "default_true")]
+    pub in_successful_call: bool,
     pub value: Value,
     pub topic: Option<Vec<Value>>,
 }
+
+fn default_true() -> bool { true }
 
 #[cfg(test)]
 mod tests {
@@ -242,11 +303,14 @@ mod tests {
             limit,
             exact_count: None,
             fields: None,
+            contract_id: None,
             event_type: None,
             from_ledger: None,
             to_ledger: None,
             cursor: None,
             sort: None,
+            in_successful_call: None,
+            contract_id: None,
         }
     }
 

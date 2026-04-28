@@ -35,6 +35,8 @@ base64 = "0.22"
 sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
+aes-gcm = { version = "0.10", optional = true }
+rand = { version = "0.8", optional = true }
 
 # Issue #267: XDR validation
 stellar-xdr = { version = "26", features = ["std", "curr", "serde"] }
@@ -54,6 +56,7 @@ otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
 encryption = ["aes-gcm", "rand"]
 kinesis = ["aws-sdk-kinesis", "aws-config"]
 pubsub = ["google-cloud-pubsub"]
+archive = []
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }

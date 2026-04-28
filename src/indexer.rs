@@ -178,6 +178,43 @@ impl RpcClient for SorobanRpcClient {
     }
 }
 
+/// Attempt to decode event_data using a registered ABI for the contract.
+/// Returns `Some(decoded)` if an ABI is found and decoding succeeds, `None` otherwise.
+async fn decode_event_with_abi(pool: &PgPool, contract_id: &str, event_data: &serde_json::Value) -> Option<serde_json::Value> {
+    let abi: serde_json::Value = sqlx::query_scalar(
+        "SELECT abi FROM contract_abis WHERE contract_id = $1",
+    )
+    .bind(contract_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+
+    // The ABI is a JSON array of event definitions: [{name, inputs:[{name,type},...]}]
+    // We match on the first topic (event name) and map positional values to named fields.
+    let topic = event_data.get("topic")?.as_array()?;
+    let event_name = topic.first()?.as_str()?;
+
+    let events = abi.as_array()?;
+    let def = events.iter().find(|e| e.get("name").and_then(|n| n.as_str()) == Some(event_name))?;
+    let inputs = def.get("inputs")?.as_array()?;
+
+    let values = event_data.get("value")?.as_object()?;
+    // Build decoded object: map input names to corresponding values
+    let mut decoded = serde_json::Map::new();
+    decoded.insert("event".to_string(), serde_json::Value::String(event_name.to_string()));
+    for (i, input) in inputs.iter().enumerate() {
+        let field_name = input.get("name").and_then(|n| n.as_str()).unwrap_or(&format!("field_{i}"));
+        // Values may be keyed by index or by name in the raw data
+        let val = values.get(field_name)
+            .or_else(|| values.get(&i.to_string()))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        decoded.insert(field_name.to_string(), val);
+    }
+    Some(serde_json::Value::Object(decoded))
+}
+
 pub struct Indexer<R: RpcClient> {
     pool: PgPool,
     rpc_client: R,
@@ -190,6 +227,10 @@ pub struct Indexer<R: RpcClient> {
     bloom_filter: Option<Arc<EventBloomFilter>>,
     kinesis_publisher: Option<Arc<dyn KinesisPublisher>>,
     pubsub_publisher: Option<Arc<dyn PubSubPublisher>>,
+    #[cfg(feature = "kafka")]
+    kafka_publisher: Option<Arc<dyn crate::kafka::KafkaPublisher>>,
+    #[cfg(feature = "kafka")]
+    kafka_topic: Option<String>,
 }
 
 impl<R: RpcClient> Indexer<R> {
@@ -206,6 +247,10 @@ impl<R: RpcClient> Indexer<R> {
             bloom_filter: None,
             kinesis_publisher: None,
             pubsub_publisher: None,
+            #[cfg(feature = "kafka")]
+            kafka_publisher: None,
+            #[cfg(feature = "kafka")]
+            kafka_topic: None,
         }
     }
 
@@ -237,6 +282,15 @@ impl<R: RpcClient> Indexer<R> {
     /// Set the Pub/Sub publisher for streaming events (issue #264).
     pub fn set_pubsub_publisher(&mut self, publisher: Arc<dyn PubSubPublisher>) {
         self.pubsub_publisher = Some(publisher);
+    /// Set the Kafka publisher and topic for event streaming.
+    #[cfg(feature = "kafka")]
+    pub fn set_kafka_publisher(
+        &mut self,
+        publisher: Arc<dyn crate::kafka::KafkaPublisher>,
+        topic: String,
+    ) {
+        self.kafka_publisher = Some(publisher);
+        self.kafka_topic = Some(topic);
     }
 
     pub async fn run(&self) {
@@ -290,6 +344,21 @@ impl<R: RpcClient> Indexer<R> {
         let mut current_ledger = self.config.start_ledger;
         let mut consecutive_db_errors = 0u32;
         let mut rpc_backoff_ms = 1000u64; // Start with 1 second backoff
+
+        // Restore persisted state so /status is accurate before the first poll.
+        if let Some((persisted_current, persisted_latest)) = self.load_indexer_state().await {
+            if persisted_current > 0 {
+                if current_ledger == 0 {
+                    current_ledger = persisted_current;
+                }
+                if let Some(ref s) = self.indexer_state {
+                    s.current_ledger.store(persisted_current, std::sync::atomic::Ordering::Relaxed);
+                    s.latest_ledger.store(persisted_latest, std::sync::atomic::Ordering::Relaxed);
+                }
+                metrics::update_current_ledger(persisted_current);
+                info!(current_ledger = persisted_current, latest_ledger = persisted_latest, "Restored persisted indexer state");
+            }
+        }
 
         if current_ledger == 0 {
             loop {
@@ -351,8 +420,7 @@ impl<R: RpcClient> Indexer<R> {
                                     "Indexer is falling behind"
                                 );
                             }
-                        }
-                    } else {
+                        }                    } else {
                         sleep(Duration::from_millis(self.config.indexer_poll_interval_ms)).await;
                     }
                 }
@@ -396,6 +464,39 @@ impl<R: RpcClient> Indexer<R> {
         .flatten()
     }
 
+    /// Load the last persisted indexer state (current_ledger, latest_ledger) from the DB.
+    async fn load_indexer_state(&self) -> Option<(u64, u64)> {
+        sqlx::query_as::<_, (i64, i64)>(
+            "SELECT current_ledger, latest_ledger FROM indexer_state WHERE id = 'singleton'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(c, l)| (c as u64, l as u64))
+    }
+
+    /// Persist current_ledger and latest_ledger atomically inside an existing transaction.
+    async fn save_indexer_state(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        current_ledger: u64,
+        latest_ledger: u64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO indexer_state (id, current_ledger, latest_ledger, updated_at)
+             VALUES ('singleton', $1, $2, NOW())
+             ON CONFLICT (id) DO UPDATE
+               SET current_ledger = EXCLUDED.current_ledger,
+                   latest_ledger  = EXCLUDED.latest_ledger,
+                   updated_at     = NOW()",
+        )
+        .bind(current_ledger as i64)
+        .bind(latest_ledger as i64)
+        .execute(&mut **tx)
+        .await
+        .map(|_| ())
+    }
+
     /// Persist the cursor atomically alongside the event inserts.
     async fn save_checkpoint(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -412,16 +513,35 @@ impl<R: RpcClient> Indexer<R> {
         .map(|_| ())
     }
 
+    /// Public wrapper around `fetch_and_store_events` for integration/resilience tests.
+    pub async fn fetch_and_store_events_pub(&self, start_ledger: u64) -> Result<u64, String> {
+        self.fetch_and_store_events(start_ledger)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     #[instrument(skip(self), fields(start_ledger = start_ledger))]
     async fn fetch_and_store_events(&self, start_ledger: u64) -> Result<u64, IndexerFetchError> {
+        let cycle_start = std::time::Instant::now();
         // Resume from persisted cursor if available, otherwise start from ledger.
         let mut cursor: Option<String> = self.load_checkpoint().await;
         let mut latest_ledger = start_ledger;
         let mut total_fetched = 0;
         let mut total_inserted = 0;
         let mut total_skipped = 0;
+        let mut total_pages = 0u32;
+        let mut total_rpc_ms = 0u128;
+        let mut total_db_ms = 0u128;
+        let start_ledger_for_log = start_ledger;
+
+        tracing::debug!(
+            start_ledger = start_ledger,
+            cursor = cursor.as_deref().unwrap_or("<none>"),
+            "Indexer cycle starting",
+        );
 
         loop {
+            let rpc_start = std::time::Instant::now();
             let result = match self.rpc_client.get_events(
                 &self.config.stellar_rpc_url,
                 start_ledger,
@@ -435,16 +555,20 @@ impl<R: RpcClient> Indexer<R> {
                     return Err(IndexerFetchError::Rpc(msg));
                 }
             };
+            total_rpc_ms += rpc_start.elapsed().as_millis();
+            total_pages += 1;
 
             latest_ledger = result.latest_ledger;
             let current_count = result.events.len();
             total_fetched += current_count;
+            let schema_version = result.protocol_version.unwrap_or(1) as i32;
             let next_cursor = result.rpc_cursor.clone();
 
             // Store events and checkpoint atomically in one transaction.
             let mut db_tx = self.pool.begin().await?;
+            let db_start = std::time::Instant::now();
             for event in result.events {
-                match self.store_event_in_tx(&mut db_tx, &event).await {
+                match self.store_event_in_tx(&mut db_tx, &event, schema_version).await {
                     Ok(rows) => {
                         total_inserted += rows;
                         if rows == 0 {
@@ -461,6 +585,14 @@ impl<R: RpcClient> Indexer<R> {
                             // Issue #264: publish to Pub/Sub
                             if let Some(ref publisher) = self.pubsub_publisher {
                                 crate::pubsub::publish_event(publisher.as_ref(), &event).await;
+                            #[cfg(feature = "kafka")]
+                            if let (Some(ref publisher), Some(ref topic)) =
+                                (&self.kafka_publisher, &self.kafka_topic)
+                            {
+                                if let Err(e) = publisher.publish(topic, &event).await {
+                                    tracing::warn!(error = %e, contract_id = %event.contract_id, "Kafka publish failed");
+                                    crate::metrics::record_kafka_publish_error();
+                                }
                             }
                         }
                     }
@@ -476,20 +608,43 @@ impl<R: RpcClient> Indexer<R> {
             if let Some(ref c) = next_cursor.as_ref().or(cursor.as_ref()) {
                 let _ = Self::save_checkpoint(&mut db_tx, c).await;
             }
+            // Persist ledger state so /status is accurate after a restart.
+            let _ = Self::save_indexer_state(&mut db_tx, start_ledger, latest_ledger).await;
             db_tx.commit().await?;
 
+            total_db_ms += db_start.elapsed().as_millis();
             cursor = next_cursor;
             if cursor.is_none() {
                 break;
             }
         }
 
-        info!(
-            fetched = total_fetched,
-            inserted = total_inserted,
-            ledger = latest_ledger,
-            "Indexed ledger range"
-        );
+        let cycle_ms = cycle_start.elapsed().as_millis();
+        if total_inserted > 0 {
+            info!(
+                fetched = total_fetched,
+                inserted = total_inserted,
+                start_ledger = start_ledger_for_log,
+                end_ledger = latest_ledger,
+                pages = total_pages,
+                cycle_ms = cycle_ms,
+                rpc_ms = total_rpc_ms,
+                db_ms = total_db_ms,
+                "Indexed ledger range",
+            );
+        } else {
+            tracing::debug!(
+                fetched = total_fetched,
+                inserted = total_inserted,
+                start_ledger = start_ledger_for_log,
+                end_ledger = latest_ledger,
+                pages = total_pages,
+                cycle_ms = cycle_ms,
+                rpc_ms = total_rpc_ms,
+                db_ms = total_db_ms,
+                "Indexed ledger range (no new events)",
+            );
+        }
         metrics::record_events_indexed(total_inserted as u64);
 
         if total_fetched > 0 {
@@ -562,7 +717,7 @@ impl<R: RpcClient> Indexer<R> {
     }
 
     #[instrument(skip(self, event), fields(tx_hash = %event.tx_hash, contract_id = %event.contract_id, ledger = event.ledger))]
-    async fn store_event(&self, event: &SorobanEvent) -> Result<u64, anyhow::Error> {
+    async fn store_event(&self, event: &SorobanEvent, schema_version: i32) -> Result<u64, anyhow::Error> {
         if self.should_log_debug() {
             tracing::debug!(
                 tx_hash = %event.tx_hash,
@@ -622,8 +777,8 @@ impl<R: RpcClient> Indexer<R> {
         // RETURNING (xmax = 0) distinguishes a true INSERT (xmax=0) from an UPDATE (xmax≠0).
         let inserted: bool = sqlx::query_scalar(
             r#"
-            INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, schema_version)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (tx_hash, contract_id, event_type)
             DO UPDATE SET event_data = events.event_data || EXCLUDED.event_data
             RETURNING (xmax = 0)
@@ -635,6 +790,7 @@ impl<R: RpcClient> Indexer<R> {
         .bind(ledger)
         .bind(timestamp)
         .bind(event_data)
+        .bind(schema_version)
         .fetch_one(&self.pool)
         .await?;
 
@@ -645,6 +801,7 @@ impl<R: RpcClient> Indexer<R> {
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         event: &SorobanEvent,
+        schema_version: i32,
     ) -> Result<u64, anyhow::Error> {
         // Issue #266: bloom filter pre-filter
         if let Some(ref bloom) = self.bloom_filter {
@@ -664,9 +821,27 @@ impl<R: RpcClient> Indexer<R> {
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .map_err(|_| anyhow::anyhow!("Unparseable ledger_closed_at"))?;
         let event_data = json!({ "value": event.value, "topic": event.topic });
+
+        // Look up ABI for this contract and decode event_data if available.
+        let event_data_decoded = decode_event_with_abi(&self.pool, &event.contract_id, &event_data).await;
+        // Enforce size limit before INSERT.
+        let serialized = serde_json::to_vec(&event_data)?;
+        if serialized.len() > self.config.max_event_data_bytes {
+            warn!(
+                tx_hash = %event.tx_hash,
+                contract_id = %event.contract_id,
+                ledger = event.ledger,
+                size_bytes = serialized.len(),
+                limit_bytes = self.config.max_event_data_bytes,
+                "event_data exceeds size limit, skipping",
+            );
+            metrics::record_oversized_event();
+            return Ok(0);
+        }
+
         let result = sqlx::query(
-            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
-               VALUES ($1, $2, $3, $4, $5, $6)
+            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, ledger_hash, in_successful_call, event_data_decoded)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING"#,
         )
         .bind(&event.contract_id)
@@ -675,6 +850,9 @@ impl<R: RpcClient> Indexer<R> {
         .bind(ledger)
         .bind(timestamp)
         .bind(event_data)
+        .bind(&event.ledger_hash)
+        .bind(event.in_successful_call)
+        .bind(event_data_decoded)
         .execute(&mut **tx)
         .await?;
 
@@ -753,6 +931,7 @@ mod tests {
                 events: vec![],
                 latest_ledger: 100,
                 rpc_cursor: None,
+                protocol_version: None,
             }))
         }
     }
@@ -833,7 +1012,7 @@ mod tests {
         let mut event = make_event(1);
         event.value = Value::String("invalid".to_string());
 
-        let result = indexer.store_event(&event).await.unwrap();
+        let result = indexer.store_event(&event, 1).await.unwrap();
         assert_eq!(result, 0); // Event should be skipped
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
@@ -892,14 +1071,21 @@ mod tests {
                 aws_region: None,
                 pubsub_project_id: None,
                 pubsub_topic_id: None,
+                max_event_data_bytes: 65536,
+
+                #[cfg(feature = "kafka")]
+                kafka_brokers: None,
+                #[cfg(feature = "kafka")]
+                kafka_topic: None,
+                #[cfg(feature = "kafka")]
+                kafka_batch_size: 16384,
+                #[cfg(feature = "kafka")]
+                kafka_linger_ms: 5,
             },
             shutdown_rx,
             MockRpcClient::new(),
         )
     }
-
-    #[tokio::test]
-    async fn test_should_log_debug_sampling() {
         let pool = PgPool::connect("postgres://localhost/soroban_pulse").await.unwrap_or_else(|_| {
             // Fallback for environments where PG is not available
             // In a real test environment we'd have a pool.
@@ -947,8 +1133,8 @@ mod tests {
         let indexer = indexer(pool.clone());
         let event = make_event(1);
 
-        indexer.store_event(&event).await.unwrap();
-        indexer.store_event(&event).await.unwrap(); // must not error
+        indexer.store_event(&event, 1).await.unwrap();
+        indexer.store_event(&event, 1).await.unwrap(); // must not error
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
             .fetch_one(&pool)
@@ -964,8 +1150,8 @@ mod tests {
         let mut e2 = make_event(1);
         e2.event_type = "system".into();
 
-        indexer.store_event(&e1).await.unwrap();
-        indexer.store_event(&e2).await.unwrap();
+        indexer.store_event(&e1, 1).await.unwrap();
+        indexer.store_event(&e2, 1).await.unwrap();
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
             .fetch_one(&pool)
@@ -1018,6 +1204,7 @@ mod tests {
                 events: vec![test_event.clone()],
                 latest_ledger: 50,
                 rpc_cursor: None,
+                protocol_version: None,
             }),
             Err("Network error".to_string()),
         ]);
@@ -1068,6 +1255,7 @@ mod tests {
             events: vec![test_event],
             latest_ledger: 100,
             rpc_cursor: None,
+            protocol_version: None,
         }));
 
         let (_, shutdown_rx) = watch::channel(false);
@@ -1118,6 +1306,8 @@ mod tests {
                 aws_region: None,
                 pubsub_project_id: None,
                 pubsub_topic_id: None,
+                max_event_data_bytes: 65536,
+
             },
             shutdown_rx,
             mock_client,
@@ -1126,5 +1316,46 @@ mod tests {
         // Test that the indexer can use the mock client
         let latest_ledger = indexer.get_latest_ledger().await.unwrap();
         assert_eq!(latest_ledger, 100);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn oversized_event_is_skipped(pool: PgPool) {
+        let mut idx = indexer(pool.clone());
+        idx.config.max_event_data_bytes = 10; // tiny limit
+
+        let mut event = make_event(1);
+        // value large enough to exceed 10 bytes when serialized
+        event.value = json!({"k": "a very long string value that exceeds the limit"});
+
+        let mut tx = pool.begin().await.unwrap();
+        let rows = idx.store_event_in_tx(&mut tx, &event).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(rows, 0, "oversized event must be skipped");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn event_within_size_limit_is_stored(pool: PgPool) {
+        let idx = indexer(pool.clone()); // default 65536 limit
+
+        let event = make_event(1); // tiny event, well within limit
+
+        let mut tx = pool.begin().await.unwrap();
+        let rows = idx.store_event_in_tx(&mut tx, &event).await.unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(rows, 1);
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }
