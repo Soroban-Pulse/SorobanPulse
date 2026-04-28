@@ -11,8 +11,8 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Sign a payload with HMAC-SHA256 and return the hex digest.
 pub fn sign_payload(secret: &str, body: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes())
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
     mac.update(body);
     let result = mac.finalize();
     hex::encode(result.into_bytes())
@@ -21,12 +21,7 @@ pub fn sign_payload(secret: &str, body: &[u8]) -> String {
 /// Deliver a single event to the webhook URL with up to 3 retries and
 /// exponential backoff (1s, 2s, 4s). This is fire-and-forget: the caller
 /// spawns this as a background task and does not await the result.
-pub async fn deliver(
-    client: Client,
-    url: String,
-    secret: Option<String>,
-    event: SorobanEvent,
-) {
+pub async fn deliver(client: Client, url: String, secret: Option<String>, event: SorobanEvent) {
     let body = match serde_json::to_vec(&event) {
         Ok(b) => b,
         Err(e) => {
@@ -116,6 +111,9 @@ mod tests {
     fn test_sign_payload_known_value() {
         // Verified with: echo -n "test" | openssl dgst -sha256 -hmac "key"
         let sig = sign_payload("key", b"test");
-        assert_eq!(sig, "02afb56304902c656fcb737cdd03de6205bb6d401da2812efd9b2d36a08af159");
+        assert_eq!(
+            sig,
+            "02afb56304902c656fcb737cdd03de6205bb6d401da2812efd9b2d36a08af159"
+        );
     }
 }

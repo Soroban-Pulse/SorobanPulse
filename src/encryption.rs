@@ -61,8 +61,8 @@ mod inner {
         }
 
         // Try current key first, then fall back to old key.
-        let plaintext_bytes = try_decrypt_with_key(key, &nonce_bytes, &ciphertext)
-            .or_else(|e| {
+        let plaintext_bytes =
+            try_decrypt_with_key(key, &nonce_bytes, &ciphertext).or_else(|e| {
                 old_key
                     .ok_or(e)
                     .and_then(|k| try_decrypt_with_key(k, &nonce_bytes, &ciphertext))
@@ -71,7 +71,11 @@ mod inner {
         serde_json::from_slice(&plaintext_bytes).map_err(|e| e.to_string())
     }
 
-    fn try_decrypt_with_key(key: &[u8; 32], nonce_bytes: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, String> {
+    fn try_decrypt_with_key(
+        key: &[u8; 32],
+        nonce_bytes: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, String> {
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
         let nonce = Nonce::from_slice(nonce_bytes);
         cipher.decrypt(nonce, ciphertext).map_err(|e| e.to_string())
@@ -83,7 +87,10 @@ pub use inner::{decrypt, encrypt};
 
 /// No-op stubs when the feature is disabled — callers compile cleanly either way.
 #[cfg(not(feature = "encryption"))]
-pub fn encrypt(_key: &[u8; 32], plaintext: &serde_json::Value) -> Result<serde_json::Value, String> {
+pub fn encrypt(
+    _key: &[u8; 32],
+    plaintext: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     Ok(plaintext.clone())
 }
 

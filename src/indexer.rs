@@ -1,12 +1,12 @@
 use chrono::DateTime;
 use serde_json::json;
 use sqlx::PgPool;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio::time::sleep;
-use tracing::{error, info, warn, instrument, span, Level};
+use tracing::{error, info, instrument, span, warn, Level};
 
 use crate::{
     bloom_filter::EventBloomFilter,
@@ -21,7 +21,13 @@ use crate::{
 #[async_trait::async_trait]
 pub trait RpcClient: Send + Sync {
     async fn get_latest_ledger(&self, rpc_url: &str) -> Result<u64, String>;
-    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String>;
+    async fn get_events(
+        &self,
+        rpc_url: &str,
+        start_ledger: u64,
+        cursor: Option<String>,
+        event_types: &[String],
+    ) -> Result<GetEventsResult, String>;
 }
 
 /// Postgres advisory lock key for the indexer singleton.
@@ -34,7 +40,6 @@ enum IndexerFetchError {
     #[error(transparent)]
     DbConnection(#[from] sqlx::Error),
 }
-
 
 pub struct SorobanRpcClient {
     client: reqwest::Client,
@@ -87,9 +92,7 @@ impl RpcClient for SorobanRpcClient {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    warn!(
-                        "RPC request timeout"
-                    );
+                    warn!("RPC request timeout");
                 }
                 metrics::record_rpc_error();
                 e.to_string()
@@ -113,15 +116,19 @@ impl RpcClient for SorobanRpcClient {
         }
     }
 
-    async fn get_events(&self, rpc_url: &str, start_ledger: u64, cursor: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String> {
+    async fn get_events(
+        &self,
+        rpc_url: &str,
+        start_ledger: u64,
+        cursor: Option<String>,
+        event_types: &[String],
+    ) -> Result<GetEventsResult, String> {
         // Build filters: one filter object per type when event_types is non-empty.
         let filters: serde_json::Value = if event_types.is_empty() {
             json!([])
         } else {
-            let filter_list: Vec<serde_json::Value> = event_types
-                .iter()
-                .map(|t| json!({ "type": t }))
-                .collect();
+            let filter_list: Vec<serde_json::Value> =
+                event_types.iter().map(|t| json!({ "type": t })).collect();
             json!(filter_list)
         };
 
@@ -152,9 +159,7 @@ impl RpcClient for SorobanRpcClient {
             .await
             .map_err(|e| {
                 if e.is_timeout() {
-                    warn!(
-                        "RPC request timeout"
-                    );
+                    warn!("RPC request timeout");
                 }
                 metrics::record_rpc_error();
                 e.to_string()
@@ -180,15 +185,18 @@ impl RpcClient for SorobanRpcClient {
 
 /// Attempt to decode event_data using a registered ABI for the contract.
 /// Returns `Some(decoded)` if an ABI is found and decoding succeeds, `None` otherwise.
-async fn decode_event_with_abi(pool: &PgPool, contract_id: &str, event_data: &serde_json::Value) -> Option<serde_json::Value> {
-    let abi: serde_json::Value = sqlx::query_scalar(
-        "SELECT abi FROM contract_abis WHERE contract_id = $1",
-    )
-    .bind(contract_id)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()?;
+async fn decode_event_with_abi(
+    pool: &PgPool,
+    contract_id: &str,
+    event_data: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let abi: serde_json::Value =
+        sqlx::query_scalar("SELECT abi FROM contract_abis WHERE contract_id = $1")
+            .bind(contract_id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten()?;
 
     // The ABI is a JSON array of event definitions: [{name, inputs:[{name,type},...]}]
     // We match on the first topic (event name) and map positional values to named fields.
@@ -196,17 +204,28 @@ async fn decode_event_with_abi(pool: &PgPool, contract_id: &str, event_data: &se
     let event_name = topic.first()?.as_str()?;
 
     let events = abi.as_array()?;
-    let def = events.iter().find(|e| e.get("name").and_then(|n| n.as_str()) == Some(event_name))?;
+    let def = events
+        .iter()
+        .find(|e| e.get("name").and_then(|n| n.as_str()) == Some(event_name))?;
     let inputs = def.get("inputs")?.as_array()?;
 
     let values = event_data.get("value")?.as_object()?;
     // Build decoded object: map input names to corresponding values
     let mut decoded = serde_json::Map::new();
-    decoded.insert("event".to_string(), serde_json::Value::String(event_name.to_string()));
+    decoded.insert(
+        "event".to_string(),
+        serde_json::Value::String(event_name.to_string()),
+    );
     for (i, input) in inputs.iter().enumerate() {
-        let field_name = input.get("name").and_then(|n| n.as_str()).unwrap_or(&format!("field_{i}"));
+        let field_name = input
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("field_{i}"));
+        let field_name = field_name.as_str();
         // Values may be keyed by index or by name in the raw data
-        let val = values.get(field_name)
+        let val = values
+            .get(field_name)
             .or_else(|| values.get(&i.to_string()))
             .cloned()
             .unwrap_or(serde_json::Value::Null);
@@ -234,7 +253,12 @@ pub struct Indexer<R: RpcClient> {
 }
 
 impl<R: RpcClient> Indexer<R> {
-    pub fn new(pool: PgPool, config: Config, shutdown_rx: tokio::sync::watch::Receiver<bool>, rpc_client: R) -> Self {
+    pub fn new(
+        pool: PgPool,
+        config: Config,
+        shutdown_rx: tokio::sync::watch::Receiver<bool>,
+        rpc_client: R,
+    ) -> Self {
         Self {
             pool,
             rpc_client,
@@ -282,6 +306,8 @@ impl<R: RpcClient> Indexer<R> {
     /// Set the Pub/Sub publisher for streaming events (issue #264).
     pub fn set_pubsub_publisher(&mut self, publisher: Arc<dyn PubSubPublisher>) {
         self.pubsub_publisher = Some(publisher);
+    }
+
     /// Set the Kafka publisher and topic for event streaming.
     #[cfg(feature = "kafka")]
     pub fn set_kafka_publisher(
@@ -314,7 +340,8 @@ impl<R: RpcClient> Indexer<R> {
             info!("Indexer lock not acquired, running in read-only mode");
             // Set mode to read_only so /status reflects this replica's role
             if let Some(ref s) = self.indexer_state {
-                s.is_active_indexer.store(false, std::sync::atomic::Ordering::Relaxed);
+                s.is_active_indexer
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
             }
             // Hold the connection open so we can detect when the lock owner dies
             // and re-attempt on the next startup/restart cycle.
@@ -325,7 +352,8 @@ impl<R: RpcClient> Indexer<R> {
         info!("Indexer lock acquired, starting indexing");
         // Set mode to active so /status reflects this replica's role
         if let Some(ref s) = self.indexer_state {
-            s.is_active_indexer.store(true, std::sync::atomic::Ordering::Relaxed);
+            s.is_active_indexer
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
         // Run the actual indexing loop; release lock on exit.
@@ -352,23 +380,34 @@ impl<R: RpcClient> Indexer<R> {
                     current_ledger = persisted_current;
                 }
                 if let Some(ref s) = self.indexer_state {
-                    s.current_ledger.store(persisted_current, std::sync::atomic::Ordering::Relaxed);
-                    s.latest_ledger.store(persisted_latest, std::sync::atomic::Ordering::Relaxed);
+                    s.current_ledger
+                        .store(persisted_current, std::sync::atomic::Ordering::Relaxed);
+                    s.latest_ledger
+                        .store(persisted_latest, std::sync::atomic::Ordering::Relaxed);
                 }
                 metrics::update_current_ledger(persisted_current);
-                info!(current_ledger = persisted_current, latest_ledger = persisted_latest, "Restored persisted indexer state");
+                info!(
+                    current_ledger = persisted_current,
+                    latest_ledger = persisted_latest,
+                    "Restored persisted indexer state"
+                );
             }
         }
 
         if current_ledger == 0 {
             loop {
-                match self.rpc_client.get_latest_ledger(&self.config.stellar_rpc_url).await {
+                match self
+                    .rpc_client
+                    .get_latest_ledger(&self.config.stellar_rpc_url)
+                    .await
+                {
                     Ok(ledger) => {
                         current_ledger = ledger;
                         info!(ledger = current_ledger, "Starting from latest ledger");
                         metrics::update_current_ledger(current_ledger);
                         if let Some(ref s) = self.indexer_state {
-                            s.current_ledger.store(current_ledger, std::sync::atomic::Ordering::Relaxed);
+                            s.current_ledger
+                                .store(current_ledger, std::sync::atomic::Ordering::Relaxed);
                         }
                         rpc_backoff_ms = 1000; // Reset backoff on success
                         break;
@@ -400,18 +439,24 @@ impl<R: RpcClient> Indexer<R> {
                         current_ledger = latest;
                         metrics::update_current_ledger(current_ledger);
                         if let Some(ref s) = self.indexer_state {
-                            s.current_ledger.store(current_ledger, std::sync::atomic::Ordering::Relaxed);
+                            s.current_ledger
+                                .store(current_ledger, std::sync::atomic::Ordering::Relaxed);
                         }
 
                         // Calculate and update lag
-                        let latest_ledger = self.rpc_client.get_latest_ledger(&self.config.stellar_rpc_url).await.unwrap_or(0);
+                        let latest_ledger = self
+                            .rpc_client
+                            .get_latest_ledger(&self.config.stellar_rpc_url)
+                            .await
+                            .unwrap_or(0);
                         if latest_ledger > current_ledger {
                             if let Some(ref s) = self.indexer_state {
-                                s.latest_ledger.store(latest_ledger, std::sync::atomic::Ordering::Relaxed);
+                                s.latest_ledger
+                                    .store(latest_ledger, std::sync::atomic::Ordering::Relaxed);
                             }
                             let lag = latest_ledger - current_ledger;
                             metrics::update_indexer_lag(lag);
-                            
+
                             // Warn if lag exceeds threshold
                             if lag > self.config.indexer_lag_warn_threshold {
                                 warn!(
@@ -420,17 +465,14 @@ impl<R: RpcClient> Indexer<R> {
                                     "Indexer is falling behind"
                                 );
                             }
-                        }                    } else {
+                        }
+                    } else {
                         sleep(Duration::from_millis(self.config.indexer_poll_interval_ms)).await;
                     }
                 }
                 Err(IndexerFetchError::DbConnection(e)) => {
                     consecutive_db_errors += 1;
-                    let backoff_secs = if consecutive_db_errors >= 5 {
-                        60
-                    } else {
-                        10
-                    };
+                    let backoff_secs = if consecutive_db_errors >= 5 { 60 } else { 10 };
                     if consecutive_db_errors == 5 {
                         error!(
                             consecutive = consecutive_db_errors,
@@ -450,7 +492,9 @@ impl<R: RpcClient> Indexer<R> {
     }
 
     async fn get_latest_ledger(&self) -> Result<u64, String> {
-        self.rpc_client.get_latest_ledger(&self.config.stellar_rpc_url).await
+        self.rpc_client
+            .get_latest_ledger(&self.config.stellar_rpc_url)
+            .await
     }
 
     /// Load the last persisted cursor from the database, if any.
@@ -542,12 +586,16 @@ impl<R: RpcClient> Indexer<R> {
 
         loop {
             let rpc_start = std::time::Instant::now();
-            let result = match self.rpc_client.get_events(
-                &self.config.stellar_rpc_url,
-                start_ledger,
-                cursor,
-                &self.config.indexer_event_types,
-            ).await {
+            let result = match self
+                .rpc_client
+                .get_events(
+                    &self.config.stellar_rpc_url,
+                    start_ledger,
+                    cursor.clone(),
+                    &self.config.indexer_event_types,
+                )
+                .await
+            {
                 Ok(r) => r,
                 Err(msg) => {
                     warn!(message = %msg, "RPC error");
@@ -568,7 +616,10 @@ impl<R: RpcClient> Indexer<R> {
             let mut db_tx = self.pool.begin().await?;
             let db_start = std::time::Instant::now();
             for event in result.events {
-                match self.store_event_in_tx(&mut db_tx, &event, schema_version).await {
+                match self
+                    .store_event_in_tx(&mut db_tx, &event, schema_version)
+                    .await
+                {
                     Ok(rows) => {
                         total_inserted += rows;
                         if rows == 0 {
@@ -585,6 +636,7 @@ impl<R: RpcClient> Indexer<R> {
                             // Issue #264: publish to Pub/Sub
                             if let Some(ref publisher) = self.pubsub_publisher {
                                 crate::pubsub::publish_event(publisher.as_ref(), &event).await;
+                            }
                             #[cfg(feature = "kafka")]
                             if let (Some(ref publisher), Some(ref topic)) =
                                 (&self.kafka_publisher, &self.kafka_topic)
@@ -710,14 +762,18 @@ impl<R: RpcClient> Indexer<R> {
 
         true
     }
-    
+
     fn should_log_debug(&self) -> bool {
         let count = self.event_counter.fetch_add(1, Ordering::Relaxed);
         count % u64::from(self.config.log_sample_rate) == 0
     }
 
     #[instrument(skip(self, event), fields(tx_hash = %event.tx_hash, contract_id = %event.contract_id, ledger = event.ledger))]
-    async fn store_event(&self, event: &SorobanEvent, schema_version: i32) -> Result<u64, anyhow::Error> {
+    async fn store_event(
+        &self,
+        event: &SorobanEvent,
+        schema_version: i32,
+    ) -> Result<u64, anyhow::Error> {
         if self.should_log_debug() {
             tracing::debug!(
                 tx_hash = %event.tx_hash,
@@ -823,7 +879,8 @@ impl<R: RpcClient> Indexer<R> {
         let event_data = json!({ "value": event.value, "topic": event.topic });
 
         // Look up ABI for this contract and decode event_data if available.
-        let event_data_decoded = decode_event_with_abi(&self.pool, &event.contract_id, &event_data).await;
+        let event_data_decoded =
+            decode_event_with_abi(&self.pool, &event.contract_id, &event_data).await;
         // Enforce size limit before INSERT.
         let serialized = serde_json::to_vec(&event_data)?;
         if serialized.len() > self.config.max_event_data_bytes {
@@ -904,11 +961,17 @@ mod tests {
         }
 
         pub fn add_latest_ledger_response(&self, response: Result<u64, String>) {
-            self.latest_ledger_responses.lock().unwrap().push_back(response);
+            self.latest_ledger_responses
+                .lock()
+                .unwrap()
+                .push_back(response);
         }
 
         pub fn add_get_events_response(&self, response: Result<GetEventsResult, String>) {
-            self.get_events_responses.lock().unwrap().push_back(response);
+            self.get_events_responses
+                .lock()
+                .unwrap()
+                .push_back(response);
         }
     }
 
@@ -925,7 +988,13 @@ mod tests {
             responses.pop_front().unwrap_or(Ok(100))
         }
 
-        async fn get_events(&self, _rpc_url: &str, _start_ledger: u64, _cursor: Option<String>, _event_types: &[String]) -> Result<GetEventsResult, String> {
+        async fn get_events(
+            &self,
+            _rpc_url: &str,
+            _start_ledger: u64,
+            _cursor: Option<String>,
+            _event_types: &[String],
+        ) -> Result<GetEventsResult, String> {
             let mut responses = self.get_events_responses.lock().unwrap();
             responses.pop_front().unwrap_or(Ok(GetEventsResult {
                 events: vec![],
@@ -1086,18 +1155,13 @@ mod tests {
             MockRpcClient::new(),
         )
     }
-        let pool = PgPool::connect("postgres://localhost/soroban_pulse").await.unwrap_or_else(|_| {
-            // Fallback for environments where PG is not available
-            // In a real test environment we'd have a pool.
-            // Since this is specifically testing business logic in Indexer, 
-            // we can just use an uninitialized pool or skip if needed.
-            // But Indexer::new needs a pool.
-            // Actually, we can use the same pattern as in `indexer` helper.
-            return;
-        });
 
+    #[sqlx::test(migrations = "./migrations")]
+    async fn should_log_debug_respects_sample_rate(pool: PgPool) {
+        let pool_clone = pool.clone();
+        let _ = pool_clone; // pool available if needed
         let mut indexer = indexer(pool);
-        
+
         // Test with sample_rate = 1 (should log everything)
         indexer.config.log_sample_rate = 1;
         for _ in 0..100 {
@@ -1114,7 +1178,7 @@ mod tests {
             }
         }
         assert_eq!(logs, 10);
-        
+
         // Test with sample_rate = 3
         indexer.config.log_sample_rate = 3;
         indexer.event_counter.store(0, Ordering::SeqCst);
@@ -1169,7 +1233,9 @@ mod tests {
 
         // Save a checkpoint inside a transaction
         let mut tx = pool.begin().await.unwrap();
-        Indexer::<MockRpcClient>::save_checkpoint(&mut tx, "1234567-0").await.unwrap();
+        Indexer::<MockRpcClient>::save_checkpoint(&mut tx, "1234567-0")
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
 
         // Should now be readable
@@ -1177,7 +1243,9 @@ mod tests {
 
         // Overwrite with a newer cursor
         let mut tx = pool.begin().await.unwrap();
-        Indexer::<MockRpcClient>::save_checkpoint(&mut tx, "1234568-0").await.unwrap();
+        Indexer::<MockRpcClient>::save_checkpoint(&mut tx, "1234568-0")
+            .await
+            .unwrap();
         tx.commit().await.unwrap();
 
         assert_eq!(idx.load_checkpoint().await.as_deref(), Some("1234568-0"));
@@ -1191,9 +1259,15 @@ mod tests {
             Ok(100),
         ]);
 
-        assert_eq!(mock_client.get_latest_ledger("http://test").await.unwrap(), 42);
+        assert_eq!(
+            mock_client.get_latest_ledger("http://test").await.unwrap(),
+            42
+        );
         assert!(mock_client.get_latest_ledger("http://test").await.is_err());
-        assert_eq!(mock_client.get_latest_ledger("http://test").await.unwrap(), 100);
+        assert_eq!(
+            mock_client.get_latest_ledger("http://test").await.unwrap(),
+            100
+        );
     }
 
     #[tokio::test]
@@ -1209,7 +1283,10 @@ mod tests {
             Err("Network error".to_string()),
         ]);
 
-        let result1 = mock_client.get_events("http://test", 1, None, &[]).await.unwrap();
+        let result1 = mock_client
+            .get_events("http://test", 1, None, &[])
+            .await
+            .unwrap();
         assert_eq!(result1.events.len(), 1);
         assert_eq!(result1.latest_ledger, 50);
 
@@ -1230,17 +1307,37 @@ mod tests {
 
         #[async_trait::async_trait]
         impl RpcClient for RecordingMock {
-            async fn get_latest_ledger(&self, _: &str) -> Result<u64, String> { Ok(100) }
-            async fn get_events(&self, _: &str, _: u64, _: Option<String>, event_types: &[String]) -> Result<GetEventsResult, String> {
-                self.called_with_types.lock().unwrap().push(event_types.to_vec());
-                Ok(GetEventsResult { events: vec![], latest_ledger: 100, rpc_cursor: None })
+            async fn get_latest_ledger(&self, _: &str) -> Result<u64, String> {
+                Ok(100)
+            }
+            async fn get_events(
+                &self,
+                _: &str,
+                _: u64,
+                _: Option<String>,
+                event_types: &[String],
+            ) -> Result<GetEventsResult, String> {
+                self.called_with_types
+                    .lock()
+                    .unwrap()
+                    .push(event_types.to_vec());
+                Ok(GetEventsResult {
+                    events: vec![],
+                    latest_ledger: 100,
+                    rpc_cursor: None,
+                })
             }
         }
 
-        let recording = RecordingMock { called_with_types: Arc::new(Mutex::new(vec![])) };
+        let recording = RecordingMock {
+            called_with_types: Arc::new(Mutex::new(vec![])),
+        };
         let types_ref = recording.called_with_types.clone();
 
-        recording.get_events("http://test", 1, None, &["contract".to_string()]).await.unwrap();
+        recording
+            .get_events("http://test", 1, None, &["contract".to_string()])
+            .await
+            .unwrap();
         let calls = types_ref.lock().unwrap();
         assert_eq!(calls[0], vec!["contract"]);
     }
@@ -1249,7 +1346,7 @@ mod tests {
     async fn indexer_uses_mock_rpc_client(pool: PgPool) {
         let mock_client = MockRpcClient::new();
         mock_client.add_latest_ledger_response(Ok(100));
-        
+
         let test_event = make_event(100);
         mock_client.add_get_events_response(Ok(GetEventsResult {
             events: vec![test_event],
@@ -1307,7 +1404,6 @@ mod tests {
                 pubsub_project_id: None,
                 pubsub_topic_id: None,
                 max_event_data_bytes: 65536,
-
             },
             shutdown_rx,
             mock_client,

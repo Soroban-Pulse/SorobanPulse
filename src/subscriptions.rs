@@ -50,7 +50,9 @@ pub async fn create_subscription(
         return Err(AppError::Validation("callback_url is required".into()));
     }
     if body.from_ledger < 0 {
-        return Err(AppError::Validation("from_ledger must be non-negative".into()));
+        return Err(AppError::Validation(
+            "from_ledger must be non-negative".into(),
+        ));
     }
 
     let sub: Subscription = sqlx::query_as(
@@ -96,7 +98,9 @@ pub async fn get_subscription(
     .fetch_one(&state.pool)
     .await?;
 
-    Ok(Json(json!({ "subscription": sub, "pending_deliveries": pending })))
+    Ok(Json(
+        json!({ "subscription": sub, "pending_deliveries": pending }),
+    ))
 }
 
 pub async fn cancel_subscription(
@@ -135,10 +139,11 @@ pub async fn ack_subscription(
 
     if rows == 0 {
         // Check if subscription exists at all
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id = $1)")
-            .bind(id)
-            .fetch_one(&state.pool)
-            .await?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&state.pool)
+                .await?;
         if !exists {
             return Err(AppError::NotFound);
         }
@@ -219,12 +224,10 @@ async fn deliver_pending(pool: &PgPool, http: &reqwest::Client) -> Result<usize,
             .await
         {
             Ok(resp) if resp.status().is_success() => {
-                sqlx::query(
-                    "UPDATE delivery_queue SET status = 'delivered' WHERE id = $1",
-                )
-                .bind(queue_id)
-                .execute(pool)
-                .await?;
+                sqlx::query("UPDATE delivery_queue SET status = 'delivered' WHERE id = $1")
+                    .bind(queue_id)
+                    .execute(pool)
+                    .await?;
             }
             Ok(resp) => {
                 let err = format!("HTTP {}", resp.status());
@@ -305,10 +308,7 @@ pub mod tests {
     }
 
     /// Simulate delivery to a mock callback: records payload or returns error.
-    async fn mock_deliver(
-        server: &MockServer,
-        payload: &Value,
-    ) -> Result<bool, String> {
+    async fn mock_deliver(server: &MockServer, payload: &Value) -> Result<bool, String> {
         let mut fails = server.fail_count.lock().unwrap();
         if *fails > 0 {
             *fails -= 1;
@@ -346,7 +346,11 @@ pub mod tests {
         // Simulate ack logic: acked_ledger should only move forward
         let mut acked_ledger: i64 = 50;
         let new_ack = |current: i64, proposed: i64| -> i64 {
-            if proposed > current { proposed } else { current }
+            if proposed > current {
+                proposed
+            } else {
+                current
+            }
         };
 
         acked_ledger = new_ack(acked_ledger, 100);

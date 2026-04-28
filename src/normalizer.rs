@@ -33,7 +33,11 @@ impl std::str::FromStr for Transform {
 }
 
 /// Apply a single transform to a JSON value, returning the transformed value.
-pub fn apply_transform(transform: &Transform, params: &Value, value: &Value) -> Result<Value, String> {
+pub fn apply_transform(
+    transform: &Transform,
+    params: &Value,
+    value: &Value,
+) -> Result<Value, String> {
     match transform {
         Transform::DivideByDecimals => {
             let decimals = params
@@ -53,8 +57,7 @@ pub fn apply_transform(transform: &Transform, params: &Value, value: &Value) -> 
                 .as_str()
                 .ok_or_else(|| format!("hex_to_decimal: expected string, got {value}"))?
                 .trim_start_matches("0x");
-            let n = u128::from_str_radix(hex, 16)
-                .map_err(|e| format!("hex_to_decimal: {e}"))?;
+            let n = u128::from_str_radix(hex, 16).map_err(|e| format!("hex_to_decimal: {e}"))?;
             // u128 may exceed f64 precision; store as string to preserve accuracy
             Ok(Value::String(n.to_string()))
         }
@@ -117,7 +120,8 @@ fn pointer_set(root: &mut Value, pointer: &str, new_val: Value) {
                     map.insert(token.clone(), new_val);
                     return;
                 }
-                map.entry(token.clone()).or_insert(Value::Object(Default::default()))
+                map.entry(token.clone())
+                    .or_insert(Value::Object(Default::default()))
             }
             Value::Array(arr) => {
                 if let Ok(idx) = token.parse::<usize>() {
@@ -127,7 +131,11 @@ fn pointer_set(root: &mut Value, pointer: &str, new_val: Value) {
                         }
                         return;
                     }
-                    if idx < arr.len() { &mut arr[idx] } else { return; }
+                    if idx < arr.len() {
+                        &mut arr[idx]
+                    } else {
+                        return;
+                    }
                 } else {
                     return;
                 }
@@ -161,7 +169,9 @@ pub fn normalize(rules: &[NormalizationRule], event_data: &Value) -> Option<Valu
         };
         match apply_transform(&transform, &rule.params, &current) {
             Ok(new_val) => pointer_set(&mut normalized, &rule.pointer, new_val),
-            Err(e) => tracing::warn!(pointer = %rule.pointer, error = %e, "Transform failed, skipping"),
+            Err(e) => {
+                tracing::warn!(pointer = %rule.pointer, error = %e, "Transform failed, skipping")
+            }
         }
     }
     Some(normalized)
@@ -184,7 +194,11 @@ mod tests {
     use serde_json::json;
 
     fn rule(pointer: &str, transform: &str, params: Value) -> NormalizationRule {
-        NormalizationRule { pointer: pointer.to_string(), transform: transform.to_string(), params }
+        NormalizationRule {
+            pointer: pointer.to_string(),
+            transform: transform.to_string(),
+            params,
+        }
     }
 
     // --- divide_by_decimals ---
@@ -259,7 +273,11 @@ mod tests {
 
     #[test]
     fn normalize_applies_rules_in_order() {
-        let rules = vec![rule("/value/amount", "divide_by_decimals", json!({"decimals": 2}))];
+        let rules = vec![rule(
+            "/value/amount",
+            "divide_by_decimals",
+            json!({"decimals": 2}),
+        )];
         let data = json!({"value": {"amount": 1000}, "topic": []});
         let result = normalize(&rules, &data).unwrap();
         assert_eq!(result["value"]["amount"], json!(10.0));

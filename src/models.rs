@@ -5,7 +5,9 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, utoipa::ToSchema,
+)]
 #[sqlx(type_name = "text", rename_all = "lowercase")]
 #[serde(rename_all = "lowercase")]
 pub enum EventType {
@@ -17,9 +19,9 @@ pub enum EventType {
 impl fmt::Display for EventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EventType::Contract   => write!(f, "contract"),
+            EventType::Contract => write!(f, "contract"),
             EventType::Diagnostic => write!(f, "diagnostic"),
-            EventType::System     => write!(f, "system"),
+            EventType::System => write!(f, "system"),
         }
     }
 }
@@ -28,9 +30,9 @@ impl FromStr for EventType {
     type Err = String;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "contract"   => Ok(EventType::Contract),
+            "contract" => Ok(EventType::Contract),
             "diagnostic" => Ok(EventType::Diagnostic),
-            "system"     => Ok(EventType::System),
+            "system" => Ok(EventType::System),
             other => Err(format!("unknown event type: {other}")),
         }
     }
@@ -291,7 +293,9 @@ pub struct SorobanEvent {
     pub topic: Option<Vec<Value>>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[cfg(test)]
 mod tests {
@@ -356,9 +360,15 @@ mod tests {
         assert_eq!(result.rpc_cursor.as_deref(), Some("1234567-0"));
         assert_eq!(result.events.len(), 1);
         let ev = &result.events[0];
-        assert_eq!(ev.contract_id, "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM");
+        assert_eq!(
+            ev.contract_id,
+            "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+        );
         assert_eq!(ev.event_type, "contract");
-        assert_eq!(ev.tx_hash, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2");
+        assert_eq!(
+            ev.tx_hash,
+            "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+        );
         assert_eq!(ev.ledger, 1234567);
         assert_eq!(ev.ledger_closed_at, "2026-03-14T00:00:00Z");
         assert!(ev.topic.is_some());
@@ -371,7 +381,10 @@ mod tests {
         assert!(resp.result.is_none());
         let err = resp.error.unwrap();
         assert_eq!(err.code, -32600);
-        assert_eq!(err.message, "startLedger must be within the ledger retention window");
+        assert_eq!(
+            err.message,
+            "startLedger must be within the ledger retention window"
+        );
     }
 
     #[test]
