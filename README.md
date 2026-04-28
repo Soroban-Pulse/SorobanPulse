@@ -61,6 +61,7 @@ Open the newly created `.env` file in your editor and fill in your own real valu
 | `INDEX_CHECK_INTERVAL_HOURS` | How often the index usage monitor runs (hours) | `24`                             |
 | `RATE_LIMIT_PER_MINUTE` | Maximum requests per IP per minute (0 = unlimited) | `60`                         |
 | `SSE_KEEPALIVE_SECS` | SSE keep-alive ping interval in seconds (1–60) | `15`                              |
+| `INDEXER_LOCK_RETRY_SECS` | How often standby replicas retry the advisory lock | `30`                    |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry OTLP collector endpoint (when built with `otel` feature) | `http://localhost:4317` |
 
 > **Note on Authentication:** You can enable optional API key authentication by setting the `API_KEY` environment variable. When set, all requests (except `/health` and `/healthz/*` endpoints) will require either an `Authorization: Bearer <API_KEY>` or an `X-Api-Key: <API_KEY>` header. If `API_KEY` is unset or omitted from your configuration, authentication is bypassed and all requests pass through.
@@ -231,6 +232,20 @@ Migrate to `/v1/` paths at your earliest convenience.
 3. New events are inserted with `ON CONFLICT DO NOTHING` to avoid duplicates.
 4. The Axum HTTP server runs concurrently, serving queries against the indexed data.
 
+### Multi-replica advisory lock
+
+When running multiple replicas, only one should index at a time. The indexer uses a Postgres session-level advisory lock (`pg_try_advisory_lock`) to elect a single leader:
+
+- On startup each replica attempts to acquire the lock.
+- The replica that succeeds becomes the **active indexer** and starts polling.
+- Replicas that fail enter a **standby retry loop**, re-attempting every `INDEXER_LOCK_RETRY_SECS` seconds (default: 30).
+- When the leader's DB connection is dropped (crash, restart, network partition), Postgres automatically releases the lock. A standby replica will acquire it within one retry interval and promote to leader with no manual intervention.
+- The `soroban_pulse_indexer_is_leader` gauge is `1` on the active replica and `0` on standbys, making it easy to alert on split-brain or leaderless scenarios.
+
+| Variable | Description | Default |
+|---|---|---|
+| `INDEXER_LOCK_RETRY_SECS` | How often standby replicas retry the advisory lock | `30` |
+
 ## Notes
 
 - The indexer polls every 5 seconds when no new ledgers are available, and 10 seconds on error.
@@ -262,6 +277,7 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_indexer_current_ledger` - Current ledger being processed
 - `soroban_pulse_indexer_latest_ledger` - Latest ledger from RPC
 - `soroban_pulse_indexer_lag_ledgers` - Lag between latest and current ledger
+- `soroban_pulse_indexer_is_leader` - 1 if this replica holds the advisory lock (active indexer), 0 if standby
 - `soroban_pulse_rpc_errors_total` - Total RPC errors
 - `soroban_pulse_http_request_duration_seconds` - HTTP request duration by route, method, and status
 - `soroban_pulse_rate_limit_rejected_total` - Total requests rejected by rate limiting (429 Too Many Requests)

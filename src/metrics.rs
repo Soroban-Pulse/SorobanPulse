@@ -42,6 +42,11 @@ pub fn update_indexer_lag(lag: u64) {
     m::gauge!("soroban_pulse_indexer_lag_ledgers", lag as f64);
 }
 
+/// Set the is_leader gauge: 1.0 when this replica holds the advisory lock, 0.0 otherwise.
+pub fn record_indexer_is_leader(is_leader: bool) {
+    m::gauge!("soroban_pulse_indexer_is_leader", if is_leader { 1.0 } else { 0.0 });
+}
+
 /// Record an RPC error
 pub fn record_rpc_error() {
     m::counter!("soroban_pulse_rpc_errors_total", 1u64);

@@ -321,7 +321,7 @@ impl<R: RpcClient> Indexer<R> {
 
     pub async fn run(&self) {
         // Attempt to acquire a Postgres session-level advisory lock.
-        // Only one replica will hold this lock at a time; others serve HTTP only.
+        // Only one replica will hold this lock at a time; others poll until they can promote.
         let lock_conn = match self.pool.acquire().await {
             Ok(c) => c,
             Err(e) => {
@@ -330,30 +330,46 @@ impl<R: RpcClient> Indexer<R> {
             }
         };
 
-        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-            .bind(INDEXER_LOCK_KEY)
-            .fetch_one(&self.pool)
-            .await
-            .unwrap_or(false);
+        let retry_interval = Duration::from_secs(self.config.indexer_lock_retry_secs.max(1));
+        let mut interval = tokio::time::interval(retry_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-        if !acquired {
-            info!("Indexer lock not acquired, running in read-only mode");
-            // Set mode to read_only so /status reflects this replica's role
-            if let Some(ref s) = self.indexer_state {
-                s.is_active_indexer
-                    .store(false, std::sync::atomic::Ordering::Relaxed);
+        loop {
+            // Respect shutdown signal while waiting to acquire the lock.
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = self.shutdown_rx.clone().changed() => {
+                    if *self.shutdown_rx.borrow() {
+                        info!("Indexer shutting down before acquiring lock");
+                        metrics::record_indexer_is_leader(false);
+                        return;
+                    }
+                }
             }
-            // Hold the connection open so we can detect when the lock owner dies
-            // and re-attempt on the next startup/restart cycle.
-            drop(lock_conn);
-            return;
-        }
 
-        info!("Indexer lock acquired, starting indexing");
-        // Set mode to active so /status reflects this replica's role
-        if let Some(ref s) = self.indexer_state {
-            s.is_active_indexer
-                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+                .bind(INDEXER_LOCK_KEY)
+                .fetch_one(&self.pool)
+                .await
+                .unwrap_or(false);
+
+            if acquired {
+                info!("Indexer lock acquired, starting indexing");
+                if let Some(ref s) = self.indexer_state {
+                    s.is_active_indexer.store(true, Ordering::Relaxed);
+                }
+                metrics::record_indexer_is_leader(true);
+                break;
+            }
+
+            warn!(
+                retry_secs = self.config.indexer_lock_retry_secs,
+                "Indexer lock not acquired, running in standby mode — will retry"
+            );
+            if let Some(ref s) = self.indexer_state {
+                s.is_active_indexer.store(false, Ordering::Relaxed);
+            }
+            metrics::record_indexer_is_leader(false);
         }
 
         // Run the actual indexing loop; release lock on exit.
@@ -364,6 +380,10 @@ impl<R: RpcClient> Indexer<R> {
             .bind(INDEXER_LOCK_KEY)
             .execute(&self.pool)
             .await;
+        metrics::record_indexer_is_leader(false);
+        if let Some(ref s) = self.indexer_state {
+            s.is_active_indexer.store(false, Ordering::Relaxed);
+        }
 
         drop(lock_conn);
     }
@@ -1149,6 +1169,7 @@ mod tests {
                 pubsub_project_id: None,
                 pubsub_topic_id: None,
                 max_event_data_bytes: 65536,
+                indexer_lock_retry_secs: 30,
 
                 #[cfg(feature = "kafka")]
                 kafka_brokers: None,
@@ -1412,6 +1433,7 @@ mod tests {
                 pubsub_project_id: None,
                 pubsub_topic_id: None,
                 max_event_data_bytes: 65536,
+                indexer_lock_retry_secs: 30,
             },
             shutdown_rx,
             mock_client,
@@ -1461,5 +1483,76 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// Verify that a standby replica acquires the advisory lock after the leader releases it.
+    ///
+    /// Steps:
+    /// 1. Acquire the lock on a dedicated connection (simulates the leader).
+    /// 2. Start a standby indexer with a 1-second retry interval.
+    /// 3. Release the lock from the leader connection.
+    /// 4. Assert the standby promotes within a few retry cycles.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn standby_promotes_after_leader_releases_lock(pool: PgPool) {
+        use std::sync::atomic::{AtomicBool, Ordering as AO};
+
+        // Step 1: acquire the lock on a separate connection to simulate the leader.
+        let mut leader_conn = pool.acquire().await.unwrap();
+        let held: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(INDEXER_LOCK_KEY)
+            .fetch_one(&mut *leader_conn)
+            .await
+            .unwrap();
+        assert!(held, "leader must acquire the lock");
+
+        // Step 2: build a standby indexer with a 1-second retry interval.
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let promoted = Arc::new(AtomicBool::new(false));
+        let promoted_clone = promoted.clone();
+        let indexer_state = Arc::new(crate::config::IndexerState::new());
+        let indexer_state_clone = indexer_state.clone();
+
+        let mut standby = indexer(pool.clone());
+        standby.config.indexer_lock_retry_secs = 1;
+        standby.config.indexer_poll_interval_ms = 100; // short poll so run_loop yields quickly
+        standby.shutdown_rx = shutdown_rx;
+        standby.indexer_state = Some(indexer_state_clone);
+
+        // Run the standby in a background task; it will block in the retry loop.
+        let run_handle = tokio::spawn(async move {
+            standby.run().await;
+            promoted_clone.store(true, AO::Relaxed);
+        });
+
+        // Give the standby one tick to attempt and fail.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !indexer_state.is_active_indexer.load(AO::Relaxed),
+            "standby must not be active while leader holds the lock"
+        );
+
+        // Step 3: release the lock from the leader connection.
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(INDEXER_LOCK_KEY)
+            .execute(&mut *leader_conn)
+            .await
+            .unwrap();
+        drop(leader_conn);
+
+        // Step 4: wait up to 3 seconds for the standby to promote.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if indexer_state.is_active_indexer.load(AO::Relaxed) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("standby did not promote within 3 seconds after leader released the lock");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Clean up: send shutdown so the indexer exits.
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), run_handle).await;
     }
 }

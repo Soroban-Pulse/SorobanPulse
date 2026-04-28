@@ -211,6 +211,8 @@ pub struct Config {
     pub contract_count_cache_size: u64,
     /// TTL in seconds for contract count cache entries.
     pub contract_count_cache_ttl_secs: u64,
+    /// How often standby replicas retry the advisory lock (seconds).
+    pub indexer_lock_retry_secs: u64,
 }
 
 impl Default for Config {
@@ -264,6 +266,7 @@ impl Default for Config {
             export_max_rows: 10_000,
             contract_count_cache_size: 1000,
             contract_count_cache_ttl_secs: 30,
+            indexer_lock_retry_secs: 30,
         }
     }
 }
@@ -749,6 +752,14 @@ impl Config {
         )
         .unwrap_or(30);
 
+        let indexer_lock_retry_secs = parse_int::<u64>(
+            "INDEXER_LOCK_RETRY_SECS",
+            &env_or_file_or("INDEXER_LOCK_RETRY_SECS", &file, "30"),
+            "30",
+            &mut errors,
+        )
+        .unwrap_or(30);
+
         let export_max_rows = parse_int::<u64>(
             "EXPORT_MAX_ROWS",
             &env_or_file_or("EXPORT_MAX_ROWS", &file, "10000"),
@@ -875,6 +886,7 @@ impl Config {
             export_max_rows,
             contract_count_cache_size,
             contract_count_cache_ttl_secs,
+            indexer_lock_retry_secs,
         }
     }
 }
