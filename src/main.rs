@@ -8,6 +8,7 @@
 mod bloom_filter;
 mod config;
 mod db;
+mod email;
 mod encryption;
 mod error;
 mod handlers;
@@ -213,6 +214,36 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         });
+    }
+
+    // Spawn email notification task if EMAIL_SMTP_HOST is configured.
+    if let Some(ref smtp_host) = config.email_smtp_host {
+        if let Some(ref from) = config.email_from {
+            if !config.email_to.is_empty() {
+                let email_rx = event_tx.subscribe();
+                let notifier = email::EmailNotifier::new(
+                    smtp_host.clone(),
+                    config.email_smtp_port,
+                    config.email_smtp_user.clone(),
+                    config.email_smtp_password.clone(),
+                    from.clone(),
+                    config.email_to.clone(),
+                    config.email_contract_filter.clone(),
+                );
+
+                info!(
+                    smtp_host = %smtp_host,
+                    recipients = config.email_to.len(),
+                    "Email notifications enabled"
+                );
+
+                notifier.spawn(email_rx);
+            } else {
+                warn!("EMAIL_SMTP_HOST is set but EMAIL_TO is empty — email notifications disabled");
+            }
+        } else {
+            warn!("EMAIL_SMTP_HOST is set but EMAIL_FROM is not — email notifications disabled");
+        }
     }
 
     // Spawn Redis publisher if configured

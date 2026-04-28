@@ -204,6 +204,20 @@ Migrate to `/v1/` paths at your earliest convenience.
 3. New events are inserted with `ON CONFLICT DO NOTHING` to avoid duplicates.
 4. The Axum HTTP server runs concurrently, serving queries against the indexed data.
 
+## Notifications
+
+Soroban Pulse supports two notification mechanisms for real-time event alerts:
+
+### Webhooks
+
+Configure webhook delivery by setting `WEBHOOK_URL`. Each indexed event is POSTed as JSON to the configured URL with up to 3 retries on failure. See the webhook configuration section in `.env.example` for details.
+
+### Email Notifications
+
+Configure email notifications by setting `EMAIL_SMTP_HOST`, `EMAIL_FROM`, and `EMAIL_TO`. Events are batched and sent as a summary email once per minute to avoid flooding recipients. Supports optional contract filtering via `EMAIL_CONTRACT_FILTER`.
+
+See [docs/email-notifications.md](docs/email-notifications.md) for detailed configuration instructions and examples for Gmail, SendGrid, and AWS SES.
+
 ## Notes
 
 - The indexer polls every 5 seconds when no new ledgers are available, and 10 seconds on error.
@@ -236,6 +250,8 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_indexer_latest_ledger` - Latest ledger from RPC
 - `soroban_pulse_indexer_lag_ledgers` - Lag between latest and current ledger
 - `soroban_pulse_rpc_errors_total` - Total RPC errors
+- `soroban_pulse_webhook_failures_total` - Total webhook delivery failures (all retries exhausted)
+- `soroban_pulse_email_failures_total` - Total email notification failures
 - `soroban_pulse_http_request_duration_seconds` - HTTP request duration by route, method, and status
 - `soroban_pulse_db_pool_size` - Current number of open database connections
 - `soroban_pulse_db_pool_idle` - Number of idle database connections

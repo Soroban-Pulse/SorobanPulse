@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
 serde = { version = "1", features = ["derive"] }
@@ -53,6 +53,9 @@ aws-config = { version = "1", features = ["behavior-version-latest"], optional =
 
 # Issue #264: GCP Pub/Sub streaming (optional, behind pubsub feature flag)
 google-cloud-pubsub = { version = "0.33", optional = true }
+
+# Email notifications
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]

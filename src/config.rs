@@ -211,6 +211,14 @@ pub struct Config {
     pub contract_count_cache_size: u64,
     /// TTL in seconds for contract count cache entries.
     pub contract_count_cache_ttl_secs: u64,
+    // Email notifications
+    pub email_smtp_host: Option<String>,
+    pub email_smtp_port: u16,
+    pub email_smtp_user: Option<String>,
+    pub email_smtp_password: Option<String>,
+    pub email_from: Option<String>,
+    pub email_to: Vec<String>,
+    pub email_contract_filter: Vec<String>,
 }
 
 impl Default for Config {
@@ -264,6 +272,13 @@ impl Default for Config {
             export_max_rows: 10_000,
             contract_count_cache_size: 1000,
             contract_count_cache_ttl_secs: 30,
+            email_smtp_host: None,
+            email_smtp_port: 587,
+            email_smtp_user: None,
+            email_smtp_password: None,
+            email_from: None,
+            email_to: Vec::new(),
+            email_contract_filter: Vec::new(),
         }
     }
 }
@@ -868,6 +883,29 @@ impl Config {
             export_max_rows,
             contract_count_cache_size,
             contract_count_cache_ttl_secs,
+            email_smtp_host: env_or_file("EMAIL_SMTP_HOST", &file),
+            email_smtp_port: parse_int::<u16>(
+                "EMAIL_SMTP_PORT",
+                &env_or_file_or("EMAIL_SMTP_PORT", &file, "587"),
+                "587",
+                &mut errors,
+            )
+            .unwrap_or(587),
+            email_smtp_user: env_or_file("EMAIL_SMTP_USER", &file),
+            email_smtp_password: env_or_file("EMAIL_SMTP_PASSWORD", &file),
+            email_from: env_or_file("EMAIL_FROM", &file),
+            email_to: env_or_file("EMAIL_TO", &file)
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            email_contract_filter: env_or_file("EMAIL_CONTRACT_FILTER", &file)
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         }
     }
 }
