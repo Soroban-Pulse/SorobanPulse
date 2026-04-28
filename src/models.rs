@@ -46,6 +46,12 @@ pub struct Event {
     pub timestamp: DateTime<Utc>,
     pub event_data: Value,
     pub event_data_normalized: Option<Value>,
+    #[sqlx(default)]
+    pub event_data_decoded: Option<Value>,
+    #[sqlx(default)]
+    pub ledger_hash: Option<String>,
+    #[sqlx(default)]
+    pub in_successful_call: bool,
     pub created_at: DateTime<Utc>,
     /// Schema version of the Soroban protocol used when this event was indexed.
     #[sqlx(default)]
@@ -67,6 +73,7 @@ pub struct PaginationParams {
     pub to_ledger: Option<i64>,
     pub cursor: Option<String>,
     pub sort: Option<SortOrder>,
+    pub in_successful_call: Option<bool>,
     /// Filter by the first topic symbol (uses topic_0_sym generated column index).
     pub topic_sym: Option<String>,
 }
@@ -199,6 +206,9 @@ impl PaginationParams {
         "timestamp",
         "event_data",
         "event_data_normalized",
+        "event_data_decoded",
+        "ledger_hash",
+        "in_successful_call",
         "created_at",
         "schema_version",
     ];
@@ -273,9 +283,15 @@ pub struct SorobanEvent {
     pub ledger: u64,
     #[serde(rename = "ledgerClosedAt")]
     pub ledger_closed_at: String,
+    #[serde(rename = "ledgerHash", default)]
+    pub ledger_hash: Option<String>,
+    #[serde(rename = "inSuccessfulContractCall", default = "default_true")]
+    pub in_successful_call: bool,
     pub value: Value,
     pub topic: Option<Vec<Value>>,
 }
+
+fn default_true() -> bool { true }
 
 #[cfg(test)]
 mod tests {
@@ -293,6 +309,7 @@ mod tests {
             to_ledger: None,
             cursor: None,
             sort: None,
+            in_successful_call: None,
             contract_id: None,
         }
     }

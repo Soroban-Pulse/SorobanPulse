@@ -72,12 +72,14 @@ pub struct AppState {
         handlers::get_recent_events,
         handlers::get_events_by_contract,
         handlers::get_events_by_tx,
+        handlers::get_events_by_ledger_hash,
         handlers::get_events_by_tx_batch,
         handlers::stream_events,
         handlers::stream_events_by_contract,
         handlers::stream_events_multi,
         handlers::get_contracts,
         handlers::replay_events,
+        handlers::register_contract_abi,
         handlers::list_archive,
     ),
     components(schemas(
@@ -110,6 +112,7 @@ pub fn create_router(
     prometheus_handle: PrometheusHandle,
     health_check_timeout_ms: u64,
 ) -> Router {
+    create_router_with_tx(pool.clone(), pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None, config)
     create_router_with_tx(pool.clone(), pool, api_keys, allowed_origins, rate_limit_per_minute, false, health_state, indexer_state, prometheus_handle, broadcast::channel(256).0, 15000, 1000, health_check_timeout_ms, None, None, crate::config::Config::default())
 }
 
@@ -172,8 +175,10 @@ pub fn create_router_with_tx(
         .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
         .route("/events/tx/batch", axum::routing::post(handlers::get_events_by_tx_batch))
         .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
+        .route("/events/ledger-hash/{hash}", get(handlers::get_events_by_ledger_hash))
         .route("/contracts", get(handlers::get_contracts))
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
+        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi))
         .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
         .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
         .route("/subscriptions/{id}/ack", axum::routing::post(subscriptions::ack_subscription));

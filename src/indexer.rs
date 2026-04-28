@@ -175,6 +175,43 @@ impl RpcClient for SorobanRpcClient {
     }
 }
 
+/// Attempt to decode event_data using a registered ABI for the contract.
+/// Returns `Some(decoded)` if an ABI is found and decoding succeeds, `None` otherwise.
+async fn decode_event_with_abi(pool: &PgPool, contract_id: &str, event_data: &serde_json::Value) -> Option<serde_json::Value> {
+    let abi: serde_json::Value = sqlx::query_scalar(
+        "SELECT abi FROM contract_abis WHERE contract_id = $1",
+    )
+    .bind(contract_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+
+    // The ABI is a JSON array of event definitions: [{name, inputs:[{name,type},...]}]
+    // We match on the first topic (event name) and map positional values to named fields.
+    let topic = event_data.get("topic")?.as_array()?;
+    let event_name = topic.first()?.as_str()?;
+
+    let events = abi.as_array()?;
+    let def = events.iter().find(|e| e.get("name").and_then(|n| n.as_str()) == Some(event_name))?;
+    let inputs = def.get("inputs")?.as_array()?;
+
+    let values = event_data.get("value")?.as_object()?;
+    // Build decoded object: map input names to corresponding values
+    let mut decoded = serde_json::Map::new();
+    decoded.insert("event".to_string(), serde_json::Value::String(event_name.to_string()));
+    for (i, input) in inputs.iter().enumerate() {
+        let field_name = input.get("name").and_then(|n| n.as_str()).unwrap_or(&format!("field_{i}"));
+        // Values may be keyed by index or by name in the raw data
+        let val = values.get(field_name)
+            .or_else(|| values.get(&i.to_string()))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        decoded.insert(field_name.to_string(), val);
+    }
+    Some(serde_json::Value::Object(decoded))
+}
+
 pub struct Indexer<R: RpcClient> {
     pool: PgPool,
     rpc_client: R,
@@ -738,6 +775,8 @@ impl<R: RpcClient> Indexer<R> {
             .map_err(|_| anyhow::anyhow!("Unparseable ledger_closed_at"))?;
         let event_data = json!({ "value": event.value, "topic": event.topic });
 
+        // Look up ABI for this contract and decode event_data if available.
+        let event_data_decoded = decode_event_with_abi(&self.pool, &event.contract_id, &event_data).await;
         // Enforce size limit before INSERT.
         let serialized = serde_json::to_vec(&event_data)?;
         if serialized.len() > self.config.max_event_data_bytes {
@@ -754,8 +793,8 @@ impl<R: RpcClient> Indexer<R> {
         }
 
         let result = sqlx::query(
-            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
-               VALUES ($1, $2, $3, $4, $5, $6)
+            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, ledger_hash, in_successful_call, event_data_decoded)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING"#,
         )
         .bind(&event.contract_id)
@@ -764,6 +803,9 @@ impl<R: RpcClient> Indexer<R> {
         .bind(ledger)
         .bind(timestamp)
         .bind(event_data)
+        .bind(&event.ledger_hash)
+        .bind(event.in_successful_call)
+        .bind(event_data_decoded)
         .execute(&mut **tx)
         .await?;
         Ok(result.rows_affected())
