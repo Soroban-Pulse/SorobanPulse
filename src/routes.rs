@@ -68,6 +68,7 @@ pub struct AppState {
         handlers::status,
         handlers::get_events,
         handlers::get_event_stats,
+        handlers::get_events_diff,
         handlers::export_events,
         handlers::get_recent_events,
         handlers::get_events_by_contract,
@@ -94,6 +95,9 @@ pub struct AppState {
         crate::models::ReplayRequest,
         crate::models::BatchTxRequest,
         crate::models::ErrorResponse,
+        crate::models::DiffParams,
+        crate::models::ContractDiff,
+        crate::models::DiffResponse,
     )),
     tags(
         (name = "events", description = "Event indexing endpoints"),
@@ -168,6 +172,7 @@ pub fn create_router_with_tx(
     let v1 = Router::new()
         .route("/events", get(handlers::get_events))
         .route("/events/stats", get(handlers::get_event_stats))
+        .route("/events/diff", get(handlers::get_events_diff))
         .route("/events/export", get(handlers::export_events))
         .route("/events/recent", get(handlers::get_recent_events))
         .route("/events/stream", get(handlers::stream_events))

@@ -1662,6 +1662,69 @@ pub async fn anonymize_event(
     Ok(Json(json!({ "id": id, "anonymized": true })))
 }
 
+/// Returns a diff summary of events grouped by contract for a ledger range.
+#[utoipa::path(
+    get,
+    path = "/v1/events/diff",
+    tag = "events",
+    params(
+        ("from_ledger" = i64, Query, description = "Start ledger (inclusive, required)"),
+        ("to_ledger" = i64, Query, description = "End ledger (inclusive, required)"),
+    ),
+    responses(
+        (status = 200, description = "Event diff grouped by contract", body = crate::models::DiffResponse),
+        (status = 400, description = "Invalid or missing ledger range", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn get_events_diff(
+    State(state): State<AppState>,
+    Query(params): Query<crate::models::DiffParams>,
+) -> Result<Json<Value>, AppError> {
+    if params.from_ledger > params.to_ledger {
+        return Err(AppError::Validation(
+            "from_ledger must be <= to_ledger".to_string(),
+        ));
+    }
+
+    // Single query: count per (contract_id, event_type) in range
+    let rows = sqlx::query(
+        "SELECT contract_id, event_type, COUNT(*) AS cnt \
+         FROM events \
+         WHERE ledger >= $1 AND ledger <= $2 \
+         GROUP BY contract_id, event_type",
+    )
+    .bind(params.from_ledger)
+    .bind(params.to_ledger)
+    .fetch_all(&state.read_pool)
+    .await?;
+
+    // Aggregate into per-contract map
+    let mut map: std::collections::HashMap<String, crate::models::ContractDiff> =
+        std::collections::HashMap::new();
+    for row in &rows {
+        let contract_id: String = row.try_get("contract_id")?;
+        let event_type: String = row.try_get("event_type")?;
+        let cnt: i64 = row.try_get("cnt")?;
+        let entry = map.entry(contract_id.clone()).or_insert_with(|| crate::models::ContractDiff {
+            contract_id,
+            event_counts: std::collections::HashMap::new(),
+            total: 0,
+        });
+        entry.event_counts.insert(event_type, cnt);
+        entry.total += cnt;
+    }
+
+    let mut contracts: Vec<crate::models::ContractDiff> = map.into_values().collect();
+    contracts.sort_by(|a, b| b.total.cmp(&a.total));
+
+    Ok(Json(serde_json::to_value(crate::models::DiffResponse {
+        from_ledger: params.from_ledger,
+        to_ledger: params.to_ledger,
+        contracts,
+    }).unwrap()))
+}
+
     params(
         ("page" = Option<i64>, Query, description = "Page number (default 1)"),
         ("limit" = Option<i64>, Query, description = "Items per page (1-100, default 20)"),
@@ -4105,6 +4168,123 @@ mod tests {
         let events = v["data"].as_array().unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["event_data"], json!({"anonymized": true}));
+    }
+
+    // ── Diff endpoint tests ──────────────────────────────────────────────────
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn diff_groups_events_by_contract_and_type(pool: PgPool) {
+        // Contract A: 3 contract events at ledger 10-12, 1 diagnostic at ledger 11
+        // Contract B: 2 contract events at ledger 10-11
+        let contract_a = "CA23456789012345678901234567890123456789012345678901234";
+        let contract_b = "CB23456789012345678901234567890123456789012345678901234";
+        for (i, (cid, etype, ledger)) in [
+            (contract_a, "contract",   10_i64),
+            (contract_a, "contract",   11_i64),
+            (contract_a, "contract",   12_i64),
+            (contract_a, "diagnostic", 11_i64),
+            (contract_b, "contract",   10_i64),
+            (contract_b, "contract",   11_i64),
+        ].iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(cid)
+            .bind(etype)
+            .bind(format!("{:0>64}", i))
+            .bind(ledger)
+            .bind(Utc::now())
+            .bind(json!({}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/diff?from_ledger=10&to_ledger=12")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(v["from_ledger"], 10);
+        assert_eq!(v["to_ledger"], 12);
+
+        let contracts = v["contracts"].as_array().unwrap();
+        assert_eq!(contracts.len(), 2);
+
+        // First entry must be contract_a (total=4 > contract_b total=2)
+        assert_eq!(contracts[0]["contract_id"], contract_a);
+        assert_eq!(contracts[0]["event_counts"]["contract"], 3);
+        assert_eq!(contracts[0]["event_counts"]["diagnostic"], 1);
+        assert_eq!(contracts[0]["total"], 4);
+
+        assert_eq!(contracts[1]["contract_id"], contract_b);
+        assert_eq!(contracts[1]["event_counts"]["contract"], 2);
+        assert_eq!(contracts[1]["total"], 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn diff_empty_range_returns_empty_contracts(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/diff?from_ledger=1000&to_ledger=2000")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["contracts"], json!([]));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn diff_invalid_range_returns_400(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/diff?from_ledger=100&to_ledger=50")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "VALIDATION_ERROR");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn diff_missing_params_returns_400(pool: PgPool) {
+        let app = create_test_router(pool);
+        // Missing to_ledger
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/diff?from_ledger=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     }
 }
 

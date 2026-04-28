@@ -151,6 +151,31 @@ pub struct ExportParams {
     pub contract_id: Option<String>,
 }
 
+/// Query parameters for GET /v1/events/diff
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct DiffParams {
+    pub from_ledger: i64,
+    pub to_ledger: i64,
+}
+
+/// Per-contract event counts in a diff response.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ContractDiff {
+    pub contract_id: String,
+    /// Event counts keyed by event type name.
+    pub event_counts: std::collections::HashMap<String, i64>,
+    /// Total events emitted by this contract in the range.
+    pub total: i64,
+}
+
+/// Response body for GET /v1/events/diff
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DiffResponse {
+    pub from_ledger: i64,
+    pub to_ledger: i64,
+    pub contracts: Vec<ContractDiff>,
+}
+
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ReplayRequest {
     pub from_ledger: u64,
