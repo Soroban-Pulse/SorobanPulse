@@ -78,6 +78,7 @@ pub struct AppState {
         handlers::stream_events,
         handlers::stream_events_by_contract,
         handlers::stream_events_multi,
+        handlers::ws_events,
         handlers::get_contracts,
         handlers::replay_events,
         handlers::register_contract_abi,
@@ -179,6 +180,7 @@ pub fn create_router_with_tx(
         .route("/events/recent", get(handlers::get_recent_events))
         .route("/events/stream", get(handlers::stream_events))
         .route("/events/stream/multi", get(handlers::stream_events_multi))
+        .route("/events/ws", get(handlers::ws_events))
         .route("/events/contract/{contract_id}", get(handlers::get_events_by_contract))
         .route("/events/contract/{contract_id}/stream", get(handlers::stream_events_by_contract))
         .route("/events/tx/batch", axum::routing::post(handlers::get_events_by_tx_batch))
