@@ -364,55 +364,62 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
 pub async fn get_event_stats(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     use std::collections::HashMap;
 
-    // Single query: total, 24h, 7d, ledger range, per-type counts, top 10 contracts
-    let rows = sqlx::query(
+    // Total events and ledger range from raw table (fast with index)
+    let totals_row = sqlx::query(
+        "SELECT COUNT(*) AS total_events, MIN(ledger) AS min_ledger, MAX(ledger) AS max_ledger FROM events",
+    )
+    .fetch_one(&state.read_pool)
+    .await?;
+
+    let total_events: i64 = totals_row.try_get("total_events")?;
+    let min_ledger: Option<i64> = totals_row.try_get("min_ledger")?;
+    let max_ledger: Option<i64> = totals_row.try_get("max_ledger")?;
+
+    // Per-type counts and time-windowed counts from events_daily_summary matview
+    let type_rows = sqlx::query(
+        "SELECT event_type, SUM(event_count) AS cnt FROM events_daily_summary GROUP BY event_type",
+    )
+    .fetch_all(&state.read_pool)
+    .await?;
+
+    let mut events_by_type: HashMap<String, i64> = HashMap::new();
+    for row in &type_rows {
+        let et: String = row.try_get("event_type")?;
+        let cnt: i64 = row.try_get("cnt")?;
+        events_by_type.insert(et, cnt);
+    }
+    events_by_type.entry("contract".to_string()).or_insert(0);
+    events_by_type.entry("diagnostic".to_string()).or_insert(0);
+    events_by_type.entry("system".to_string()).or_insert(0);
+
+    // 24h and 7d counts from daily_summary (last 1 and 7 days)
+    let window_row = sqlx::query(
         r#"
         SELECT
-            COUNT(*)                                                        AS total_events,
-            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '24 hours') AS events_last_24h,
-            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '7 days')   AS events_last_7d,
-            MIN(ledger)                                                     AS min_ledger,
-            MAX(ledger)                                                     AS max_ledger,
-            COUNT(*) FILTER (WHERE event_type = 'contract')                 AS type_contract,
-            COUNT(*) FILTER (WHERE event_type = 'diagnostic')               AS type_diagnostic,
-            COUNT(*) FILTER (WHERE event_type = 'system')                   AS type_system
-        FROM events
+            COALESCE(SUM(event_count) FILTER (WHERE event_date >= CURRENT_DATE - INTERVAL '1 day'), 0)  AS events_last_24h,
+            COALESCE(SUM(event_count) FILTER (WHERE event_date >= CURRENT_DATE - INTERVAL '7 days'), 0) AS events_last_7d
+        FROM events_daily_summary
         "#,
     )
     .fetch_one(&state.read_pool)
     .await?;
 
-    let total_events: i64 = rows.try_get("total_events")?;
-    let events_last_24h: i64 = rows.try_get("events_last_24h")?;
-    let events_last_7d: i64 = rows.try_get("events_last_7d")?;
-    let min_ledger: Option<i64> = rows.try_get("min_ledger")?;
-    let max_ledger: Option<i64> = rows.try_get("max_ledger")?;
+    let events_last_24h: i64 = window_row.try_get("events_last_24h")?;
+    let events_last_7d: i64 = window_row.try_get("events_last_7d")?;
 
-    let mut events_by_type = HashMap::new();
-    events_by_type.insert(
-        "contract".to_string(),
-        rows.try_get::<i64, _>("type_contract")?,
-    );
-    events_by_type.insert(
-        "diagnostic".to_string(),
-        rows.try_get::<i64, _>("type_diagnostic")?,
-    );
-    events_by_type.insert("system".to_string(), rows.try_get::<i64, _>("type_system")?);
-
+    // Top 10 contracts from events_contract_summary matview
     let top_rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT contract_id, COUNT(*) AS event_count FROM events GROUP BY contract_id ORDER BY event_count DESC LIMIT 10",
+        "SELECT contract_id, event_count FROM events_contract_summary ORDER BY event_count DESC LIMIT 10",
     )
     .fetch_all(&state.read_pool)
     .await?;
 
     let top_contracts = top_rows
         .into_iter()
-        .map(
-            |(contract_id, event_count)| crate::models::ContractStatEntry {
-                contract_id,
-                event_count,
-            },
-        )
+        .map(|(contract_id, event_count)| crate::models::ContractStatEntry {
+            contract_id,
+            event_count,
+        })
         .collect();
 
     let stats = crate::models::EventStats {
@@ -686,6 +693,82 @@ pub async fn stream_events_multi(
     );
 
     Ok(Sse::new(stream_with_cleanup))
+}
+
+/// WebSocket event stream. Clients receive events as JSON text frames.
+/// After connecting, a client may send `{"contract_id":"CABC..."}` to filter
+/// by contract, or `{}` / omit the field to receive all events.
+#[utoipa::path(
+    get,
+    path = "/v1/events/ws",
+    tag = "events",
+    params(
+        ("contract_id" = Option<String>, Query, description = "Initial contract ID filter (can also be set via WebSocket message)"),
+    ),
+    responses(
+        (status = 101, description = "WebSocket upgrade"),
+        (status = 400, description = "Invalid contract_id", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn ws_events(
+    State(state): State<AppState>,
+    Query(params): Query<StreamParams>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<impl IntoResponse, AppError> {
+    if let Some(ref cid) = params.contract_id {
+        validate_contract_id(cid)?;
+    }
+
+    let initial_filter = params.contract_id.clone();
+    let event_tx = state.event_tx.clone();
+    let enc_key = state.encryption_key;
+    let enc_key_old = state.encryption_key_old;
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        use axum::extract::ws::Message;
+
+        let mut rx = event_tx.subscribe();
+        let mut contract_filter = initial_filter;
+
+        loop {
+            tokio::select! {
+                // Incoming message from client (filter update or close)
+                msg = socket.recv() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                contract_filter = v.get("contract_id")
+                                    .and_then(|c| c.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        _ => {}
+                    }
+                }
+                // Outgoing event from broadcast channel
+                result = rx.recv() => {
+                    match result {
+                        Ok(mut event) => {
+                            if let Some(ref cid) = contract_filter {
+                                if &event.contract_id != cid {
+                                    continue;
+                                }
+                            }
+                            event.event_data = decrypt_event_data(&event.event_data, enc_key.as_ref(), enc_key_old.as_ref());
+                            let text = serde_json::to_string(&event).unwrap_or_default();
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    }))
 }
 
 async fn stream_events_internal(
@@ -1304,13 +1387,14 @@ pub async fn get_events(
     path = "/v1/events/export",
     tag = "events",
     params(
+        ("format" = Option<String>, Query, description = "Output format: csv (default) or parquet"),
         ("event_type" = Option<String>, Query, description = "Filter by event type: contract, diagnostic, system"),
         ("from_ledger" = Option<i64>, Query, description = "Return events at or after this ledger"),
         ("to_ledger" = Option<i64>, Query, description = "Return events at or before this ledger"),
         ("contract_id" = Option<String>, Query, description = "Filter by contract ID"),
     ),
     responses(
-        (status = 200, description = "CSV stream of events", content_type = "text/csv"),
+        (status = 200, description = "Exported events (CSV or Parquet depending on format param)"),
         (status = 400, description = "Invalid query parameters"),
         (status = 401, description = "API key required"),
     )
@@ -1318,10 +1402,7 @@ pub async fn get_events(
 pub async fn export_events(
     State(state): State<AppState>,
     Query(params): Query<ExportParams>,
-) -> Result<impl IntoResponse, AppError> {
-    // Require API key: export is always auth-gated regardless of global auth config.
-    // (The auth middleware already enforces this when api_keys is non-empty;
-    //  this guard ensures it even if the middleware is bypassed in tests.)
+) -> Result<Response<Body>, AppError> {
     if state.config.api_keys.is_empty() {
         return Err(AppError::Validation(
             "export endpoint requires API key authentication".to_string(),
@@ -1334,6 +1415,15 @@ pub async fn export_events(
                 "from_ledger must be <= to_ledger".to_string(),
             ));
         }
+    }
+
+    let want_parquet = params.format.as_deref() == Some("parquet");
+
+    #[cfg(not(feature = "parquet"))]
+    if want_parquet {
+        return Err(AppError::Validation(
+            "parquet export requires the 'parquet' feature flag".to_string(),
+        ));
     }
 
     let max_rows = state.config.export_max_rows as i64;
@@ -1386,10 +1476,43 @@ pub async fn export_events(
 
     let rows = q.fetch_all(&state.pool).await?;
 
+    #[cfg(feature = "parquet")]
+    if want_parquet {
+        use crate::parquet_export::{write_events_parquet, EventRow};
+        let event_rows: Vec<EventRow> = rows
+            .iter()
+            .map(|row| {
+                Ok::<_, sqlx::Error>(EventRow {
+                    id: row.try_get("id")?,
+                    contract_id: row.try_get("contract_id")?,
+                    event_type: row.try_get("event_type")?,
+                    tx_hash: row.try_get("tx_hash")?,
+                    ledger: row.try_get("ledger")?,
+                    timestamp: row.try_get("timestamp")?,
+                    event_data: row.try_get("event_data")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect::<Result<_, _>>()?;
+
+        let bytes = write_events_parquet(&event_rows)
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+
+        return Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "application/octet-stream")
+            .header(
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"events.parquet\"",
+            )
+            .body(Body::from(bytes))
+            .unwrap());
+    }
+
+    // Default: CSV
     let mut csv =
         String::from("id,contract_id,event_type,tx_hash,ledger,timestamp,event_data,created_at\n");
     for row in &rows {
-        use sqlx::Row;
         let id: uuid::Uuid = row.try_get("id")?;
         let contract_id: String = row.try_get("contract_id")?;
         let event_type: String = row.try_get("event_type")?;
@@ -1398,20 +1521,21 @@ pub async fn export_events(
         let timestamp: chrono::DateTime<chrono::Utc> = row.try_get("timestamp")?;
         let event_data: serde_json::Value = row.try_get("event_data")?;
         let created_at: chrono::DateTime<chrono::Utc> = row.try_get("created_at")?;
-        // Escape event_data JSON for CSV (wrap in quotes, escape inner quotes)
         let data_str = event_data.to_string().replace('"', "\"\"");
         csv.push_str(&format!(
             "{id},{contract_id},{event_type},{tx_hash},{ledger},{timestamp},\"{data_str}\",{created_at}\n"
         ));
     }
 
-    Ok((
-        [
-            ("Content-Type", "text/csv"),
-            ("Content-Disposition", "attachment; filename=\"events.csv\""),
-        ],
-        csv,
-    ))
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/csv")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"events.csv\"",
+        )
+        .body(Body::from(csv))
+        .unwrap())
 }
 
 /// Query parameters for the /v1/events/recent endpoint.
@@ -4679,6 +4803,149 @@ mod tests {
         assert!(response.status().is_client_error());
     }
 
+    // ── Parquet export tests ─────────────────────────────────────────────────
+
+    #[cfg(feature = "parquet")]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn export_events_parquet_returns_octet_stream(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, $2, $3, $4, NOW(), $5)",
+        )
+        .bind("C1234567890123456789012345678901234567890123456789012345")
+        .bind("contract")
+        .bind("a".repeat(64))
+        .bind(1_i64)
+        .bind(json!({"value": null, "topic": []}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = create_export_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/export?format=parquet")
+                    .header("Authorization", "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("content-type").unwrap(),
+            "application/octet-stream"
+        );
+        assert!(response
+            .headers()
+            .get("content-disposition")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .contains("events.parquet"));
+
+        // Verify the bytes are a valid Parquet file (magic bytes PAR1)
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(body.len() > 4);
+        assert_eq!(&body[..4], b"PAR1", "Parquet magic bytes missing");
+        assert_eq!(&body[body.len() - 4..], b"PAR1", "Parquet footer magic missing");
+    }
+
+    #[cfg(feature = "parquet")]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn export_events_parquet_can_be_read_back(pool: PgPool) {
+        use arrow_array::cast::AsArray;
+        use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+        let contract_id = "C1234567890123456789012345678901234567890123456789012345";
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, $2, $3, $4, NOW(), $5)",
+        )
+        .bind(contract_id)
+        .bind("contract")
+        .bind("b".repeat(64))
+        .bind(42_i64)
+        .bind(json!({"value": {"amount": 100}, "topic": []}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = create_export_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/export?format=parquet")
+                    .header("Authorization", "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+        // Read back with parquet reader
+        let cursor = std::io::Cursor::new(body);
+        let builder = ParquetRecordBatchReaderBuilder::try_new(cursor).unwrap();
+        let mut reader = builder.build().unwrap();
+        let batch = reader.next().unwrap().unwrap();
+
+        assert_eq!(batch.num_rows(), 1);
+
+        // Verify ledger column value
+        let ledger_col = batch.column_by_name("ledger").unwrap();
+        let ledger_val = ledger_col.as_primitive::<arrow_array::types::Int64Type>().value(0);
+        assert_eq!(ledger_val, 42);
+
+        // Verify contract_id column value
+        let cid_col = batch.column_by_name("contract_id").unwrap();
+        let cid_val = cid_col.as_string::<i32>().value(0);
+        assert_eq!(cid_val, contract_id);
+    }
+
+    #[cfg(feature = "parquet")]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn export_events_parquet_empty_db_returns_valid_file(pool: PgPool) {
+        let app = create_export_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/export?format=parquet")
+                    .header("Authorization", "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        // Even an empty Parquet file has the PAR1 magic
+        assert_eq!(&body[..4], b"PAR1");
+    }
+
+    #[cfg(not(feature = "parquet"))]
+    #[sqlx::test(migrations = "./migrations")]
+    async fn export_events_parquet_without_feature_returns_400(pool: PgPool) {
+        let app = create_export_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/export?format=parquet")
+                    .header("Authorization", "Bearer test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
     // ── Anonymization tests ──────────────────────────────────────────────────
 
     fn create_admin_router(pool: PgPool) -> axum::Router {
@@ -5094,6 +5361,154 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v.get("indexer_paused").is_some(), "indexer_paused must be present in /status");
         assert_eq!(v["indexer_paused"], false);
+    }
+
+    // ── Materialized view stats tests ────────────────────────────────────────
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_empty_db_returns_zeros(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["total_events"], 0);
+        assert_eq!(v["events_last_24h"], 0);
+        assert_eq!(v["events_last_7d"], 0);
+        assert!(v["top_contracts"].as_array().unwrap().is_empty());
+        assert!(v.get("computed_at").is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_reflects_data_after_matview_refresh(pool: PgPool) {
+        // Insert events
+        for i in 0..3_i64 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, NOW(), $5)",
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(i)
+            .bind(json!({}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Manually refresh the materialized views so the test data is visible
+        crate::stats_refresh::refresh_all(&pool).await;
+
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(v["total_events"], 3);
+        // All events inserted with NOW() so they should appear in 24h and 7d windows
+        assert_eq!(v["events_last_24h"], 3);
+        assert_eq!(v["events_last_7d"], 3);
+        assert_eq!(v["top_contracts"].as_array().unwrap().len(), 3);
+        assert_eq!(v["events_by_type"]["contract"], 3);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_top_contracts_ordered_by_count(pool: PgPool) {
+        let contract_a = "CA23456789012345678901234567890123456789012345678901234";
+        let contract_b = "CB23456789012345678901234567890123456789012345678901234";
+
+        // 3 events for A, 1 for B
+        for i in 0..3_i64 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, NOW(), $5)",
+            )
+            .bind(contract_a)
+            .bind("contract")
+            .bind(format!("a{:0>63}", i))
+            .bind(i)
+            .bind(json!({}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, $2, $3, $4, NOW(), $5)",
+        )
+        .bind(contract_b)
+        .bind("contract")
+        .bind("b".repeat(64))
+        .bind(10_i64)
+        .bind(json!({}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::stats_refresh::refresh_all(&pool).await;
+
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+
+        let top = v["top_contracts"].as_array().unwrap();
+        assert_eq!(top[0]["contract_id"], contract_a);
+        assert_eq!(top[0]["event_count"], 3);
+        assert_eq!(top[1]["contract_id"], contract_b);
+        assert_eq!(top[1]["event_count"], 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_returns_cache_control_header(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cc = response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(cc.contains("max-age=60"), "expected max-age=60 in Cache-Control, got: {cc}");
     }
 }
 

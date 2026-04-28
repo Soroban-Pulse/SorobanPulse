@@ -8,6 +8,7 @@
 mod bloom_filter;
 mod config;
 mod db;
+mod email;
 mod encryption;
 mod error;
 mod handlers;
@@ -15,13 +16,20 @@ mod index_monitor;
 mod indexer;
 mod kafka;
 mod kinesis;
+#[cfg(feature = "lua")]
+mod lua_transform;
 mod metrics;
 mod middleware;
 mod models;
 mod normalizer;
+
+#[cfg(feature = "parquet")]
+mod parquet_export;
+
 mod pubsub;
 mod routes;
 mod rpc_client;
+mod stats_refresh;
 mod subscriptions;
 mod webhook;
 mod xdr_validation;
@@ -215,6 +223,36 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Spawn email notification task if EMAIL_SMTP_HOST is configured.
+    if let Some(ref smtp_host) = config.email_smtp_host {
+        if let Some(ref from) = config.email_from {
+            if !config.email_to.is_empty() {
+                let email_rx = event_tx.subscribe();
+                let notifier = email::EmailNotifier::new(
+                    smtp_host.clone(),
+                    config.email_smtp_port,
+                    config.email_smtp_user.clone(),
+                    config.email_smtp_password.clone(),
+                    from.clone(),
+                    config.email_to.clone(),
+                    config.email_contract_filter.clone(),
+                );
+
+                info!(
+                    smtp_host = %smtp_host,
+                    recipients = config.email_to.len(),
+                    "Email notifications enabled"
+                );
+
+                notifier.spawn(email_rx);
+            } else {
+                warn!("EMAIL_SMTP_HOST is set but EMAIL_TO is empty — email notifications disabled");
+            }
+        } else {
+            warn!("EMAIL_SMTP_HOST is set but EMAIL_FROM is not — email notifications disabled");
+        }
+    }
+
     // Spawn Redis publisher if configured
     if let (Some(redis_url), Some(redis_stream_key)) = (&config.redis_url, &config.redis_stream_key) {
         let redis_rx = event_tx.subscribe();
@@ -295,6 +333,28 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Initialize Lua transformer if configured
+    #[cfg(feature = "lua")]
+    if let Some(ref script_path) = config.event_transform_script {
+        match soroban_pulse::lua_transform::LuaTransformer::new(
+            std::path::Path::new(script_path),
+            config.event_transform_timeout_ms,
+        ) {
+            Ok(transformer) => {
+                info!(
+                    script_path = %script_path,
+                    timeout_ms = config.event_transform_timeout_ms,
+                    "Lua event transformer enabled"
+                );
+                indexer.set_lua_transformer(std::sync::Arc::new(transformer));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize Lua transformer — transformation disabled");
+            }
+        }
+    }
+
     let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });
@@ -303,6 +363,13 @@ async fn main() -> anyhow::Result<()> {
     index_monitor::spawn(
         pool.clone(),
         config.index_check_interval_hours,
+        shutdown_rx.clone(),
+    );
+
+    // Spawn materialized-view refresh background task
+    stats_refresh::spawn(
+        pool.clone(),
+        config.stats_refresh_interval_secs,
         shutdown_rx.clone(),
     );
 
@@ -360,6 +427,7 @@ async fn main() -> anyhow::Result<()> {
         config.event_data_encryption_key,
         config.event_data_encryption_key_old,
         config.clone(),
+        Some(schema_validator),
     );
 
     info!(addr = %addr, "Soroban Pulse listening");

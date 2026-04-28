@@ -151,6 +151,8 @@ pub struct ExportParams {
     pub from_ledger: Option<i64>,
     pub to_ledger: Option<i64>,
     pub contract_id: Option<String>,
+    /// Output format: "csv" (default) or "parquet"
+    pub format: Option<String>,
 }
 
 /// Query parameters for GET /v1/events/diff

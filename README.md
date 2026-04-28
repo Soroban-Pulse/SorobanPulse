@@ -279,6 +279,8 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_indexer_lag_ledgers` - Lag between latest and current ledger
 - `soroban_pulse_indexer_is_leader` - 1 if this replica holds the advisory lock (active indexer), 0 if standby
 - `soroban_pulse_rpc_errors_total` - Total RPC errors
+- `soroban_pulse_webhook_failures_total` - Total webhook delivery failures (all retries exhausted)
+- `soroban_pulse_email_failures_total` - Total email notification failures
 - `soroban_pulse_http_request_duration_seconds` - HTTP request duration by route, method, and status
 - `soroban_pulse_rate_limit_rejected_total` - Total requests rejected by rate limiting (429 Too Many Requests)
 - `soroban_pulse_sse_active_connections` - Number of currently active SSE connections
