@@ -82,6 +82,8 @@ pub struct AppState {
         handlers::replay_events,
         handlers::register_contract_abi,
         handlers::anonymize_event,
+        handlers::pause_indexer,
+        handlers::resume_indexer,
         handlers::list_archive,
     ),
     components(schemas(
@@ -186,6 +188,8 @@ pub fn create_router_with_tx(
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
         .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi))
         .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
+        .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
+        .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
         .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
         .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
         .route("/subscriptions/{id}/ack", axum::routing::post(subscriptions::ack_subscription));

@@ -264,6 +264,8 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         "read_only"
     };
 
+    let indexer_paused = state.indexer_state.is_paused.load(Ordering::Relaxed);
+
     let total_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
         .fetch_one(&state.pool)
         .await
@@ -300,6 +302,7 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         "events_by_type": events_by_type,
         "indexer_status": indexer_status,
         "indexer_mode": indexer_mode,
+        "indexer_paused": indexer_paused,
     }))
 }
 
@@ -1662,7 +1665,56 @@ pub async fn anonymize_event(
     Ok(Json(json!({ "id": id, "anonymized": true })))
 }
 
-/// Returns a diff summary of events grouped by contract for a ledger range.
+/// Pause the indexer loop without stopping the HTTP server.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/indexer/pause",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Indexer paused"),
+        (status = 403, description = "Not the active indexer", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn pause_indexer(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !state.indexer_state.is_active_indexer.load(Ordering::Relaxed) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "pause endpoint only available on active indexer" })),
+        ));
+    }
+    state.indexer_state.is_paused.store(true, Ordering::Relaxed);
+    tracing::info!("Indexer paused via admin API");
+    Ok(Json(json!({ "indexer_paused": true })))
+}
+
+/// Resume a previously paused indexer loop.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/indexer/resume",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Indexer resumed"),
+        (status = 403, description = "Not the active indexer", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn resume_indexer(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !state.indexer_state.is_active_indexer.load(Ordering::Relaxed) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "resume endpoint only available on active indexer" })),
+        ));
+    }
+    state.indexer_state.is_paused.store(false, Ordering::Relaxed);
+    tracing::info!("Indexer resumed via admin API");
+    Ok(Json(json!({ "indexer_paused": false })))
+}
+
 #[utoipa::path(
     get,
     path = "/v1/events/diff",
@@ -4285,6 +4337,133 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ── Pause / Resume tests ─────────────────────────────────────────────────
+
+    fn create_active_indexer_router(pool: PgPool) -> axum::Router {
+        let health_state = Arc::new(HealthState::new(60));
+        let indexer_state = Arc::new(IndexerState::new());
+        indexer_state.is_active_indexer.store(true, std::sync::atomic::Ordering::Relaxed);
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        crate::routes::create_router(pool, vec!["admin-key".to_string()], &[], 60, health_state, indexer_state, prometheus_handle, 2000, config)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pause_indexer_returns_200_and_sets_paused(pool: PgPool) {
+        let app = create_active_indexer_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/indexer/pause")
+                    .header("Authorization", "Bearer admin-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["indexer_paused"], true);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn resume_indexer_returns_200_and_clears_paused(pool: PgPool) {
+        let app = create_active_indexer_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/indexer/resume")
+                    .header("Authorization", "Bearer admin-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["indexer_paused"], false);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pause_returns_403_on_read_only_replica(pool: PgPool) {
+        // create_test_router uses IndexerState::new() which defaults is_active_indexer=false
+        let app = create_admin_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/indexer/pause")
+                    .header("Authorization", "Bearer admin-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn resume_returns_403_on_read_only_replica(pool: PgPool) {
+        let app = create_admin_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/indexer/resume")
+                    .header("Authorization", "Bearer admin-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn pause_requires_api_key(pool: PgPool) {
+        let app = create_active_indexer_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/admin/indexer/pause")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn status_includes_indexer_paused_field(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/status")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(v.get("indexer_paused").is_some(), "indexer_paused must be present in /status");
+        assert_eq!(v["indexer_paused"], false);
     }
 }
 

@@ -389,6 +389,14 @@ impl<R: RpcClient> Indexer<R> {
                 break;
             }
 
+            // Check pause state — sleep and re-check rather than blocking.
+            if let Some(ref s) = self.indexer_state {
+                if s.is_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            }
+
             match self.fetch_and_store_events(current_ledger).await {
                 Ok(latest) => {
                     consecutive_db_errors = 0;
