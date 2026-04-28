@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Email notification feature for event alerts with batching (one email per minute maximum)
+- Email configuration via `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`, `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO`, and `EMAIL_CONTRACT_FILTER` environment variables
+- Email notifications can be filtered by contract ID using `EMAIL_CONTRACT_FILTER`
+- Prometheus metric `soroban_pulse_email_failures_total` for monitoring email delivery failures
+- Documentation for email notifications in `docs/email-notifications.md`
 - Contract ID format validation for SSE stream endpoint (`/v1/events/stream`)
 - Database pool metrics to Prometheus endpoint (`soroban_pulse_db_pool_size`, `soroban_pulse_db_pool_idle`, `soroban_pulse_db_pool_max`)
 - Separate CI job for integration tests with real PostgreSQL

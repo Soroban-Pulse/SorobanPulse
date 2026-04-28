@@ -87,6 +87,11 @@ pub fn record_webhook_failure() {
     m::counter!("soroban_pulse_webhook_failures_total", 1u64);
 }
 
+/// Record an email notification failure
+pub fn record_email_failure() {
+    m::counter!("soroban_pulse_email_failures_total", 1u64);
+}
+
 pub fn record_replay_job() {
     m::counter!("soroban_pulse_replay_jobs_total", 1u64);
 }

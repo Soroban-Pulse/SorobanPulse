@@ -54,6 +54,9 @@ aws-config = { version = "1", features = ["behavior-version-latest"], optional =
 # Issue #264: GCP Pub/Sub streaming (optional, behind pubsub feature flag)
 google-cloud-pubsub = { version = "0.33", optional = true }
 
+# Email notifications
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
 encryption = ["aes-gcm", "rand"]
