@@ -676,6 +676,82 @@ pub async fn stream_events_multi(
     ))
 }
 
+/// WebSocket event stream. Clients receive events as JSON text frames.
+/// After connecting, a client may send `{"contract_id":"CABC..."}` to filter
+/// by contract, or `{}` / omit the field to receive all events.
+#[utoipa::path(
+    get,
+    path = "/v1/events/ws",
+    tag = "events",
+    params(
+        ("contract_id" = Option<String>, Query, description = "Initial contract ID filter (can also be set via WebSocket message)"),
+    ),
+    responses(
+        (status = 101, description = "WebSocket upgrade"),
+        (status = 400, description = "Invalid contract_id", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn ws_events(
+    State(state): State<AppState>,
+    Query(params): Query<StreamParams>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<impl IntoResponse, AppError> {
+    if let Some(ref cid) = params.contract_id {
+        validate_contract_id(cid)?;
+    }
+
+    let initial_filter = params.contract_id.clone();
+    let event_tx = state.event_tx.clone();
+    let enc_key = state.encryption_key;
+    let enc_key_old = state.encryption_key_old;
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        use axum::extract::ws::Message;
+
+        let mut rx = event_tx.subscribe();
+        let mut contract_filter = initial_filter;
+
+        loop {
+            tokio::select! {
+                // Incoming message from client (filter update or close)
+                msg = socket.recv() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                contract_filter = v.get("contract_id")
+                                    .and_then(|c| c.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        _ => {}
+                    }
+                }
+                // Outgoing event from broadcast channel
+                result = rx.recv() => {
+                    match result {
+                        Ok(mut event) => {
+                            if let Some(ref cid) = contract_filter {
+                                if &event.contract_id != cid {
+                                    continue;
+                                }
+                            }
+                            event.event_data = decrypt_event_data(&event.event_data, enc_key.as_ref(), enc_key_old.as_ref());
+                            let text = serde_json::to_string(&event).unwrap_or_default();
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    }))
+}
+
 async fn stream_events_internal(
     State(state): State<AppState>,
     contract_filter: Option<String>,
@@ -4995,6 +5071,98 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v.get("indexer_paused").is_some(), "indexer_paused must be present in /status");
         assert_eq!(v["indexer_paused"], false);
+    }
+
+    // ── WebSocket tests ──────────────────────────────────────────────────────
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn ws_events_upgrades_to_websocket(pool: PgPool) {
+        let app = create_test_router(pool);
+        // A plain GET without Upgrade header should return 400 (axum rejects non-WS requests)
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/ws")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // axum returns 400 when the request is not a valid WebSocket upgrade
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn ws_events_invalid_contract_id_returns_400(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/ws?contract_id=INVALID")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "invalid contract_id format");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn ws_events_delivers_broadcast_events(pool: PgPool) {
+        use axum::extract::ws::Message;
+        use tokio::sync::broadcast;
+
+        let (event_tx, _) = broadcast::channel::<crate::models::SorobanEvent>(16);
+        let health_state = Arc::new(HealthState::new(60));
+        let indexer_state = Arc::new(crate::config::IndexerState::new());
+        let prometheus_handle = crate::metrics::init_metrics();
+        let config = crate::config::Config::default();
+        let app = crate::routes::create_router_with_tx(
+            pool.clone(), pool, vec![], &[], 60, false,
+            health_state, indexer_state, prometheus_handle,
+            event_tx.clone(), 15000, 1000, 2000, None, None, config,
+        );
+
+        // Publish an event before the client connects so it lands in the channel
+        let test_event = crate::models::SorobanEvent {
+            contract_id: "C1234567890123456789012345678901234567890123456789012345".to_string(),
+            event_type: "contract".to_string(),
+            tx_hash: "a".repeat(64),
+            ledger: 1,
+            ledger_closed_at: "2026-01-01T00:00:00Z".to_string(),
+            ledger_hash: None,
+            in_successful_call: true,
+            value: json!({}),
+            topic: None,
+        };
+
+        // Send the event after a short delay so the WS handler has time to subscribe
+        let tx_clone = event_tx.clone();
+        let ev_clone = test_event.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = tx_clone.send(ev_clone);
+        });
+
+        // Perform a WebSocket upgrade request
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/ws")
+                    .header("connection", "upgrade")
+                    .header("upgrade", "websocket")
+                    .header("sec-websocket-version", "13")
+                    .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
     }
 }
 
