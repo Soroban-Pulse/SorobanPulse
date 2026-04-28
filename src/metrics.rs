@@ -92,7 +92,12 @@ pub fn record_replay_job() {
 }
 
 /// Record HTTP request duration
-pub fn record_http_request_duration(duration: std::time::Duration, method: &str, route: &str, status: &str) {
+pub fn record_http_request_duration(
+    duration: std::time::Duration,
+    method: &str,
+    route: &str,
+    status: &str,
+) {
     m::histogram!("soroban_pulse_http_request_duration_seconds", duration.as_secs_f64(), "method" => method.to_string(), "route" => route.to_string(), "status" => status.to_string());
 }
 
@@ -213,7 +218,7 @@ mod tests {
             .min_connections(1)
             .connect_lazy("postgres://localhost/test")
             .unwrap();
-        
+
         // This should not panic
         update_db_pool_metrics(&pool);
         assert!(true);

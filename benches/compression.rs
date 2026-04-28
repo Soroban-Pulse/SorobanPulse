@@ -24,7 +24,10 @@ fn generate_events_json(count: usize) -> Vec<u8> {
         }
         let event = format!(
             r#"{{"id":"00000000-0000-0000-0000-{:012}","contract_id":"CABC{}","event_type":"contract","tx_hash":"abc{}","ledger":{},"timestamp":"2026-03-14T00:00:00Z","event_data":{{"value":{{}},"topic":[]}},"created_at":"2026-03-14T00:00:01Z"}}"#,
-            i, i % 100, i, 1000000 + i
+            i,
+            i % 100,
+            i,
+            1000000 + i
         );
         buf.extend_from_slice(event.as_bytes());
     }
@@ -73,9 +76,7 @@ fn bench_no_compression(c: &mut Criterion) {
     for size in [10, 100, 1000] {
         let json = generate_events_json(size);
         group.bench_with_input(BenchmarkId::from_parameter(size), &json, |b, json| {
-            b.iter(|| {
-                black_box(json.len())
-            });
+            b.iter(|| black_box(json.len()));
         });
     }
     group.finish();

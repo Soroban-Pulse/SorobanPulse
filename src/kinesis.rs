@@ -40,15 +40,18 @@ pub mod aws {
                 .await;
             let client = Client::new(&sdk_config);
             info!(stream = %stream_name, "Kinesis publisher initialised");
-            Self { client, stream_name }
+            Self {
+                client,
+                stream_name,
+            }
         }
     }
 
     #[async_trait]
     impl KinesisPublisher for AwsKinesisPublisher {
         async fn publish(&self, event: &SorobanEvent) -> Result<(), String> {
-            let payload = serde_json::to_vec(event)
-                .map_err(|e| format!("serialisation error: {e}"))?;
+            let payload =
+                serde_json::to_vec(event).map_err(|e| format!("serialisation error: {e}"))?;
 
             self.client
                 .put_record()
@@ -132,13 +135,19 @@ mod tests {
 
     #[tokio::test]
     async fn mock_publisher_returns_error_on_failure() {
-        let mock = MockKinesisPublisher { fail: true, ..Default::default() };
+        let mock = MockKinesisPublisher {
+            fail: true,
+            ..Default::default()
+        };
         assert!(mock.publish(&make_event()).await.is_err());
     }
 
     #[tokio::test]
     async fn publish_event_does_not_panic_on_failure() {
-        let mock = MockKinesisPublisher { fail: true, ..Default::default() };
+        let mock = MockKinesisPublisher {
+            fail: true,
+            ..Default::default()
+        };
         // Should not panic or propagate the error
         publish_event(&mock, &make_event()).await;
     }

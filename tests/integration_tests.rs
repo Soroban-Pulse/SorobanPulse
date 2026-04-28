@@ -15,7 +15,17 @@ fn make_router(pool: PgPool, api_key: Option<String>) -> axum::Router {
     let prometheus_handle = init_metrics();
     let api_keys = api_key.into_iter().collect();
     let config = soroban_pulse::config::Config::default();
-    create_router(pool, api_keys, &[], 60, health_state, indexer_state, prometheus_handle, 15000, config)
+    create_router(
+        pool,
+        api_keys,
+        &[],
+        60,
+        health_state,
+        indexer_state,
+        prometheus_handle,
+        15000,
+        config,
+    )
 }
 
 // --- Health ---
@@ -25,7 +35,12 @@ async fn health_ready_with_live_db_returns_200(pool: PgPool) {
     let app = make_router(pool, None);
 
     let resp = app
-        .oneshot(Request::builder().uri("/healthz/ready").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/healthz/ready")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -44,7 +59,12 @@ async fn request_without_api_key_returns_401_when_key_configured(pool: PgPool) {
     let app = make_router(pool, Some("secret".to_string()));
 
     let resp = app
-        .oneshot(Request::builder().uri("/v1/events").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -92,7 +112,12 @@ async fn health_endpoint_bypasses_auth(pool: PgPool) {
     let app = make_router(pool, Some("secret".to_string()));
 
     let resp = app
-        .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -106,7 +131,12 @@ async fn unversioned_events_route_returns_deprecation_header(pool: PgPool) {
     let app = make_router(pool, None);
 
     let resp = app
-        .oneshot(Request::builder().uri("/events").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/events")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -128,13 +158,23 @@ async fn metrics_endpoint_returns_prometheus_text(pool: PgPool) {
     let app = make_router(pool, None);
 
     let resp = app
-        .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/metrics")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let body =
-        String::from_utf8(to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap();
+    let body = String::from_utf8(
+        to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
     assert!(body.contains("soroban_pulse"));
 }
 
@@ -278,7 +318,10 @@ async fn sse_contract_stream_establishes_successfully(pool: PgPool) {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), "text/event-stream");
+    assert_eq!(
+        resp.headers().get(header::CONTENT_TYPE).unwrap(),
+        "text/event-stream"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -388,7 +431,9 @@ async fn get_events_default_sort_is_desc(pool: PgPool) {
         serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
     let data = body["data"].as_array().unwrap();
     // Default is desc — first element should have the highest ledger
-    assert!(data[0]["ledger"].as_i64().unwrap() >= data[data.len() - 1]["ledger"].as_i64().unwrap());
+    assert!(
+        data[0]["ledger"].as_i64().unwrap() >= data[data.len() - 1]["ledger"].as_i64().unwrap()
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -495,7 +540,12 @@ async fn stats_returns_200_with_correct_totals(pool: PgPool) {
     let app = make_router(pool, None);
 
     let resp = app
-        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -518,7 +568,12 @@ async fn stats_top_contracts_ordered_by_count(pool: PgPool) {
     let app = make_router(pool, None);
 
     let resp = app
-        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -538,13 +593,26 @@ async fn stats_returns_cache_control_header(pool: PgPool) {
     let app = make_router(pool, None);
 
     let resp = app
-        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::OK);
-    let cc = resp.headers().get("cache-control").unwrap().to_str().unwrap();
-    assert!(cc.contains("max-age=60"), "expected max-age=60 in Cache-Control, got: {cc}");
+    let cc = resp
+        .headers()
+        .get("cache-control")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(
+        cc.contains("max-age=60"),
+        "expected max-age=60 in Cache-Control, got: {cc}"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -552,7 +620,12 @@ async fn stats_empty_db_returns_zeros(pool: PgPool) {
     let app = make_router(pool, None);
 
     let resp = app
-        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 
@@ -571,7 +644,12 @@ async fn stats_requires_auth_when_key_configured(pool: PgPool) {
     let app = make_router(pool, Some("secret".to_string()));
 
     let resp = app
-        .oneshot(Request::builder().uri("/v1/events/stats").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/v1/events/stats")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
 

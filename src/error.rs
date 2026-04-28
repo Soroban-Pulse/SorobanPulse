@@ -1,8 +1,12 @@
-use thiserror::Error;
-use axum::{http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
 use serde::Serialize;
-use uuid::Uuid;
 use std::cell::RefCell;
+use thiserror::Error;
+use uuid::Uuid;
 
 thread_local! {
     static REQUEST_ID: RefCell<Option<String>> = RefCell::new(None);
@@ -69,25 +73,41 @@ impl IntoResponse for AppError {
                     error = %e,
                     "Database error"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "DATABASE_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                    "DATABASE_ERROR",
+                )
             }
             AppError::Http(e) => {
                 tracing::error!(
                     error = %e,
                     "HTTP error"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "INTERNAL_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                    "INTERNAL_ERROR",
+                )
             }
             AppError::Internal(msg) => {
                 tracing::error!(
                     error = %msg,
                     "Internal error"
                 );
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "INTERNAL_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                    "INTERNAL_ERROR",
+                )
             }
         };
 
-        let body = ErrorResponse { error: message, code, correlation_id };
+        let body = ErrorResponse {
+            error: message,
+            code,
+            correlation_id,
+        };
         (status, Json(body)).into_response()
     }
 }
@@ -108,14 +128,22 @@ impl AppError {
                     });
                     return (StatusCode::SERVICE_UNAVAILABLE, Json(body));
                 }
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "DATABASE_ERROR")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal server error".to_string(),
+                    "DATABASE_ERROR",
+                )
             }
-            AppError::Http(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "INTERNAL_ERROR")
-            }
-            AppError::Internal(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal server error".to_string(), "INTERNAL_ERROR")
-            }
+            AppError::Http(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+                "INTERNAL_ERROR",
+            ),
+            AppError::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error".to_string(),
+                "INTERNAL_ERROR",
+            ),
         };
 
         let body = serde_json::json!({

@@ -7,8 +7,13 @@ use crate::models::{GetEventsResult, LatestLedgerResult, RpcResponse};
 
 #[async_trait]
 pub trait RpcClient: Send + Sync {
-    async fn get_latest_ledger(&self, url: &str) -> Result<RpcResponse<LatestLedgerResult>, String>;
-    async fn get_events(&self, url: &str, params: Value) -> Result<RpcResponse<GetEventsResult>, String>;
+    async fn get_latest_ledger(&self, url: &str)
+        -> Result<RpcResponse<LatestLedgerResult>, String>;
+    async fn get_events(
+        &self,
+        url: &str,
+        params: Value,
+    ) -> Result<RpcResponse<GetEventsResult>, String>;
 }
 
 pub struct HttpRpcClient {
@@ -23,7 +28,10 @@ impl HttpRpcClient {
 
 #[async_trait]
 impl RpcClient for HttpRpcClient {
-    async fn get_latest_ledger(&self, url: &str) -> Result<RpcResponse<LatestLedgerResult>, String> {
+    async fn get_latest_ledger(
+        &self,
+        url: &str,
+    ) -> Result<RpcResponse<LatestLedgerResult>, String> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -41,7 +49,11 @@ impl RpcClient for HttpRpcClient {
             .map_err(|e| e.to_string())
     }
 
-    async fn get_events(&self, url: &str, params: Value) -> Result<RpcResponse<GetEventsResult>, String> {
+    async fn get_events(
+        &self,
+        url: &str,
+        params: Value,
+    ) -> Result<RpcResponse<GetEventsResult>, String> {
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -93,7 +105,10 @@ pub mod mock {
 
     #[async_trait]
     impl RpcClient for MockRpcClient {
-        async fn get_latest_ledger(&self, _url: &str) -> Result<RpcResponse<LatestLedgerResult>, String> {
+        async fn get_latest_ledger(
+            &self,
+            _url: &str,
+        ) -> Result<RpcResponse<LatestLedgerResult>, String> {
             let responses = self.responses.lock().unwrap();
             if let Some(response) = responses.get("getLatestLedger") {
                 serde_json::from_value(response.clone())
@@ -103,7 +118,11 @@ pub mod mock {
             }
         }
 
-        async fn get_events(&self, _url: &str, _params: Value) -> Result<RpcResponse<GetEventsResult>, String> {
+        async fn get_events(
+            &self,
+            _url: &str,
+            _params: Value,
+        ) -> Result<RpcResponse<GetEventsResult>, String> {
             let responses = self.responses.lock().unwrap();
             if let Some(response) = responses.get("getEvents") {
                 serde_json::from_value(response.clone())
