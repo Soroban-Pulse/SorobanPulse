@@ -5,6 +5,7 @@
     clippy::missing_panics_doc,      // panics only on misconfiguration at startup
     clippy::wildcard_imports,        // used sparingly in test modules only
 )]
+mod bloom_filter;
 mod config;
 mod db;
 mod encryption;
@@ -13,17 +14,17 @@ mod handlers;
 mod index_monitor;
 mod indexer;
 mod kafka;
+mod kinesis;
 mod metrics;
 mod middleware;
 mod models;
 mod normalizer;
+mod pubsub;
 mod routes;
 mod rpc_client;
+mod subscriptions;
 mod webhook;
-mod bloom_filter;
 mod xdr_validation;
-mod kinesis;
-mod pubsub;
 
 #[cfg(feature = "archive")]
 mod archiver;
@@ -46,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let log_format = std::env::var("RUST_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
-    
+
     let registry = tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()));
 
@@ -54,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let registry = {
         let otel_endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
             .unwrap_or_else(|_| "http://localhost:4317".to_string());
-        
+
         let tracer = opentelemetry_otlp::new_pipeline()
             .tracing()
             .with_exporter(
@@ -64,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
             )
             .install_simple()
             .expect("Failed to initialize OpenTelemetry tracer");
-        
+
         registry.with(OpenTelemetryLayer::new(tracer))
     };
 
@@ -73,9 +74,7 @@ async fn main() -> anyhow::Result<()> {
             .with(tracing_subscriber::fmt::layer().json())
             .init();
     } else {
-        registry
-            .with(tracing_subscriber::fmt::layer())
-            .init();
+        registry.with(tracing_subscriber::fmt::layer()).init();
     }
 
     // Initialize metrics exporter
@@ -125,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     };
-    
+
     let _ = db::run_migrations(&pool).await;
 
     // Create read pool: use replica URL if configured, otherwise reuse primary pool.
@@ -154,6 +153,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Migrations applied successfully");
     info!(environment = ?config.environment, "Running environment");
+
+    // Initialize schema validator and load schemas
+    let schema_validator = Arc::new(soroban_pulse::schema_validator::SchemaValidator::new(pool.clone()));
+    if let Err(e) = schema_validator.load_schemas().await {
+        warn!(error = %e, "Failed to load schemas from database");
+    } else {
+        info!("Schema validator initialized");
+    }
 
     // Create shared health state for indexer and HTTP handlers
     let health_state = Arc::new(config::HealthState::new(config.indexer_stall_timeout_secs));
@@ -197,7 +204,10 @@ async fn main() -> anyhow::Result<()> {
                         tokio::spawn(webhook::deliver(client, url, secret, event));
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        warn!(skipped = n, "Webhook subscriber lagged, some events skipped");
+                        warn!(
+                            skipped = n,
+                            "Webhook subscriber lagged, some events skipped"
+                        );
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -205,9 +215,27 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Spawn Redis publisher if configured
+    if let (Some(redis_url), Some(redis_stream_key)) = (&config.redis_url, &config.redis_stream_key) {
+        let redis_rx = event_tx.subscribe();
+        let redis_url = redis_url.clone();
+        let redis_stream_key = redis_stream_key.clone();
+
+        info!(stream_key = %redis_stream_key, "Redis publisher enabled");
+
+        tokio::spawn(async move {
+            queue_publisher::spawn_redis_publisher(redis_url, redis_stream_key, redis_rx).await;
+        });
+    }
+
     // Spawn background indexer with health state
     let rpc_client = indexer::SorobanRpcClient::new(&config);
-    let mut indexer = indexer::Indexer::new(pool.clone(), config.clone(), shutdown_rx.clone(), rpc_client);
+    let mut indexer = indexer::Indexer::new(
+        pool.clone(),
+        config.clone(),
+        shutdown_rx.clone(),
+        rpc_client,
+    );
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
@@ -227,7 +255,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Issue #265: Initialize Kinesis publisher if configured
     #[cfg(feature = "kinesis")]
-    if let (Some(stream_name), Some(region)) = (config.kinesis_stream_name.clone(), config.aws_region.clone()) {
+    if let (Some(stream_name), Some(region)) = (
+        config.kinesis_stream_name.clone(),
+        config.aws_region.clone(),
+    ) {
         let publisher = kinesis::aws::AwsKinesisPublisher::from_env(stream_name, region).await;
         indexer.set_kinesis_publisher(std::sync::Arc::new(publisher));
         info!("Kinesis publisher enabled");
@@ -235,7 +266,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Issue #264: Initialize Pub/Sub publisher if configured
     #[cfg(feature = "pubsub")]
-    if let (Some(project_id), Some(topic_id)) = (config.pubsub_project_id.clone(), config.pubsub_topic_id.clone()) {
+    if let (Some(project_id), Some(topic_id)) = (
+        config.pubsub_project_id.clone(),
+        config.pubsub_topic_id.clone(),
+    ) {
         match pubsub::gcp::GcpPubSubPublisher::from_env(project_id, topic_id).await {
             Ok(publisher) => {
                 indexer.set_pubsub_publisher(std::sync::Arc::new(publisher));
@@ -247,7 +281,11 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "kafka")]
     if let (Some(brokers), Some(topic)) = (&config.kafka_brokers, &config.kafka_topic) {
-        match crate::kafka::RdKafkaProducer::new(brokers, config.kafka_batch_size, config.kafka_linger_ms) {
+        match crate::kafka::RdKafkaProducer::new(
+            brokers,
+            config.kafka_batch_size,
+            config.kafka_linger_ms,
+        ) {
             Ok(producer) => {
                 info!(brokers = %brokers, topic = %topic, "Kafka publishing enabled");
                 indexer.set_kafka_publisher(std::sync::Arc::new(producer), topic.clone());
@@ -262,12 +300,17 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Spawn index usage monitoring background task
-    index_monitor::spawn(pool.clone(), config.index_check_interval_hours, shutdown_rx.clone());
+    index_monitor::spawn(
+        pool.clone(),
+        config.index_check_interval_hours,
+        shutdown_rx.clone(),
+    );
 
     async fn shutdown_signal() {
         #[cfg(unix)]
         {
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {},
                 _ = sigterm.recv() => {},
@@ -295,9 +338,29 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
     info!(origins = ?config.allowed_origins, "Allowed CORS origins");
-    info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
+    info!(
+        rate_limit = config.rate_limit_per_minute,
+        "Rate limit per IP"
+    );
 
-    let router = routes::create_router_with_tx(pool, read_pool, config.api_keys.clone(), &config.allowed_origins, config.rate_limit_per_minute, config.behind_proxy, health_state, indexer_state, prometheus_handle, event_tx, config.sse_keepalive_interval_ms, config.sse_max_connections, 2000, config.event_data_encryption_key, config.event_data_encryption_key_old, config.clone());
+    let router = routes::create_router_with_tx(
+        pool,
+        read_pool,
+        config.api_keys.clone(),
+        &config.allowed_origins,
+        config.rate_limit_per_minute,
+        config.behind_proxy,
+        health_state,
+        indexer_state,
+        prometheus_handle,
+        event_tx,
+        config.sse_keepalive_interval_ms,
+        config.sse_max_connections,
+        2000,
+        config.event_data_encryption_key,
+        config.event_data_encryption_key_old,
+        config.clone(),
+    );
 
     info!(addr = %addr, "Soroban Pulse listening");
 
@@ -306,16 +369,16 @@ async fn main() -> anyhow::Result<()> {
         e
     })?;
 
-    info!(behind_proxy = config.behind_proxy, "Running server - trusting X-Forwarded-For");
+    info!(
+        behind_proxy = config.behind_proxy,
+        "Running server - trusting X-Forwarded-For"
+    );
 
-    axum::serve(
-        listener,
-        router,
-    )
-    .with_graceful_shutdown(async move {
-        let _ = shutdown_rx_axum.changed().await;
-    })
-    .await?;
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx_axum.changed().await;
+        })
+        .await?;
     let _ = indexer_handle.await;
 
     #[cfg(feature = "otel")]

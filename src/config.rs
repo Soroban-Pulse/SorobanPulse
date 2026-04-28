@@ -200,12 +200,14 @@ pub struct Config {
     // Issue #264: GCP Pub/Sub streaming
     pub pubsub_project_id: Option<String>,
     pub pubsub_topic_id: Option<String>,
-    /// AES-256-GCM key for encrypting event_data at the application level.
-    /// Set via EVENT_DATA_ENCRYPTION_KEY (64 hex chars = 32 bytes).
-    pub event_data_encryption_key: Option<[u8; 32]>,
-    /// Previous encryption key for key rotation support.
-    /// Set via EVENT_DATA_ENCRYPTION_KEY_OLD.
-    pub event_data_encryption_key_old: Option<[u8; 32]>,
+    /// Maximum allowed size of serialized event_data in bytes.
+    pub max_event_data_bytes: usize,
+    /// Maximum rows for CSV/JSON export.
+    pub export_max_rows: u64,
+    /// Maximum number of entries in the contract count cache.
+    pub contract_count_cache_size: u64,
+    /// TTL in seconds for contract count cache entries.
+    pub contract_count_cache_ttl_secs: u64,
 }
 
 impl Default for Config {
@@ -255,8 +257,10 @@ impl Default for Config {
             aws_region: None,
             pubsub_project_id: None,
             pubsub_topic_id: None,
-            event_data_encryption_key: None,
-            event_data_encryption_key_old: None,
+            max_event_data_bytes: 65536,
+            export_max_rows: 10_000,
+            contract_count_cache_size: 1000,
+            contract_count_cache_ttl_secs: 30,
         }
     }
 }
@@ -299,12 +303,14 @@ fn validate_rpc_url_checked(raw: &str, errors: &mut Vec<String>) -> Option<Strin
 
     if !allow_insecure {
         let host = url.host_str().unwrap_or("");
-        let is_loopback = host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".local");
+        let is_loopback =
+            host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".local");
         let is_private = host.starts_with("10.")
             || host.starts_with("192.168.")
             || host.starts_with("169.254.")
             || (host.starts_with("172.") && {
-                host.split('.').nth(1)
+                host.split('.')
+                    .nth(1)
                     .and_then(|o| o.parse::<u8>().ok())
                     .map(|o| (16..=31).contains(&o))
                     .unwrap_or(false)
@@ -344,7 +350,8 @@ fn resolve_database_url_checked(errors: &mut Vec<String>) -> String {
             errors.push(
                 "  DATABASE_URL is not set. \
                  Expected a PostgreSQL connection string \
-                 (e.g., postgres://user:pass@localhost/soroban_pulse).".to_string(),
+                 (e.g., postgres://user:pass@localhost/soroban_pulse)."
+                    .to_string(),
             );
             String::new()
         }
@@ -390,19 +397,12 @@ fn parse_indexer_event_types_checked(errors: &mut Vec<String>) -> Vec<String> {
         _ => return Vec::new(),
     };
     let valid = ["contract", "diagnostic", "system"];
-    raw.split(',')
+    let mut types = Vec::new();
+    for t in raw
+        .split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
-        .map(|t| {
-            assert!(
-                valid.contains(&t.as_str()),
-                "INDEXER_EVENT_TYPES: unknown event type '{t}' — valid values are: contract, diagnostic, system"
-            );
-            t
-        })
-        .collect()
-    let mut types = Vec::new();
-    for t in raw.split(',').map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()) {
+    {
         if valid.contains(&t.as_str()) {
             types.push(t);
         } else {
@@ -447,7 +447,6 @@ fn parse_hex_key_checked(var: &str, value: &str, errors: &mut Vec<String>) -> Op
     Some(key)
 }
 
-
 /// Parse a required integer env var, pushing a descriptive error on failure.
 fn parse_int<T>(var: &str, raw: &str, example: &str, errors: &mut Vec<String>) -> Option<T>
 where
@@ -476,7 +475,14 @@ fn parse_bool(var: &str, raw: &str, errors: &mut Vec<String>) -> Option<bool> {
 }
 
 /// Parse an integer that must fall within [min, max], pushing a descriptive error on failure.
-fn parse_int_range<T>(var: &str, raw: &str, min: T, max: T, example: &str, errors: &mut Vec<String>) -> Option<T>
+fn parse_int_range<T>(
+    var: &str,
+    raw: &str,
+    min: T,
+    max: T,
+    example: &str,
+    errors: &mut Vec<String>,
+) -> Option<T>
 where
     T: std::str::FromStr + PartialOrd + std::fmt::Display,
 {
@@ -511,16 +517,18 @@ impl Config {
 
     /// Returns only header names (no values) — safe to log.
     pub fn safe_rpc_headers(&self) -> Vec<&str> {
-        self.rpc_headers.iter().map(|(name, _)| name.as_str()).collect()
+        self.rpc_headers
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect()
     }
 
     pub fn from_env() -> Self {
         let file = load_config_file();
         let mut errors: Vec<String> = Vec::new();
 
-        let environment = Environment::from_str(
-            &env_or_file_or("ENVIRONMENT", &file, "development"),
-        );
+        let environment =
+            Environment::from_str(&env_or_file_or("ENVIRONMENT", &file, "development"));
 
         let behind_proxy = env_or_file("BEHIND_PROXY", &file)
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
@@ -531,7 +539,8 @@ impl Config {
             &env_or_file_or("START_LEDGER", &file, "0"),
             "0",
             &mut errors,
-        ).unwrap_or(0);
+        )
+        .unwrap_or(0);
 
         let start_ledger_fallback = env_or_file("START_LEDGER_FALLBACK", &file)
             .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
@@ -542,7 +551,8 @@ impl Config {
             &env_or_file_or("PORT", &file, "3000"),
             "3000",
             &mut errors,
-        ).unwrap_or(3000);
+        )
+        .unwrap_or(3000);
 
         let allowed_origins: Vec<String> = env_or_file_or("ALLOWED_ORIGINS", &file, "*")
             .split(',')
@@ -560,9 +570,12 @@ impl Config {
         let database_url = resolve_database_url_checked(&mut errors);
 
         let stellar_rpc_url = {
-            let raw = env_or_file_or("STELLAR_RPC_URL", &file, "https://soroban-testnet.stellar.org");
-            validate_rpc_url_checked(&raw, &mut errors)
-                .unwrap_or_else(|| raw.clone())
+            let raw = env_or_file_or(
+                "STELLAR_RPC_URL",
+                &file,
+                "https://soroban-testnet.stellar.org",
+            );
+            validate_rpc_url_checked(&raw, &mut errors).unwrap_or_else(|| raw.clone())
         };
 
         let db_max_connections = parse_int::<u32>(
@@ -570,160 +583,193 @@ impl Config {
             &env_or_file_or("DB_MAX_CONNECTIONS", &file, "10"),
             "10",
             &mut errors,
-        ).unwrap_or(10);
+        )
+        .unwrap_or(10);
 
         let db_min_connections = parse_int::<u32>(
             "DB_MIN_CONNECTIONS",
             &env_or_file_or("DB_MIN_CONNECTIONS", &file, "2"),
             "2",
             &mut errors,
-        ).unwrap_or(2);
+        )
+        .unwrap_or(2);
 
         let db_idle_timeout_secs = parse_int::<u64>(
             "DB_IDLE_TIMEOUT_SECS",
             &env_or_file_or("DB_IDLE_TIMEOUT_SECS", &file, "600"),
             "600",
             &mut errors,
-        ).unwrap_or(600);
+        )
+        .unwrap_or(600);
 
         let db_max_lifetime_secs = parse_int::<u64>(
             "DB_MAX_LIFETIME_SECS",
             &env_or_file_or("DB_MAX_LIFETIME_SECS", &file, "1800"),
             "1800",
             &mut errors,
-        ).unwrap_or(1800);
+        )
+        .unwrap_or(1800);
 
         let db_test_before_acquire = parse_bool(
             "DB_TEST_BEFORE_ACQUIRE",
             &env_or_file_or("DB_TEST_BEFORE_ACQUIRE", &file, "true"),
             &mut errors,
-        ).unwrap_or(true);
+        )
+        .unwrap_or(true);
 
         let rpc_connect_timeout_secs = parse_int::<u64>(
             "RPC_CONNECT_TIMEOUT_SECS",
             &env_or_file_or("RPC_CONNECT_TIMEOUT_SECS", &file, "5"),
             "5",
             &mut errors,
-        ).unwrap_or(5);
+        )
+        .unwrap_or(5);
 
         let rpc_request_timeout_secs = parse_int::<u64>(
             "RPC_REQUEST_TIMEOUT_SECS",
             &env_or_file_or("RPC_REQUEST_TIMEOUT_SECS", &file, "30"),
             "30",
             &mut errors,
-        ).unwrap_or(30);
+        )
+        .unwrap_or(30);
 
         let rate_limit_per_minute = parse_int::<u32>(
             "RATE_LIMIT_PER_MINUTE",
             &env_or_file_or("RATE_LIMIT_PER_MINUTE", &file, "60"),
             "60",
             &mut errors,
-        ).unwrap_or(60);
+        )
+        .unwrap_or(60);
 
         let indexer_lag_warn_threshold = parse_int::<u64>(
             "INDEXER_LAG_WARN_THRESHOLD",
             &env_or_file_or("INDEXER_LAG_WARN_THRESHOLD", &file, "100"),
             "100",
             &mut errors,
-        ).unwrap_or(100);
+        )
+        .unwrap_or(100);
 
         let indexer_stall_timeout_secs = parse_int::<u64>(
             "INDEXER_STALL_TIMEOUT_SECS",
             &env_or_file_or("INDEXER_STALL_TIMEOUT_SECS", &file, "60"),
             "60",
             &mut errors,
-        ).unwrap_or(60);
+        )
+        .unwrap_or(60);
 
         let db_statement_timeout_ms = parse_int::<u64>(
             "DB_STATEMENT_TIMEOUT_MS",
             &env_or_file_or("DB_STATEMENT_TIMEOUT_MS", &file, "5000"),
             "5000",
             &mut errors,
-        ).unwrap_or(5000);
+        )
+        .unwrap_or(5000);
 
         let indexer_poll_interval_ms = parse_int_range::<u64>(
             "INDEXER_POLL_INTERVAL_MS",
             &env_or_file_or("INDEXER_POLL_INTERVAL_MS", &file, "5000"),
-            100, 60000, "5000",
+            100,
+            60000,
+            "5000",
             &mut errors,
-        ).unwrap_or(5000);
+        )
+        .unwrap_or(5000);
 
         let indexer_error_backoff_ms = parse_int_range::<u64>(
             "INDEXER_ERROR_BACKOFF_MS",
             &env_or_file_or("INDEXER_ERROR_BACKOFF_MS", &file, "10000"),
-            100, 60000, "10000",
+            100,
+            60000,
+            "10000",
             &mut errors,
-        ).unwrap_or(10000);
+        )
+        .unwrap_or(10000);
 
         let sse_keepalive_interval_ms = parse_int_range::<u64>(
             "SSE_KEEPALIVE_INTERVAL_MS",
             &env_or_file_or("SSE_KEEPALIVE_INTERVAL_MS", &file, "15000"),
-            1000, 60000, "15000",
+            1000,
+            60000,
+            "15000",
             &mut errors,
-        ).unwrap_or(15000);
+        )
+        .unwrap_or(15000);
 
         let sse_max_connections = parse_int_range::<usize>(
             "SSE_MAX_CONNECTIONS",
             &env_or_file_or("SSE_MAX_CONNECTIONS", &file, "1000"),
-            1, usize::MAX, "1000",
+            1,
+            usize::MAX,
+            "1000",
             &mut errors,
-        ).unwrap_or(1000);
+        )
+        .unwrap_or(1000);
 
         let max_body_size_bytes = parse_int::<usize>(
             "MAX_BODY_SIZE_BYTES",
             &env_or_file_or("MAX_BODY_SIZE_BYTES", &file, "1048576"),
             "1048576",
             &mut errors,
-        ).unwrap_or(1024 * 1024);
+        )
+        .unwrap_or(1024 * 1024);
 
         let log_sample_rate = parse_int_range::<u32>(
             "LOG_SAMPLE_RATE",
             &env_or_file_or("LOG_SAMPLE_RATE", &file, "1"),
-            1, u32::MAX, "1",
+            1,
+            u32::MAX,
+            "1",
             &mut errors,
-        ).unwrap_or(1);
+        )
+        .unwrap_or(1);
 
         let contract_count_cache_size = parse_int::<u64>(
             "CONTRACT_COUNT_CACHE_SIZE",
             &env_or_file_or("CONTRACT_COUNT_CACHE_SIZE", &file, "1000"),
             "1000",
             &mut errors,
-        ).unwrap_or(1000);
+        )
+        .unwrap_or(1000);
 
         let contract_count_cache_ttl_secs = parse_int::<u64>(
             "CONTRACT_COUNT_CACHE_TTL_SECS",
             &env_or_file_or("CONTRACT_COUNT_CACHE_TTL_SECS", &file, "30"),
             "30",
             &mut errors,
-        ).unwrap_or(30);
+        )
+        .unwrap_or(30);
 
         let export_max_rows = parse_int::<u64>(
             "EXPORT_MAX_ROWS",
             &env_or_file_or("EXPORT_MAX_ROWS", &file, "10000"),
             "10000",
             &mut errors,
-        ).unwrap_or(10_000);
+        )
+        .unwrap_or(10_000);
 
         let health_check_timeout_ms = parse_int::<u64>(
             "HEALTH_CHECK_TIMEOUT_MS",
             &env_or_file_or("HEALTH_CHECK_TIMEOUT_MS", &file, "2000"),
             "2000",
             &mut errors,
-        ).unwrap_or(2000);
+        )
+        .unwrap_or(2000);
 
         let index_check_interval_hours = parse_int::<u64>(
             "INDEX_CHECK_INTERVAL_HOURS",
             &env_or_file_or("INDEX_CHECK_INTERVAL_HOURS", &file, "24"),
             "24",
             &mut errors,
-        ).unwrap_or(24);
+        )
+        .unwrap_or(24);
 
         let archive_after_days = parse_int::<u32>(
             "ARCHIVE_AFTER_DAYS",
             &env_or_file_or("ARCHIVE_AFTER_DAYS", &file, "30"),
             "30",
             &mut errors,
-        ).unwrap_or(30);
+        )
+        .unwrap_or(30);
 
         let event_data_encryption_key = env_or_file("EVENT_DATA_ENCRYPTION_KEY", &file)
             .and_then(|v| parse_hex_key_checked("EVENT_DATA_ENCRYPTION_KEY", &v, &mut errors));
@@ -736,13 +782,19 @@ impl Config {
 
         // Report all errors at once.
         if !errors.is_empty() {
-            eprintln!("Configuration errors ({} found):\n{}", errors.len(), errors.join("\n"));
+            eprintln!(
+                "Configuration errors ({} found):\n{}",
+                errors.len(),
+                errors.join("\n")
+            );
             panic!("Startup aborted due to configuration errors. Fix the above and restart.");
         }
 
         Self {
             database_url,
-            database_replica_url: env::var("DATABASE_REPLICA_URL").ok().filter(|s| !s.is_empty()),
+            database_replica_url: env::var("DATABASE_REPLICA_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
             stellar_rpc_url,
             rpc_headers,
             start_ledger,
@@ -750,8 +802,12 @@ impl Config {
             port,
             api_keys: {
                 let mut keys = Vec::new();
-                if let Some(key) = env_or_file("API_KEY", &file) { keys.push(key); }
-                if let Some(key) = env_or_file("API_KEY_SECONDARY", &file) { keys.push(key); }
+                if let Some(key) = env_or_file("API_KEY", &file) {
+                    keys.push(key);
+                }
+                if let Some(key) = env_or_file("API_KEY_SECONDARY", &file) {
+                    keys.push(key);
+                }
                 keys
             },
             db_max_connections,
@@ -782,45 +838,33 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            indexer_event_types: parse_indexer_event_types(),
-            event_data_encryption_key: env::var("EVENT_DATA_ENCRYPTION_KEY")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|v| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY", &v)),
-            event_data_encryption_key_old: env::var("EVENT_DATA_ENCRYPTION_KEY_OLD")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|v| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY_OLD", &v)),
-            index_check_interval_hours: env::var("INDEX_CHECK_INTERVAL_HOURS")
-                .unwrap_or_else(|_| "24".to_string())
-                .parse()
-                .expect("INDEX_CHECK_INTERVAL_HOURS must be a number"),
-            health_check_timeout_ms: env::var("HEALTH_CHECK_TIMEOUT_MS")
-                .unwrap_or_else(|_| "2000".to_string())
-                .parse()
-                .expect("HEALTH_CHECK_TIMEOUT_MS must be a number"),
+            indexer_event_types,
+            event_data_encryption_key,
+            event_data_encryption_key_old,
+            index_check_interval_hours,
+            health_check_timeout_ms,
             tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
             tls_key_file: env::var("TLS_KEY_FILE").ok().filter(|s| !s.is_empty()),
-            bloom_filter_fp_rate: env::var("BLOOM_FILTER_FP_RATE")
-                .unwrap_or_else(|_| "0.001".to_string())
+            bloom_filter_fp_rate: env_or_file_or("BLOOM_FILTER_FP_RATE", &file, "0.001")
                 .parse()
-                .expect("BLOOM_FILTER_FP_RATE must be a float"),
-            bloom_filter_capacity: env::var("BLOOM_FILTER_CAPACITY")
-                .unwrap_or_else(|_| "1000000".to_string())
+                .unwrap_or(0.001),
+            bloom_filter_capacity: env_or_file_or("BLOOM_FILTER_CAPACITY", &file, "1000000")
                 .parse()
-                .expect("BLOOM_FILTER_CAPACITY must be a positive integer"),
+                .unwrap_or(1_000_000),
             kinesis_stream_name: env::var("KINESIS_STREAM_NAME").ok().filter(|s| !s.is_empty()),
             aws_region: env::var("AWS_REGION").ok().filter(|s| !s.is_empty()),
             pubsub_project_id: env::var("PUBSUB_PROJECT_ID").ok().filter(|s| !s.is_empty()),
             pubsub_topic_id: env::var("PUBSUB_TOPIC_ID").ok().filter(|s| !s.is_empty()),
-            event_data_encryption_key: env::var("EVENT_DATA_ENCRYPTION_KEY")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY", &s)),
-            event_data_encryption_key_old: env::var("EVENT_DATA_ENCRYPTION_KEY_OLD")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|s| parse_hex_key("EVENT_DATA_ENCRYPTION_KEY_OLD", &s)),
+            max_event_data_bytes: parse_int::<usize>(
+                "MAX_EVENT_DATA_BYTES",
+                &env_or_file_or("MAX_EVENT_DATA_BYTES", &file, "65536"),
+                "65536",
+                &mut errors,
+            )
+            .unwrap_or(65536),
+            export_max_rows,
+            contract_count_cache_size,
+            contract_count_cache_ttl_secs,
         }
     }
 }
@@ -836,7 +880,10 @@ mod tests {
         assert_eq!(Environment::from_str("prod"), Environment::Production);
         assert_eq!(Environment::from_str("staging"), Environment::Staging);
         assert_eq!(Environment::from_str("stage"), Environment::Staging);
-        assert_eq!(Environment::from_str("development"), Environment::Development);
+        assert_eq!(
+            Environment::from_str("development"),
+            Environment::Development
+        );
         assert_eq!(Environment::from_str("dev"), Environment::Development);
         assert_eq!(Environment::from_str("unknown"), Environment::Development);
     }
@@ -851,8 +898,18 @@ mod tests {
     #[test]
     fn test_indexer_state_new() {
         let state = IndexerState::new();
-        assert_eq!(state.current_ledger.load(std::sync::atomic::Ordering::SeqCst), 0);
-        assert_eq!(state.latest_ledger.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .current_ledger
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert_eq!(
+            state
+                .latest_ledger
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
         assert!(state.started_at > 0);
     }
 
@@ -869,7 +926,12 @@ mod tests {
     fn test_health_state_new() {
         let health_state = HealthState::new(60);
         assert_eq!(health_state.indexer_stall_timeout_secs, 60);
-        assert_eq!(health_state.last_indexer_poll.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(
+            health_state
+                .last_indexer_poll
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
     }
 
     #[test]
@@ -888,7 +950,10 @@ mod tests {
     fn test_config_default() {
         let config = Config::default();
         assert_eq!(config.database_url, "postgres://localhost/soroban_pulse");
-        assert_eq!(config.stellar_rpc_url, "https://soroban-testnet.stellar.org");
+        assert_eq!(
+            config.stellar_rpc_url,
+            "https://soroban-testnet.stellar.org"
+        );
         assert_eq!(config.port, 3000);
         assert_eq!(config.start_ledger, 0);
         assert!(!config.start_ledger_fallback);
@@ -948,7 +1013,10 @@ mod tests {
         let mut errors = Vec::new();
         let headers = parse_rpc_headers_checked(&mut errors);
         env::remove_var("STELLAR_RPC_HEADERS");
-        assert_eq!(headers, vec![("X-API-Key".to_string(), "mykey".to_string())]);
+        assert_eq!(
+            headers,
+            vec![("X-API-Key".to_string(), "mykey".to_string())]
+        );
         assert!(errors.is_empty());
     }
 
@@ -1021,7 +1089,10 @@ mod tests {
     #[test]
     fn parse_int_valid_returns_value() {
         let mut errors = Vec::new();
-        assert_eq!(parse_int::<u32>("PORT", "3000", "3000", &mut errors), Some(3000));
+        assert_eq!(
+            parse_int::<u32>("PORT", "3000", "3000", &mut errors),
+            Some(3000)
+        );
         assert!(errors.is_empty());
     }
 
@@ -1060,7 +1131,14 @@ mod tests {
     #[test]
     fn parse_int_range_out_of_range_collects_descriptive_error() {
         let mut errors = Vec::new();
-        let result = parse_int_range::<u64>("INDEXER_POLL_INTERVAL_MS", "50", 100, 60000, "5000", &mut errors);
+        let result = parse_int_range::<u64>(
+            "INDEXER_POLL_INTERVAL_MS",
+            "50",
+            100,
+            60000,
+            "5000",
+            &mut errors,
+        );
         assert!(result.is_none());
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("INDEXER_POLL_INTERVAL_MS"));

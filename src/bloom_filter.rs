@@ -37,7 +37,11 @@ impl EventBloomFilter {
     /// Increments `soroban_pulse_bloom_filter_hits_total` on a hit.
     pub fn check(&self, tx_hash: &str, contract_id: &str, event_type: &str) -> bool {
         let k = Self::key(tx_hash, contract_id, event_type);
-        let hit = self.inner.lock().expect("bloom filter lock poisoned").check(&k);
+        let hit = self
+            .inner
+            .lock()
+            .expect("bloom filter lock poisoned")
+            .check(&k);
         if hit {
             metrics::record_bloom_filter_hit();
         }
@@ -47,7 +51,10 @@ impl EventBloomFilter {
     /// Record that an event has been seen.
     pub fn set(&self, tx_hash: &str, contract_id: &str, event_type: &str) {
         let k = Self::key(tx_hash, contract_id, event_type);
-        self.inner.lock().expect("bloom filter lock poisoned").set(&k);
+        self.inner
+            .lock()
+            .expect("bloom filter lock poisoned")
+            .set(&k);
     }
 
     /// Seed the filter from a list of `(tx_hash, contract_id, event_type)` tuples.

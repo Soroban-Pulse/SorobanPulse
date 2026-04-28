@@ -47,28 +47,23 @@ pub mod gcp {
     #[async_trait]
     impl PubSubPublisher for GcpPubSubPublisher {
         async fn publish(&self, event: &SorobanEvent) -> Result<(), String> {
-            let payload = serde_json::to_vec(event)
-                .map_err(|e| format!("serialisation error: {e}"))?;
+            let payload =
+                serde_json::to_vec(event).map_err(|e| format!("serialisation error: {e}"))?;
 
             let ledger_str = event.ledger.to_string();
-            let msg = Message::new()
-                .set_data(payload)
-                .set_attributes([
-                    ("contract_id", event.contract_id.as_str()),
-                    ("event_type", event.event_type.as_str()),
-                    ("tx_hash", event.tx_hash.as_str()),
-                    ("ledger", ledger_str.as_str()),
-                ]);
+            let msg = Message::new().set_data(payload).set_attributes([
+                ("contract_id", event.contract_id.as_str()),
+                ("event_type", event.event_type.as_str()),
+                ("tx_hash", event.tx_hash.as_str()),
+                ("ledger", ledger_str.as_str()),
+            ]);
 
-            self.publisher
-                .publish(msg)
-                .await
-                .map_err(|e| {
-                    let msg = e.to_string();
-                    error!(topic = %self.topic, error = %msg, "Pub/Sub publish failed");
-                    metrics::record_pubsub_publish_failure();
-                    msg
-                })?;
+            self.publisher.publish(msg).await.map_err(|e| {
+                let msg = e.to_string();
+                error!(topic = %self.topic, error = %msg, "Pub/Sub publish failed");
+                metrics::record_pubsub_publish_failure();
+                msg
+            })?;
 
             Ok(())
         }
@@ -139,13 +134,19 @@ mod tests {
 
     #[tokio::test]
     async fn mock_publisher_returns_error_on_failure() {
-        let mock = MockPubSubPublisher { fail: true, ..Default::default() };
+        let mock = MockPubSubPublisher {
+            fail: true,
+            ..Default::default()
+        };
         assert!(mock.publish(&make_event()).await.is_err());
     }
 
     #[tokio::test]
     async fn publish_event_does_not_panic_on_failure() {
-        let mock = MockPubSubPublisher { fail: true, ..Default::default() };
+        let mock = MockPubSubPublisher {
+            fail: true,
+            ..Default::default()
+        };
         publish_event(&mock, &make_event()).await;
     }
 

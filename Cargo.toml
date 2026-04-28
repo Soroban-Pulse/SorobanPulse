@@ -44,6 +44,9 @@ stellar-xdr = { version = "26", features = ["std", "curr", "serde"] }
 # Issue #266: Bloom filter deduplication
 bloomfilter = "3"
 
+# Issue #268: Contract count cache
+moka = { version = "0.12", features = ["future"] }
+
 # Issue #265: AWS Kinesis streaming (optional, behind kinesis feature flag)
 aws-sdk-kinesis = { version = "1", optional = true }
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }

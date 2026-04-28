@@ -52,7 +52,12 @@ impl RpcClient for MockRpcClient {
             .unwrap_or(Ok(100))
     }
 
-    async fn get_events(&self, _url: &str, _start: u64, _cursor: Option<String>) -> Result<GetEventsResult, String> {
+    async fn get_events(
+        &self,
+        _url: &str,
+        _start: u64,
+        _cursor: Option<String>,
+    ) -> Result<GetEventsResult, String> {
         self.get_events_responses
             .lock()
             .unwrap()
@@ -127,7 +132,10 @@ async fn rpc_unreachable_returns_error(pool: PgPool) {
 
     let indexer = make_indexer(pool, rpc);
     let result = indexer.fetch_and_store_events_pub(100).await;
-    assert!(result.is_err(), "expected Rpc error when RPC is unreachable");
+    assert!(
+        result.is_err(),
+        "expected Rpc error when RPC is unreachable"
+    );
 }
 
 /// After an RPC failure the indexer recovers on the next call when the RPC

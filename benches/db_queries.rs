@@ -59,13 +59,11 @@ async fn seed(pool: &sqlx::PgPool) {
         .await
         .expect("migrations failed");
 
-    let existing: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM events WHERE contract_id = $1",
-    )
-    .bind(HOT_CONTRACT_ID)
-    .fetch_one(pool)
-    .await
-    .unwrap_or(0);
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE contract_id = $1")
+        .bind(HOT_CONTRACT_ID)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
 
     if existing >= HOT_CONTRACT_EVENTS as i64 {
         // Already seeded — skip to keep bench runs fast.
