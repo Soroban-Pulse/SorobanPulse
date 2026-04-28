@@ -108,7 +108,7 @@ pub fn record_http_request_duration(
 
 /// Update the active SSE connections count
 pub fn update_sse_connections(count: usize) {
-    m::gauge!("soroban_pulse_sse_connections_active", count as f64);
+    m::gauge!("soroban_pulse_sse_active_connections", count as f64);
 }
 
 /// Update DB connection pool metrics

@@ -688,15 +688,22 @@ impl Config {
         )
         .unwrap_or(10000);
 
-        let sse_keepalive_interval_ms = parse_int_range::<u64>(
-            "SSE_KEEPALIVE_INTERVAL_MS",
-            &env_or_file_or("SSE_KEEPALIVE_INTERVAL_MS", &file, "15000"),
-            1000,
-            60000,
-            "15000",
-            &mut errors,
-        )
-        .unwrap_or(15000);
+        // SSE_KEEPALIVE_SECS (seconds) takes precedence over SSE_KEEPALIVE_INTERVAL_MS (ms).
+        let sse_keepalive_interval_ms = if let Some(secs_str) = env_or_file("SSE_KEEPALIVE_SECS", &file) {
+            parse_int_range::<u64>("SSE_KEEPALIVE_SECS", &secs_str, 1, 60, "15", &mut errors)
+                .map(|s| s * 1000)
+                .unwrap_or(15000)
+        } else {
+            parse_int_range::<u64>(
+                "SSE_KEEPALIVE_INTERVAL_MS",
+                &env_or_file_or("SSE_KEEPALIVE_INTERVAL_MS", &file, "15000"),
+                1000,
+                60000,
+                "15000",
+                &mut errors,
+            )
+            .unwrap_or(15000)
+        };
 
         let sse_max_connections = parse_int_range::<usize>(
             "SSE_MAX_CONNECTIONS",

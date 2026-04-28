@@ -60,6 +60,7 @@ Open the newly created `.env` file in your editor and fill in your own real valu
 | `HEALTH_CHECK_TIMEOUT_MS`   | Timeout for the health check DB ping     | `2000`                                  |
 | `INDEX_CHECK_INTERVAL_HOURS` | How often the index usage monitor runs (hours) | `24`                             |
 | `RATE_LIMIT_PER_MINUTE` | Maximum requests per IP per minute (0 = unlimited) | `60`                         |
+| `SSE_KEEPALIVE_SECS` | SSE keep-alive ping interval in seconds (1–60) | `15`                              |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | OpenTelemetry OTLP collector endpoint (when built with `otel` feature) | `http://localhost:4317` |
 
 > **Note on Authentication:** You can enable optional API key authentication by setting the `API_KEY` environment variable. When set, all requests (except `/health` and `/healthz/*` endpoints) will require either an `Authorization: Bearer <API_KEY>` or an `X-Api-Key: <API_KEY>` header. If `API_KEY` is unset or omitted from your configuration, authentication is bypassed and all requests pass through.
@@ -166,6 +167,31 @@ Server-Sent Events stream. New events are pushed to connected clients within one
 - Each SSE message is a JSON-serialised event object.
 - The connection is cleaned up automatically when the client disconnects.
 
+#### Keep-alive and reconnection
+
+The server emits a named `event: ping` every `SSE_KEEPALIVE_SECS` seconds (default: 15) so that reverse proxies and browsers do not close idle connections. The ping data is an RFC 3339 timestamp.
+
+When the indexer shuts down, the server emits a final `event: close` before terminating the stream. Clients should treat this as a signal to reconnect.
+
+The browser `EventSource` API reconnects automatically using the `Last-Event-ID` header. The server replays any events missed since that ID on reconnect.
+
+```javascript
+const es = new EventSource('/v1/events/stream');
+
+es.addEventListener('ping', (e) => {
+  // stream is alive, timestamp in e.data
+});
+
+es.addEventListener('close', () => {
+  // server is shutting down — EventSource will reconnect automatically
+});
+
+es.onmessage = (e) => {
+  const event = JSON.parse(e.data);
+  console.log(event);
+};
+```
+
 ```bash
 # Subscribe to all events
 curl -N http://localhost:3000/v1/events/stream
@@ -239,6 +265,7 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_rpc_errors_total` - Total RPC errors
 - `soroban_pulse_http_request_duration_seconds` - HTTP request duration by route, method, and status
 - `soroban_pulse_rate_limit_rejected_total` - Total requests rejected by rate limiting (429 Too Many Requests)
+- `soroban_pulse_sse_active_connections` - Number of currently active SSE connections
 - `soroban_pulse_db_pool_size` - Current number of open database connections
 - `soroban_pulse_db_pool_idle` - Number of idle database connections
 - `soroban_pulse_db_pool_max` - Configured maximum database connections

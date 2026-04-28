@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::http::{header, HeaderMap};
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use axum::response::Response;
 use axum::{
     extract::{Path, Query, State},
@@ -631,23 +631,39 @@ pub async fn stream_events_multi(
     }));
 
     let live_stream = futures::stream::unfold(
-        (rx, ids, keepalive_ms),
-        move |(mut rx, filter_ids, ka)| async move {
+        (rx, ids, keepalive_ms, false),
+        move |(mut rx, filter_ids, ka, closed)| async move {
+            if closed {
+                return None;
+            }
+            let mut interval = tokio::time::interval(Duration::from_millis(ka));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await; // consume the immediate first tick
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if !filter_ids.contains(&event.contract_id) {
-                            continue;
+                tokio::select! {
+                    recv = rx.recv() => match recv {
+                        Ok(event) => {
+                            if !filter_ids.contains(&event.contract_id) {
+                                continue;
+                            }
+                            let data = serde_json::to_string(&event).unwrap_or_default();
+                            let sse = Event::default()
+                                .id(format!("{}-{}", event.tx_hash, event.ledger))
+                                .retry(Duration::from_millis(ka))
+                                .data(data);
+                            return Some((Ok(sse), (rx, filter_ids, ka, false)));
                         }
-                        let data = serde_json::to_string(&event).unwrap_or_default();
-                        let sse = Event::default()
-                            .id(format!("{}-{}", event.tx_hash, event.ledger))
-                            .retry(Duration::from_millis(ka))
-                            .data(data);
-                        return Some((Ok(sse), (rx, filter_ids, ka)));
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            let close_event = Event::default().event("close").data("stream closed");
+                            return Some((Ok(close_event), (rx, filter_ids, ka, true)));
+                        }
+                    },
+                    _ = interval.tick() => {
+                        let ts = chrono::Utc::now().to_rfc3339();
+                        let ping = Event::default().event("ping").data(ts);
+                        return Some((Ok(ping), (rx, filter_ids, ka, false)));
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
             }
         },
@@ -669,11 +685,7 @@ pub async fn stream_events_multi(
         },
     );
 
-    Ok(Sse::new(stream_with_cleanup).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_millis(keepalive_ms))
-            .text("ping"),
-    ))
+    Ok(Sse::new(stream_with_cleanup))
 }
 
 async fn stream_events_internal(
@@ -802,28 +814,42 @@ async fn stream_events_internal(
             field_columns,
             enc_key,
             enc_key_old,
+            false, // closed
         ),
-        move |(mut rx, filter, ka, cols, ek, ek_old)| async move {
+        move |(mut rx, filter, ka, cols, ek, ek_old, closed)| async move {
+            if closed {
+                return None;
+            }
+            let mut interval = tokio::time::interval(Duration::from_millis(ka));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await; // consume the immediate first tick
             loop {
-                match rx.recv().await {
-                    Ok(event) => {
-                        if let Some(ref cid) = filter {
-                            if &event.contract_id != cid {
-                                continue;
+                tokio::select! {
+                    recv = rx.recv() => match recv {
+                        Ok(event) => {
+                            if let Some(ref cid) = filter {
+                                if &event.contract_id != cid {
+                                    continue;
+                                }
                             }
+                            let data = serde_json::to_string(&event).unwrap_or_default();
+                            let sse = Event::default()
+                                .id(format!("{}-{}", event.tx_hash, event.ledger))
+                                .retry(Duration::from_millis(ka))
+                                .data(data);
+                            return Some((Ok(sse), (rx, filter, ka, cols, ek, ek_old, false)));
                         }
-                        let data = match &cols {
-                            Some(_c) => serde_json::to_string(&event).unwrap_or_default(),
-                            None => serde_json::to_string(&event).unwrap_or_default(),
-                        };
-                        let sse = Event::default()
-                            .id(format!("{}-{}", event.tx_hash, event.ledger))
-                            .retry(Duration::from_millis(ka))
-                            .data(data);
-                        return Some((Ok(sse), (rx, filter, ka, cols, ek, ek_old)));
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            let close_event = Event::default().event("close").data("stream closed");
+                            return Some((Ok(close_event), (rx, filter, ka, cols, ek, ek_old, true)));
+                        }
+                    },
+                    _ = interval.tick() => {
+                        let ts = chrono::Utc::now().to_rfc3339();
+                        let ping = Event::default().event("ping").data(ts);
+                        return Some((Ok(ping), (rx, filter, ka, cols, ek, ek_old, false)));
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return None,
                 }
             }
         },
@@ -847,11 +873,7 @@ async fn stream_events_internal(
         },
     );
 
-    Ok(Sse::new(stream_with_cleanup).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_millis(keepalive_ms))
-            .text("ping"),
-    ))
+    Ok(Sse::new(stream_with_cleanup))
 }
 
 /// Decrypt event_data if an encryption key is configured.
@@ -3455,6 +3477,83 @@ mod tests {
         assert_eq!(
             response.headers().get("content-type").unwrap(),
             "text/event-stream"
+        );
+    }
+
+    /// Verify that a named `event: ping` is emitted when no events arrive within the keepalive interval.
+    #[tokio::test]
+    async fn stream_events_emits_named_ping_when_idle() {
+        use axum::body::Body;
+        use futures::StreamExt;
+        use http_body_util::BodyExt;
+        use std::sync::Arc;
+        use tokio::sync::broadcast;
+
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+        let health_state = Arc::new(crate::config::HealthState::new(60));
+        let indexer_state = Arc::new(crate::config::IndexerState::new());
+        let prometheus_handle = crate::metrics::init_metrics();
+        let (event_tx, _) = broadcast::channel::<crate::models::SorobanEvent>(16);
+        let config = crate::config::Config::default();
+
+        // Use a 50 ms keepalive so the test completes quickly.
+        let app = crate::routes::create_router_with_tx(
+            pool.clone(),
+            pool,
+            vec![],
+            &[],
+            0, // rate_limit disabled
+            false,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            event_tx,
+            50,   // keepalive_ms = 50 ms
+            1000,
+            2000,
+            None,
+            None,
+            config,
+            None,
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stream")
+                    .header("Accept", "text/event-stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Collect bytes until we see "event: ping" or timeout after 500 ms.
+        let mut body = response.into_body().into_data_stream();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(500);
+        let mut buf = String::new();
+        loop {
+            tokio::select! {
+                chunk = body.next() => {
+                    match chunk {
+                        Some(Ok(bytes)) => {
+                            buf.push_str(&String::from_utf8_lossy(&bytes));
+                            if buf.contains("event: ping") {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                _ = tokio::time::sleep_until(deadline) => break,
+            }
+        }
+
+        assert!(
+            buf.contains("event: ping"),
+            "expected 'event: ping' in SSE output, got: {buf:?}"
         );
     }
 
