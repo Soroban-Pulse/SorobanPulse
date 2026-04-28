@@ -58,6 +58,7 @@ pub struct AppState {
     pub encryption_key_old: Option<[u8; 32]>,
     pub contract_count_cache: ContractCountCache,
     pub config: crate::config::Config,
+    pub schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -86,6 +87,9 @@ pub struct AppState {
         handlers::replay_events,
         handlers::register_contract_abi,
         handlers::list_archive,
+        handlers::register_contract_schema,
+        handlers::get_contract_schema,
+        handlers::delete_contract_schema,
     ),
     components(schemas(
         crate::models::Event,
@@ -98,6 +102,7 @@ pub struct AppState {
         crate::models::ReplayRequest,
         crate::models::BatchTxRequest,
         crate::models::ErrorResponse,
+        crate::handlers::RegisterSchemaRequest,
     )),
     tags(
         (name = "events", description = "Event indexing endpoints"),
@@ -155,6 +160,7 @@ pub fn create_router_with_tx(
     encryption_key: Option<[u8; 32]>,
     encryption_key_old: Option<[u8; 32]>,
     config: crate::config::Config,
+    schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
 ) -> Router {
     let cors = build_cors(allowed_origins);
     let auth_state = Arc::new(middleware::AuthState { api_keys });
@@ -179,6 +185,7 @@ pub fn create_router_with_tx(
         encryption_key_old,
         contract_count_cache,
         config,
+        schema_validator,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.

@@ -154,6 +154,14 @@ async fn main() -> anyhow::Result<()> {
     info!("Migrations applied successfully");
     info!(environment = ?config.environment, "Running environment");
 
+    // Initialize schema validator and load schemas
+    let schema_validator = Arc::new(soroban_pulse::schema_validator::SchemaValidator::new(pool.clone()));
+    if let Err(e) = schema_validator.load_schemas().await {
+        warn!(error = %e, "Failed to load schemas from database");
+    } else {
+        info!("Schema validator initialized");
+    }
+
     // Create shared health state for indexer and HTTP handlers
     let health_state = Arc::new(config::HealthState::new(config.indexer_stall_timeout_secs));
 
@@ -204,6 +212,19 @@ async fn main() -> anyhow::Result<()> {
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }
+        });
+    }
+
+    // Spawn Redis publisher if configured
+    if let (Some(redis_url), Some(redis_stream_key)) = (&config.redis_url, &config.redis_stream_key) {
+        let redis_rx = event_tx.subscribe();
+        let redis_url = redis_url.clone();
+        let redis_stream_key = redis_stream_key.clone();
+
+        info!(stream_key = %redis_stream_key, "Redis publisher enabled");
+
+        tokio::spawn(async move {
+            queue_publisher::spawn_redis_publisher(redis_url, redis_stream_key, redis_rx).await;
         });
     }
 
