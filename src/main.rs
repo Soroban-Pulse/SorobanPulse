@@ -16,6 +16,8 @@ mod index_monitor;
 mod indexer;
 mod kafka;
 mod kinesis;
+#[cfg(feature = "lua")]
+mod lua_transform;
 mod metrics;
 mod middleware;
 mod models;
@@ -326,6 +328,28 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Initialize Lua transformer if configured
+    #[cfg(feature = "lua")]
+    if let Some(ref script_path) = config.event_transform_script {
+        match soroban_pulse::lua_transform::LuaTransformer::new(
+            std::path::Path::new(script_path),
+            config.event_transform_timeout_ms,
+        ) {
+            Ok(transformer) => {
+                info!(
+                    script_path = %script_path,
+                    timeout_ms = config.event_transform_timeout_ms,
+                    "Lua event transformer enabled"
+                );
+                indexer.set_lua_transformer(std::sync::Arc::new(transformer));
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to initialize Lua transformer — transformation disabled");
+            }
+        }
+    }
+
     let indexer_handle = tokio::spawn(async move {
         indexer.run().await;
     });

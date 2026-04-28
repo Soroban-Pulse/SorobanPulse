@@ -216,6 +216,9 @@ pub struct Config {
     pub email_from: Option<String>,
     pub email_to: Vec<String>,
     pub email_contract_filter: Vec<String>,
+    // Lua event transformation
+    pub event_transform_script: Option<String>,
+    pub event_transform_timeout_ms: u64,
 }
 
 impl Default for Config {
@@ -276,6 +279,8 @@ impl Default for Config {
             email_from: None,
             email_to: Vec::new(),
             email_contract_filter: Vec::new(),
+            event_transform_script: None,
+            event_transform_timeout_ms: 100,
         }
     }
 }
@@ -903,6 +908,14 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            event_transform_script: env_or_file("EVENT_TRANSFORM_SCRIPT", &file),
+            event_transform_timeout_ms: parse_int::<u64>(
+                "EVENT_TRANSFORM_TIMEOUT_MS",
+                &env_or_file_or("EVENT_TRANSFORM_TIMEOUT_MS", &file, "100"),
+                "100",
+                &mut errors,
+            )
+            .unwrap_or(100),
         }
     }
 }

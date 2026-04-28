@@ -57,12 +57,16 @@ google-cloud-pubsub = { version = "0.33", optional = true }
 # Email notifications
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
+# Issue #XXX: Lua scripting for event transformation (optional, behind lua feature flag)
+mlua = { version = "0.9", features = ["lua54", "async", "serialize"], optional = true }
+
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
 encryption = ["aes-gcm", "rand"]
 kinesis = ["aws-sdk-kinesis", "aws-config"]
 pubsub = ["google-cloud-pubsub"]
 archive = []
+lua = ["mlua"]
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }

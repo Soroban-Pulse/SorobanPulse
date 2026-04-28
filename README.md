@@ -218,6 +218,50 @@ Configure email notifications by setting `EMAIL_SMTP_HOST`, `EMAIL_FROM`, and `E
 
 See [docs/email-notifications.md](docs/email-notifications.md) for detailed configuration instructions and examples for Gmail, SendGrid, and AWS SES.
 
+## Optional Features
+
+Soroban Pulse supports several optional features that can be enabled at compile time or through configuration.
+
+### Lua Event Transformation
+
+Transform or filter events before storage using Lua scripts. This allows deployments to customize event processing without forking the codebase.
+
+**Build with Lua support:**
+```bash
+cargo build --release --features lua
+```
+
+**Configuration:**
+```bash
+EVENT_TRANSFORM_SCRIPT=/path/to/transform.lua
+EVENT_TRANSFORM_TIMEOUT_MS=100
+```
+
+**Example script:**
+```lua
+function transform_event(event)
+    -- Skip diagnostic events
+    if event.event_type == "diagnostic" then
+        return nil
+    end
+    
+    -- Add metadata
+    event.value.indexed_at = os.time()
+    
+    return event
+end
+```
+
+See [docs/lua-transformation.md](docs/lua-transformation.md) for complete documentation and examples.
+
+### Other Optional Features
+
+- **OpenTelemetry**: Build with `--features otel` for distributed tracing
+- **Encryption**: Build with `--features encryption` for event data encryption
+- **Kinesis**: Build with `--features kinesis` for AWS Kinesis streaming
+- **Pub/Sub**: Build with `--features pubsub` for GCP Pub/Sub streaming
+- **Archive**: Build with `--features archive` for event archival
+
 ## Notes
 
 - The indexer polls every 5 seconds when no new ledgers are available, and 10 seconds on error.

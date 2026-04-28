@@ -7,6 +7,8 @@ pub mod error;
 pub mod handlers;
 pub mod indexer;
 pub mod kinesis;
+#[cfg(feature = "lua")]
+pub mod lua_transform;
 pub mod metrics;
 pub mod middleware;
 pub mod models;
