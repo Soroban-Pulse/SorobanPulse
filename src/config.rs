@@ -44,6 +44,8 @@ pub struct IndexerState {
     pub latest_ledger: AtomicU64,
     /// True when this replica holds the advisory lock and is actively indexing.
     pub is_active_indexer: AtomicBool,
+    /// True when the indexer loop has been paused via the admin API.
+    pub is_paused: AtomicBool,
     started_at: u64,
 }
 
@@ -57,6 +59,7 @@ impl IndexerState {
             current_ledger: AtomicU64::new(0),
             latest_ledger: AtomicU64::new(0),
             is_active_indexer: AtomicBool::new(false),
+            is_paused: AtomicBool::new(false),
             started_at,
         }
     }
