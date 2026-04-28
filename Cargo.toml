@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
 serde = { version = "1", features = ["derive"] }
@@ -54,12 +54,19 @@ aws-config = { version = "1", features = ["behavior-version-latest"], optional =
 # Issue #264: GCP Pub/Sub streaming (optional, behind pubsub feature flag)
 google-cloud-pubsub = { version = "0.33", optional = true }
 
+# Email notifications
+lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
+
+# Issue #XXX: Lua scripting for event transformation (optional, behind lua feature flag)
+mlua = { version = "0.9", features = ["lua54", "async", "serialize"], optional = true }
+
 [features]
 otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
 encryption = ["aes-gcm", "rand"]
 kinesis = ["aws-sdk-kinesis", "aws-config"]
 pubsub = ["google-cloud-pubsub"]
 archive = []
+lua = ["mlua"]
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
@@ -80,3 +87,11 @@ harness = false
 [[bench]]
 name = "compression"
 harness = false
+
+[features]
+default = []
+otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
+zipkin = ["dep:opentelemetry", "dep:opentelemetry-zipkin", "dep:opentelemetry_sdk"]
+
+[dependencies]
+opentelemetry-zipkin = { version = "0.19", optional = true }

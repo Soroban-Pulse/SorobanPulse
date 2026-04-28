@@ -683,6 +683,82 @@ pub async fn stream_events_multi(
     ))
 }
 
+/// WebSocket event stream. Clients receive events as JSON text frames.
+/// After connecting, a client may send `{"contract_id":"CABC..."}` to filter
+/// by contract, or `{}` / omit the field to receive all events.
+#[utoipa::path(
+    get,
+    path = "/v1/events/ws",
+    tag = "events",
+    params(
+        ("contract_id" = Option<String>, Query, description = "Initial contract ID filter (can also be set via WebSocket message)"),
+    ),
+    responses(
+        (status = 101, description = "WebSocket upgrade"),
+        (status = 400, description = "Invalid contract_id", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn ws_events(
+    State(state): State<AppState>,
+    Query(params): Query<StreamParams>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Result<impl IntoResponse, AppError> {
+    if let Some(ref cid) = params.contract_id {
+        validate_contract_id(cid)?;
+    }
+
+    let initial_filter = params.contract_id.clone();
+    let event_tx = state.event_tx.clone();
+    let enc_key = state.encryption_key;
+    let enc_key_old = state.encryption_key_old;
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        use axum::extract::ws::Message;
+
+        let mut rx = event_tx.subscribe();
+        let mut contract_filter = initial_filter;
+
+        loop {
+            tokio::select! {
+                // Incoming message from client (filter update or close)
+                msg = socket.recv() => {
+                    match msg {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                contract_filter = v.get("contract_id")
+                                    .and_then(|c| c.as_str())
+                                    .map(|s| s.to_string());
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        _ => {}
+                    }
+                }
+                // Outgoing event from broadcast channel
+                result = rx.recv() => {
+                    match result {
+                        Ok(mut event) => {
+                            if let Some(ref cid) = contract_filter {
+                                if &event.contract_id != cid {
+                                    continue;
+                                }
+                            }
+                            event.event_data = decrypt_event_data(&event.event_data, enc_key.as_ref(), enc_key_old.as_ref());
+                            let text = serde_json::to_string(&event).unwrap_or_default();
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    }))
+}
+
 async fn stream_events_internal(
     State(state): State<AppState>,
     contract_filter: Option<String>,

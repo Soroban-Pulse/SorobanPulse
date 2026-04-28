@@ -62,3 +62,14 @@ generate-sdk: ## Generate TypeScript and Python SDKs from OpenAPI spec
 vacuum: ## Run VACUUM ANALYZE on the events table
 	@if [ -z "$$DATABASE_URL" ]; then echo "DATABASE_URL is not set"; exit 1; fi
 	psql "$$DATABASE_URL" -c "VACUUM ANALYZE events;"
+
+.PHONY: run-zipkin zipkin-up zipkin-down
+run-zipkin: ## Run with Zipkin tracing
+	ZIPKIN_ENDPOINT=$${ZIPKIN_ENDPOINT:-http://localhost:9411/api/v2/spans} \
+	cargo run --features zipkin
+
+zipkin-up: ## Start Zipkin container
+	docker run -d -p 9411:9411 --name zipkin openzipkin/zipkin
+
+zipkin-down: ## Stop Zipkin container
+	docker stop zipkin || true && docker rm zipkin || true

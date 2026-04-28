@@ -250,6 +250,8 @@ pub struct Indexer<R: RpcClient> {
     kafka_publisher: Option<Arc<dyn crate::kafka::KafkaPublisher>>,
     #[cfg(feature = "kafka")]
     kafka_topic: Option<String>,
+    #[cfg(feature = "lua")]
+    lua_transformer: Option<Arc<crate::lua_transform::LuaTransformer>>,
 }
 
 impl<R: RpcClient> Indexer<R> {
@@ -275,6 +277,8 @@ impl<R: RpcClient> Indexer<R> {
             kafka_publisher: None,
             #[cfg(feature = "kafka")]
             kafka_topic: None,
+            #[cfg(feature = "lua")]
+            lua_transformer: None,
         }
     }
 
@@ -317,6 +321,12 @@ impl<R: RpcClient> Indexer<R> {
     ) {
         self.kafka_publisher = Some(publisher);
         self.kafka_topic = Some(topic);
+    }
+
+    /// Set the Lua transformer for event transformation.
+    #[cfg(feature = "lua")]
+    pub fn set_lua_transformer(&mut self, transformer: Arc<crate::lua_transform::LuaTransformer>) {
+        self.lua_transformer = Some(transformer);
     }
 
     pub async fn run(&self) {
@@ -624,6 +634,29 @@ impl<R: RpcClient> Indexer<R> {
             let mut db_tx = self.pool.begin().await?;
             let db_start = std::time::Instant::now();
             for event in result.events {
+                // Apply Lua transformation if configured
+                #[cfg(feature = "lua")]
+                let event = if let Some(ref transformer) = self.lua_transformer {
+                    match transformer.transform(event).await {
+                        Ok(Some(transformed)) => transformed,
+                        Ok(None) => {
+                            // Script returned nil, skip this event
+                            total_skipped += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "Lua transformation failed, skipping event"
+                            );
+                            total_skipped += 1;
+                            continue;
+                        }
+                    }
+                } else {
+                    event
+                };
+
                 match self
                     .store_event_in_tx(&mut db_tx, &event, schema_version)
                     .await

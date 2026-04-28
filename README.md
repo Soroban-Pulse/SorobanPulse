@@ -204,6 +204,64 @@ Migrate to `/v1/` paths at your earliest convenience.
 3. New events are inserted with `ON CONFLICT DO NOTHING` to avoid duplicates.
 4. The Axum HTTP server runs concurrently, serving queries against the indexed data.
 
+## Notifications
+
+Soroban Pulse supports two notification mechanisms for real-time event alerts:
+
+### Webhooks
+
+Configure webhook delivery by setting `WEBHOOK_URL`. Each indexed event is POSTed as JSON to the configured URL with up to 3 retries on failure. See the webhook configuration section in `.env.example` for details.
+
+### Email Notifications
+
+Configure email notifications by setting `EMAIL_SMTP_HOST`, `EMAIL_FROM`, and `EMAIL_TO`. Events are batched and sent as a summary email once per minute to avoid flooding recipients. Supports optional contract filtering via `EMAIL_CONTRACT_FILTER`.
+
+See [docs/email-notifications.md](docs/email-notifications.md) for detailed configuration instructions and examples for Gmail, SendGrid, and AWS SES.
+
+## Optional Features
+
+Soroban Pulse supports several optional features that can be enabled at compile time or through configuration.
+
+### Lua Event Transformation
+
+Transform or filter events before storage using Lua scripts. This allows deployments to customize event processing without forking the codebase.
+
+**Build with Lua support:**
+```bash
+cargo build --release --features lua
+```
+
+**Configuration:**
+```bash
+EVENT_TRANSFORM_SCRIPT=/path/to/transform.lua
+EVENT_TRANSFORM_TIMEOUT_MS=100
+```
+
+**Example script:**
+```lua
+function transform_event(event)
+    -- Skip diagnostic events
+    if event.event_type == "diagnostic" then
+        return nil
+    end
+    
+    -- Add metadata
+    event.value.indexed_at = os.time()
+    
+    return event
+end
+```
+
+See [docs/lua-transformation.md](docs/lua-transformation.md) for complete documentation and examples.
+
+### Other Optional Features
+
+- **OpenTelemetry**: Build with `--features otel` for distributed tracing
+- **Encryption**: Build with `--features encryption` for event data encryption
+- **Kinesis**: Build with `--features kinesis` for AWS Kinesis streaming
+- **Pub/Sub**: Build with `--features pubsub` for GCP Pub/Sub streaming
+- **Archive**: Build with `--features archive` for event archival
+
 ## Notes
 
 - The indexer polls every 5 seconds when no new ledgers are available, and 10 seconds on error.
@@ -236,6 +294,8 @@ The service exposes Prometheus-compatible metrics at `GET /metrics`:
 - `soroban_pulse_indexer_latest_ledger` - Latest ledger from RPC
 - `soroban_pulse_indexer_lag_ledgers` - Lag between latest and current ledger
 - `soroban_pulse_rpc_errors_total` - Total RPC errors
+- `soroban_pulse_webhook_failures_total` - Total webhook delivery failures (all retries exhausted)
+- `soroban_pulse_email_failures_total` - Total email notification failures
 - `soroban_pulse_http_request_duration_seconds` - HTTP request duration by route, method, and status
 - `soroban_pulse_db_pool_size` - Current number of open database connections
 - `soroban_pulse_db_pool_idle` - Number of idle database connections
