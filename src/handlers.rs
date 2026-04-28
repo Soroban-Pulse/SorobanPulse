@@ -364,55 +364,62 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
 pub async fn get_event_stats(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     use std::collections::HashMap;
 
-    // Single query: total, 24h, 7d, ledger range, per-type counts, top 10 contracts
-    let rows = sqlx::query(
+    // Total events and ledger range from raw table (fast with index)
+    let totals_row = sqlx::query(
+        "SELECT COUNT(*) AS total_events, MIN(ledger) AS min_ledger, MAX(ledger) AS max_ledger FROM events",
+    )
+    .fetch_one(&state.read_pool)
+    .await?;
+
+    let total_events: i64 = totals_row.try_get("total_events")?;
+    let min_ledger: Option<i64> = totals_row.try_get("min_ledger")?;
+    let max_ledger: Option<i64> = totals_row.try_get("max_ledger")?;
+
+    // Per-type counts and time-windowed counts from events_daily_summary matview
+    let type_rows = sqlx::query(
+        "SELECT event_type, SUM(event_count) AS cnt FROM events_daily_summary GROUP BY event_type",
+    )
+    .fetch_all(&state.read_pool)
+    .await?;
+
+    let mut events_by_type: HashMap<String, i64> = HashMap::new();
+    for row in &type_rows {
+        let et: String = row.try_get("event_type")?;
+        let cnt: i64 = row.try_get("cnt")?;
+        events_by_type.insert(et, cnt);
+    }
+    events_by_type.entry("contract".to_string()).or_insert(0);
+    events_by_type.entry("diagnostic".to_string()).or_insert(0);
+    events_by_type.entry("system".to_string()).or_insert(0);
+
+    // 24h and 7d counts from daily_summary (last 1 and 7 days)
+    let window_row = sqlx::query(
         r#"
         SELECT
-            COUNT(*)                                                        AS total_events,
-            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '24 hours') AS events_last_24h,
-            COUNT(*) FILTER (WHERE timestamp >= NOW() - INTERVAL '7 days')   AS events_last_7d,
-            MIN(ledger)                                                     AS min_ledger,
-            MAX(ledger)                                                     AS max_ledger,
-            COUNT(*) FILTER (WHERE event_type = 'contract')                 AS type_contract,
-            COUNT(*) FILTER (WHERE event_type = 'diagnostic')               AS type_diagnostic,
-            COUNT(*) FILTER (WHERE event_type = 'system')                   AS type_system
-        FROM events
+            COALESCE(SUM(event_count) FILTER (WHERE event_date >= CURRENT_DATE - INTERVAL '1 day'), 0)  AS events_last_24h,
+            COALESCE(SUM(event_count) FILTER (WHERE event_date >= CURRENT_DATE - INTERVAL '7 days'), 0) AS events_last_7d
+        FROM events_daily_summary
         "#,
     )
     .fetch_one(&state.read_pool)
     .await?;
 
-    let total_events: i64 = rows.try_get("total_events")?;
-    let events_last_24h: i64 = rows.try_get("events_last_24h")?;
-    let events_last_7d: i64 = rows.try_get("events_last_7d")?;
-    let min_ledger: Option<i64> = rows.try_get("min_ledger")?;
-    let max_ledger: Option<i64> = rows.try_get("max_ledger")?;
+    let events_last_24h: i64 = window_row.try_get("events_last_24h")?;
+    let events_last_7d: i64 = window_row.try_get("events_last_7d")?;
 
-    let mut events_by_type = HashMap::new();
-    events_by_type.insert(
-        "contract".to_string(),
-        rows.try_get::<i64, _>("type_contract")?,
-    );
-    events_by_type.insert(
-        "diagnostic".to_string(),
-        rows.try_get::<i64, _>("type_diagnostic")?,
-    );
-    events_by_type.insert("system".to_string(), rows.try_get::<i64, _>("type_system")?);
-
+    // Top 10 contracts from events_contract_summary matview
     let top_rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT contract_id, COUNT(*) AS event_count FROM events GROUP BY contract_id ORDER BY event_count DESC LIMIT 10",
+        "SELECT contract_id, event_count FROM events_contract_summary ORDER BY event_count DESC LIMIT 10",
     )
     .fetch_all(&state.read_pool)
     .await?;
 
     let top_contracts = top_rows
         .into_iter()
-        .map(
-            |(contract_id, event_count)| crate::models::ContractStatEntry {
-                contract_id,
-                event_count,
-            },
-        )
+        .map(|(contract_id, event_count)| crate::models::ContractStatEntry {
+            contract_id,
+            event_count,
+        })
         .collect();
 
     let stats = crate::models::EventStats {
@@ -4995,6 +5002,154 @@ mod tests {
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert!(v.get("indexer_paused").is_some(), "indexer_paused must be present in /status");
         assert_eq!(v["indexer_paused"], false);
+    }
+
+    // ── Materialized view stats tests ────────────────────────────────────────
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_empty_db_returns_zeros(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["total_events"], 0);
+        assert_eq!(v["events_last_24h"], 0);
+        assert_eq!(v["events_last_7d"], 0);
+        assert!(v["top_contracts"].as_array().unwrap().is_empty());
+        assert!(v.get("computed_at").is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_reflects_data_after_matview_refresh(pool: PgPool) {
+        // Insert events
+        for i in 0..3_i64 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, NOW(), $5)",
+            )
+            .bind(format!("C{:0>55}", i))
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(i)
+            .bind(json!({}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Manually refresh the materialized views so the test data is visible
+        crate::stats_refresh::refresh_all(&pool).await;
+
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(v["total_events"], 3);
+        // All events inserted with NOW() so they should appear in 24h and 7d windows
+        assert_eq!(v["events_last_24h"], 3);
+        assert_eq!(v["events_last_7d"], 3);
+        assert_eq!(v["top_contracts"].as_array().unwrap().len(), 3);
+        assert_eq!(v["events_by_type"]["contract"], 3);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_top_contracts_ordered_by_count(pool: PgPool) {
+        let contract_a = "CA23456789012345678901234567890123456789012345678901234";
+        let contract_b = "CB23456789012345678901234567890123456789012345678901234";
+
+        // 3 events for A, 1 for B
+        for i in 0..3_i64 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, NOW(), $5)",
+            )
+            .bind(contract_a)
+            .bind("contract")
+            .bind(format!("a{:0>63}", i))
+            .bind(i)
+            .bind(json!({}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, $2, $3, $4, NOW(), $5)",
+        )
+        .bind(contract_b)
+        .bind("contract")
+        .bind("b".repeat(64))
+        .bind(10_i64)
+        .bind(json!({}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        crate::stats_refresh::refresh_all(&pool).await;
+
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+
+        let top = v["top_contracts"].as_array().unwrap();
+        assert_eq!(top[0]["contract_id"], contract_a);
+        assert_eq!(top[0]["event_count"], 3);
+        assert_eq!(top[1]["contract_id"], contract_b);
+        assert_eq!(top[1]["event_count"], 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn get_event_stats_returns_cache_control_header(pool: PgPool) {
+        let app = create_test_router(pool);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let cc = response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(cc.contains("max-age=60"), "expected max-age=60 in Cache-Control, got: {cc}");
     }
 }
 

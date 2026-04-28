@@ -211,6 +211,8 @@ pub struct Config {
     pub contract_count_cache_size: u64,
     /// TTL in seconds for contract count cache entries.
     pub contract_count_cache_ttl_secs: u64,
+    /// How often the materialized view stats are refreshed (seconds).
+    pub stats_refresh_interval_secs: u64,
 }
 
 impl Default for Config {
@@ -264,6 +266,7 @@ impl Default for Config {
             export_max_rows: 10_000,
             contract_count_cache_size: 1000,
             contract_count_cache_ttl_secs: 30,
+            stats_refresh_interval_secs: 300,
         }
     }
 }
@@ -742,6 +745,14 @@ impl Config {
         )
         .unwrap_or(30);
 
+        let stats_refresh_interval_secs = parse_int::<u64>(
+            "STATS_REFRESH_INTERVAL_SECS",
+            &env_or_file_or("STATS_REFRESH_INTERVAL_SECS", &file, "300"),
+            "300",
+            &mut errors,
+        )
+        .unwrap_or(300);
+
         let export_max_rows = parse_int::<u64>(
             "EXPORT_MAX_ROWS",
             &env_or_file_or("EXPORT_MAX_ROWS", &file, "10000"),
@@ -868,6 +879,7 @@ impl Config {
             export_max_rows,
             contract_count_cache_size,
             contract_count_cache_ttl_secs,
+            stats_refresh_interval_secs,
         }
     }
 }

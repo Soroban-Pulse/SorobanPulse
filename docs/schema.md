@@ -128,3 +128,83 @@ Serves dual purpose: enforces the deduplication constraint (see above) and suppo
 | `20260325000001_composite_indices.sql` | Add composite indexes `idx_events_contract_ledger` and `idx_events_tx_ledger`; drop now-redundant single-column indexes. |
 | `20260424000000_gin_index_event_data.sql` | Add GIN index on `event_data` for JSON containment queries (no-transaction migration). |
 | `20260425000001_event_data_validation.sql` | Add `check_event_data_structure` CHECK constraint. |
+
+| `20260425000001_event_data_validation.sql` | Add `check_event_data_structure` CHECK constraint. |
+
+| File | Description |
+|------|-------------|
+| `20260428000002_matview_daily_summary.sql` | Create `events_daily_summary` materialized view and its unique index. |
+| `20260428000003_matview_contract_summary.sql` | Create `events_contract_summary` materialized view and its unique index. |
+| `20260428000004_matview_hourly_volume.sql` | Create `events_hourly_volume` materialized view and its unique index. |
+
+---
+
+## Materialized Views
+
+Three materialized views pre-compute aggregations over the `events` table. They are refreshed every 5 minutes (configurable via `STATS_REFRESH_INTERVAL_SECS`) by a background task using `REFRESH MATERIALIZED VIEW CONCURRENTLY`, which does not lock the view for reads.
+
+Each view has a `UNIQUE` index — required by PostgreSQL for `CONCURRENTLY` refresh.
+
+### `events_daily_summary`
+
+Pre-computes event counts grouped by calendar date and event type.
+
+```sql
+SELECT DATE(timestamp) AS event_date, event_type, COUNT(*) AS event_count
+FROM events
+GROUP BY DATE(timestamp), event_type;
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `event_date` | `DATE` | Calendar date of the events (part of unique key) |
+| `event_type` | `TEXT` | Event type: `contract`, `diagnostic`, or `system` (part of unique key) |
+| `event_count` | `BIGINT` | Number of events on that date with that type |
+
+**Used by:** `GET /v1/events/stats` — per-type totals and 24h/7d windowed counts.
+
+### `events_contract_summary`
+
+Pre-computes total event count and latest ledger per contract.
+
+```sql
+SELECT contract_id, COUNT(*) AS event_count, MAX(ledger) AS latest_ledger
+FROM events
+GROUP BY contract_id;
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `contract_id` | `TEXT` | Stellar contract address (unique key) |
+| `event_count` | `BIGINT` | Total events emitted by this contract |
+| `latest_ledger` | `BIGINT` | Highest ledger sequence seen for this contract |
+
+**Used by:** `GET /v1/events/stats` — top 10 contracts by event count.
+
+### `events_hourly_volume`
+
+Pre-computes event counts per hour for the last 7 days.
+
+```sql
+SELECT DATE_TRUNC('hour', timestamp) AS event_hour, COUNT(*) AS event_count
+FROM events
+WHERE timestamp >= NOW() - INTERVAL '7 days'
+GROUP BY DATE_TRUNC('hour', timestamp);
+```
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `event_hour` | `TIMESTAMPTZ` | Hour bucket (truncated to the hour, unique key) |
+| `event_count` | `BIGINT` | Number of events in that hour |
+
+**Note:** Because the `WHERE` clause uses `NOW()` at view-creation time, the view must be refreshed regularly to keep the 7-day window current. The background refresh task handles this automatically.
+
+### Refresh Background Task
+
+A Tokio task (`src/stats_refresh.rs`) runs at startup and then on a configurable interval:
+
+```
+STATS_REFRESH_INTERVAL_SECS=300   # default: 5 minutes
+```
+
+It issues `REFRESH MATERIALIZED VIEW CONCURRENTLY` for each view in sequence. Failures are logged as errors but do not crash the service — the views simply serve slightly stale data until the next successful refresh.

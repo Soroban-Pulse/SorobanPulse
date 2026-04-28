@@ -22,6 +22,7 @@ mod normalizer;
 mod pubsub;
 mod routes;
 mod rpc_client;
+mod stats_refresh;
 mod subscriptions;
 mod webhook;
 mod xdr_validation;
@@ -306,6 +307,13 @@ async fn main() -> anyhow::Result<()> {
         shutdown_rx.clone(),
     );
 
+    // Spawn materialized-view refresh background task
+    stats_refresh::spawn(
+        pool.clone(),
+        config.stats_refresh_interval_secs,
+        shutdown_rx.clone(),
+    );
+
     async fn shutdown_signal() {
         #[cfg(unix)]
         {
@@ -360,6 +368,7 @@ async fn main() -> anyhow::Result<()> {
         config.event_data_encryption_key,
         config.event_data_encryption_key_old,
         config.clone(),
+        Some(schema_validator),
     );
 
     info!(addr = %addr, "Soroban Pulse listening");
