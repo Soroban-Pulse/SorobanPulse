@@ -62,3 +62,24 @@ generate-sdk: ## Generate TypeScript and Python SDKs from OpenAPI spec
 vacuum: ## Run VACUUM ANALYZE on the events table
 	@if [ -z "$$DATABASE_URL" ]; then echo "DATABASE_URL is not set"; exit 1; fi
 	psql "$$DATABASE_URL" -c "VACUUM ANALYZE events;"
+
+.PHONY: mask-data mask-data-dry-run
+mask-data: ## Mask sensitive event data for non-production environments
+	@echo "Running data masking utility..."
+	@if [ -z "$$DATABASE_URL" ]; then \
+		echo "Error: DATABASE_URL environment variable not set"; \
+		exit 1; \
+	fi
+	@if [ "$$ENVIRONMENT" = "production" ]; then \
+		echo "WARNING: This is production! You have 5 seconds to cancel..."; \
+		sleep 5; \
+	fi
+	cargo run --bin mask_event_data
+
+mask-data-dry-run: ## Preview data masking without applying changes
+	@echo "Dry run - previewing data masking..."
+	@if [ -z "$$DATABASE_URL" ]; then \
+		echo "Error: DATABASE_URL environment variable not set"; \
+		exit 1; \
+	fi
+	cargo run --bin mask_event_data -- --dry-run
