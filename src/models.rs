@@ -87,6 +87,8 @@ pub struct PaginationParams {
     pub from_timestamp: Option<String>,
     /// Filter events at or before this timestamp (ISO 8601 format).
     pub to_timestamp: Option<String>,
+    /// Return event_data as base64-encoded gzip-compressed JSON (default: false).
+    pub compact: Option<bool>,
 }
 
 /// Sort order for event list endpoints.

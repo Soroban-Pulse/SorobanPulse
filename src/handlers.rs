@@ -83,11 +83,33 @@ fn decode_cursor(cursor: &str) -> Result<(i64, Uuid), AppError> {
 }
 
 /// Map sqlx rows to a JSON array, projecting only the requested columns.
+/// Gzip-compress `value` and return a base64-encoded string (standard alphabet, no padding).
+/// Used by the `compact=true` query parameter to shrink large `event_data` payloads.
+fn compact_event_data(value: &Value) -> Result<Value, AppError> {
+    use base64::engine::general_purpose::STANDARD;
+    use flate2::{write::GzEncoder, Compression};
+    use std::io::Write;
+
+    let json_bytes = serde_json::to_vec(value)
+        .map_err(|e| AppError::Internal(format!("serialization error: {e}")))?;
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder
+        .write_all(&json_bytes)
+        .map_err(|e| AppError::Internal(format!("gzip write error: {e}")))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|e| AppError::Internal(format!("gzip finish error: {e}")))?;
+
+    Ok(Value::String(STANDARD.encode(&compressed)))
+}
+
 fn rows_to_json(
     rows: &[sqlx::postgres::PgRow],
     columns: &[&str],
     enc_key: Option<&[u8; 32]>,
     enc_key_old: Option<&[u8; 32]>,
+    compact: bool,
 ) -> Result<Vec<Value>, AppError> {
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
@@ -118,7 +140,11 @@ fn rows_to_json(
                 "event_data" => {
                     let raw: Value = row.try_get::<Value, _>(col)?;
                     let decrypted = decrypt_event_data(&raw, enc_key, enc_key_old);
-                    event.insert(col.to_string(), decrypted);
+                    if compact {
+                        event.insert(col.to_string(), compact_event_data(&decrypted)?);
+                    } else {
+                        event.insert(col.to_string(), decrypted);
+                    }
                 }
                 "event_data_normalized" => { event.insert(col.to_string(), json!(row.try_get::<Option<Value>, _>(col)?)); }
                 "event_data_decoded" => { event.insert(col.to_string(), json!(row.try_get::<Option<Value>, _>(col)?)); }
@@ -1069,9 +1095,10 @@ fn ndjson_response(events: impl Iterator<Item = Value>) -> Response<Body> {
         ("sort" = Option<String>, Query, description = "Sort order: asc (oldest first) or desc (newest first, default)"),
         ("topic_sym" = Option<String>, Query, description = "Filter by first topic symbol (uses topic_0_sym generated column index)"),
         ("search" = Option<String>, Query, description = "Full-text search query for event_data (searches all string values in the JSON)"),
+        ("compact" = Option<bool>, Query, description = "Return event_data as a base64-encoded gzip-compressed JSON string instead of the full JSON object. Clients that need the full data can decode it; clients that only need metadata can ignore it. Default: false."),
     ),
     responses(
-        (status = 200, description = "Paginated list of events (JSON or NDJSON depending on Accept header)",
+        (status = 200, description = "Paginated list of events (JSON or NDJSON depending on Accept header). When compact=true, each event's event_data field is a base64-encoded gzip-compressed JSON string (Content-Encoding: gzip).",
             content(
                 ("application/json" = Value),
                 ("application/x-ndjson" = String),
@@ -1244,6 +1271,7 @@ pub async fn get_events(
             &columns,
             state.encryption_key.as_ref(),
             state.encryption_key_old.as_ref(),
+            params.compact.unwrap_or(false),
         )?;
 
         let want_ndjson = accepts_ndjson(&headers);
@@ -1251,12 +1279,19 @@ pub async fn get_events(
             return Ok(ndjson_response(events.into_iter()));
         }
 
-        return Ok(json_response(json!({
+        let compact_mode = params.compact.unwrap_or(false);
+        let mut resp = json_response(json!({
             "data": events,
             "next_cursor": next_cursor,
             "limit": limit,
-        }))
-        .into_response());
+        }));
+        if compact_mode {
+            resp.headers_mut().insert(
+                "X-Event-Data-Encoding",
+                axum::http::HeaderValue::from_static("gzip+base64"),
+            );
+        }
+        return Ok(resp.into_response());
     }
 
     // Offset-based path (deprecated fallback)
@@ -1376,6 +1411,7 @@ pub async fn get_events(
         &columns,
         state.encryption_key.as_ref(),
         state.encryption_key_old.as_ref(),
+        params.compact.unwrap_or(false),
     )?;
 
     let (total, approximate): (i64, bool) = if exact || !conditions.is_empty() {
@@ -1458,6 +1494,12 @@ pub async fn get_events(
         response
             .headers_mut()
             .insert("Cache-Control", "no-cache".parse().unwrap());
+    }
+    if params.compact.unwrap_or(false) {
+        response.headers_mut().insert(
+            "X-Event-Data-Encoding",
+            axum::http::HeaderValue::from_static("gzip+base64"),
+        );
     }
     Ok(response)
 }
@@ -1913,6 +1955,7 @@ pub async fn get_events_by_tx(
         &columns,
         state.encryption_key.as_ref(),
         state.encryption_key_old.as_ref(),
+        false,
     )?;
 
     Ok(Json(json!({
@@ -1994,6 +2037,7 @@ pub async fn get_events_by_tx_batch(
             all_cols,
             state.encryption_key.as_ref(),
             state.encryption_key_old.as_ref(),
+            false,
         )?;
         if let Some(arr) = result.get_mut(&tx_hash).and_then(|v| v.as_array_mut()) {
             if let Some(ev) = event_json.into_iter().next() {
@@ -2046,6 +2090,7 @@ pub async fn get_events_by_ledger_hash(
         &columns,
         state.encryption_key.as_ref(),
         state.encryption_key_old.as_ref(),
+        false,
     )?;
     Ok(Json(json!({
         "data": events,
@@ -4488,6 +4533,167 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         // No rows → no ETag
         assert!(resp.headers().get("etag").is_none());
+    }
+
+    // compact=true tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn compact_false_returns_full_json_event_data(pool: PgPool) {
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("C1234567890123456789012345678901234567890123456789012345")
+        .bind("contract")
+        .bind("a".repeat(64))
+        .bind(100_i64)
+        .bind(Utc::now())
+        .bind(json!({"topics": ["transfer", "GABC"], "value": 42}))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = create_test_router(pool);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?compact=false")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        // No encoding header when compact is off
+        assert!(resp.headers().get("x-event-data-encoding").is_none());
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let event_data = &v["data"][0]["event_data"];
+        // Full JSON object, not a string
+        assert!(event_data.is_object(), "event_data should be a JSON object when compact=false");
+        assert_eq!(event_data["value"], json!(42));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn compact_true_returns_base64_gzip_event_data(pool: PgPool) {
+        let original = json!({"topics": ["transfer", "GABC"], "value": 42});
+
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, $2, $3, $4, $5, $6)",
+        )
+        .bind("C1234567890123456789012345678901234567890123456789012345")
+        .bind("contract")
+        .bind("a".repeat(64))
+        .bind(100_i64)
+        .bind(Utc::now())
+        .bind(&original)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let app = create_test_router(pool);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?compact=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        // Encoding hint header must be present
+        assert_eq!(
+            resp.headers()
+                .get("x-event-data-encoding")
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip+base64")
+        );
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let event_data = &v["data"][0]["event_data"];
+
+        // Must be a string (base64-encoded)
+        let encoded = event_data.as_str().expect("event_data should be a base64 string when compact=true");
+
+        // Decode base64 → decompress gzip → parse JSON → must equal original
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+
+        let compressed = STANDARD.decode(encoded).expect("valid base64");
+        let mut decoder = GzDecoder::new(compressed.as_slice());
+        let mut json_str = String::new();
+        decoder.read_to_string(&mut json_str).expect("valid gzip");
+        let decoded: Value = serde_json::from_str(&json_str).expect("valid JSON");
+
+        assert_eq!(decoded, original, "decoded compact event_data must equal original");
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn compact_true_with_cursor_pagination(pool: PgPool) {
+        // Insert two events so we can test cursor path
+        for i in 0..2_i64 {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind("C1234567890123456789012345678901234567890123456789012345")
+            .bind("contract")
+            .bind(format!("{:0>64}", i))
+            .bind(100_i64 + i)
+            .bind(Utc::now())
+            .bind(json!({"index": i}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let app = create_test_router(pool);
+
+        // First page — get a cursor
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events?compact=true&limit=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("x-event-data-encoding").and_then(|v| v.to_str().ok()),
+            Some("gzip+base64")
+        );
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let cursor = v["next_cursor"].as_str().expect("next_cursor present");
+
+        // Second page via cursor — event_data must still be compact
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/v1/events?compact=true&limit=1&cursor={cursor}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let body2 = to_bytes(resp2.into_body(), usize::MAX).await.unwrap();
+        let v2: Value = serde_json::from_slice(&body2).unwrap();
+        let event_data = &v2["data"][0]["event_data"];
+        assert!(event_data.is_string(), "event_data should be base64 string on cursor page");
     }
 
     // Replay endpoint tests
