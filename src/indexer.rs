@@ -928,6 +928,18 @@ impl<R: RpcClient> Indexer<R> {
             }
         }
 
+        // Multi-tenant contract filter: skip events whose contract_id is not in
+        // the allow-list for this tenant.
+        if self.config.multi_tenant {
+            if let Some(ref tenant_id) = self.config.indexer_tenant_id {
+                if let Some(allowed) = self.config.tenant_contract_filter.get(tenant_id) {
+                    if !allowed.is_empty() && !allowed.contains(&event.contract_id) {
+                        return Ok(0);
+                    }
+                }
+            }
+        }
+
         if !Self::validate_event_data(event) {
             return Ok(0);
         }
@@ -958,9 +970,15 @@ impl<R: RpcClient> Indexer<R> {
             return Ok(0);
         }
 
+        let tenant_id = if self.config.multi_tenant {
+            self.config.indexer_tenant_id.as_deref()
+        } else {
+            None
+        };
+
         let result = sqlx::query(
-            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, ledger_hash, in_successful_call, event_data_decoded)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, ledger_hash, in_successful_call, event_data_decoded, tenant_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING"#,
         )
         .bind(&event.contract_id)
@@ -972,6 +990,7 @@ impl<R: RpcClient> Indexer<R> {
         .bind(&event.ledger_hash)
         .bind(event.in_successful_call)
         .bind(event_data_decoded)
+        .bind(tenant_id)
         .execute(&mut **tx)
         .await?;
 

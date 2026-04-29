@@ -410,7 +410,25 @@ async fn main() -> anyhow::Result<()> {
         "Rate limit per IP"
     );
 
-    let router = routes::create_router_with_tx(
+    // Clone pool before it is moved into the router for the tenant map load.
+    let pool_for_tenant_map = pool.clone();
+
+    let tenant_map = if config.multi_tenant {
+        match routes::load_tenant_map(&pool_for_tenant_map).await {
+            Ok(map) => {
+                info!(count = map.len(), "Loaded tenant map from database");
+                std::sync::Arc::new(map)
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to load tenant map — aborting startup");
+                return Err(e.into());
+            }
+        }
+    } else {
+        std::sync::Arc::new(std::collections::HashMap::new())
+    };
+
+    let router = routes::create_router_with_tx_and_tenant_map(
         pool,
         read_pool,
         config.api_keys.clone(),
@@ -428,6 +446,7 @@ async fn main() -> anyhow::Result<()> {
         config.event_data_encryption_key_old,
         config.clone(),
         Some(schema_validator),
+        tenant_map,
     );
 
     info!(addr = %addr, "Soroban Pulse listening");

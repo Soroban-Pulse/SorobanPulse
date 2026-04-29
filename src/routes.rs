@@ -59,6 +59,8 @@ pub struct AppState {
     pub contract_count_cache: ContractCountCache,
     pub config: crate::config::Config,
     pub schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
+    /// key_hash → tenant_id; populated only when multi_tenant is enabled.
+    pub tenant_map: Arc<std::collections::HashMap<String, String>>,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -151,6 +153,18 @@ pub fn create_router(
     )
 }
 
+/// Load the key_hash → tenant_id mapping from the `api_key_tenants` table.
+/// Called once at startup when `MULTI_TENANT=true`.
+pub async fn load_tenant_map(
+    pool: &sqlx::PgPool,
+) -> Result<std::collections::HashMap<String, String>, sqlx::Error> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT key_hash, tenant_id FROM api_key_tenants")
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().collect())
+}
+
 pub fn create_router_with_tx(
     pool: PgPool,
     read_pool: PgPool,
@@ -170,8 +184,57 @@ pub fn create_router_with_tx(
     config: crate::config::Config,
     schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
 ) -> Router {
+    create_router_with_tx_and_tenant_map(
+        pool,
+        read_pool,
+        api_keys,
+        allowed_origins,
+        rate_limit_per_minute,
+        behind_proxy,
+        health_state,
+        indexer_state,
+        prometheus_handle,
+        event_tx,
+        sse_keepalive_interval_ms,
+        sse_max_connections,
+        health_check_timeout_ms,
+        encryption_key,
+        encryption_key_old,
+        config,
+        schema_validator,
+        Arc::new(std::collections::HashMap::new()),
+    )
+}
+
+/// Full router constructor that accepts a pre-loaded tenant map.
+/// Use this in `main` when `MULTI_TENANT=true` after calling `load_tenant_map`.
+pub fn create_router_with_tx_and_tenant_map(
+    pool: PgPool,
+    read_pool: PgPool,
+    api_keys: Vec<String>,
+    allowed_origins: &[String],
+    rate_limit_per_minute: u32,
+    behind_proxy: bool,
+    health_state: Arc<HealthState>,
+    indexer_state: Arc<IndexerState>,
+    prometheus_handle: PrometheusHandle,
+    event_tx: broadcast::Sender<SorobanEvent>,
+    sse_keepalive_interval_ms: u64,
+    sse_max_connections: usize,
+    health_check_timeout_ms: u64,
+    encryption_key: Option<[u8; 32]>,
+    encryption_key_old: Option<[u8; 32]>,
+    config: crate::config::Config,
+    schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
+    tenant_map: Arc<std::collections::HashMap<String, String>>,
+) -> Router {
     let cors = build_cors(allowed_origins);
-    let auth_state = Arc::new(middleware::AuthState { api_keys });
+
+    let auth_state = Arc::new(middleware::AuthState {
+        api_keys,
+        tenant_map: Arc::clone(&tenant_map),
+        multi_tenant: config.multi_tenant,
+    });
     let contract_count_cache = moka::future::Cache::builder()
         .max_capacity(config.contract_count_cache_size)
         .time_to_live(std::time::Duration::from_secs(
@@ -194,6 +257,7 @@ pub fn create_router_with_tx(
         contract_count_cache,
         config,
         schema_validator,
+        tenant_map,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.
