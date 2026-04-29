@@ -26,7 +26,7 @@ anyhow = "1"
 futures = "0.3"
 url = "2"
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.5", features = ["trace", "cors", "compression-full", "metrics", "request-id", "limit"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "compression-full", "metrics", "request-id", "limit"] }
 metrics = "0.22"
 metrics-exporter-prometheus = "0.14"
 axum-extra = { version = "0.9", features = ["typed-header"] }
