@@ -24,86 +24,86 @@ pub fn init_metrics() -> PrometheusHandle {
 
 /// Record events indexed
 pub fn record_events_indexed(count: u64) {
-    m::counter!("soroban_pulse_events_indexed_total", count);
+    m::counter!("soroban_pulse_events_indexed_total").increment(count);
 }
 
 /// Update the current ledger being processed
 pub fn update_current_ledger(ledger: u64) {
-    m::gauge!("soroban_pulse_indexer_current_ledger", ledger as f64);
+    m::gauge!("soroban_pulse_indexer_current_ledger").set(ledger as f64);
 }
 
 /// Update the latest ledger from RPC
 pub fn update_latest_ledger(ledger: u64) {
-    m::gauge!("soroban_pulse_indexer_latest_ledger", ledger as f64);
+    m::gauge!("soroban_pulse_indexer_latest_ledger").set(ledger as f64);
 }
 
 /// Update the indexer lag
 pub fn update_indexer_lag(lag: u64) {
-    m::gauge!("soroban_pulse_indexer_lag_ledgers", lag as f64);
+    m::gauge!("soroban_pulse_indexer_lag_ledgers").set(lag as f64);
 }
 
 /// Set the is_leader gauge: 1.0 when this replica holds the advisory lock, 0.0 otherwise.
 pub fn record_indexer_is_leader(is_leader: bool) {
-    m::gauge!("soroban_pulse_indexer_is_leader", if is_leader { 1.0 } else { 0.0 });
+    m::gauge!("soroban_pulse_indexer_is_leader").set(if is_leader { 1.0 } else { 0.0 });
 }
 
 /// Record an RPC error
 pub fn record_rpc_error() {
-    m::counter!("soroban_pulse_rpc_errors_total", 1u64);
+    m::counter!("soroban_pulse_rpc_errors_total").increment(1);
 }
 
 /// Record a validation failure
 pub fn record_validation_failure() {
-    m::counter!("soroban_pulse_events_validation_failed_total", 1u64);
+    m::counter!("soroban_pulse_events_validation_failed_total").increment(1);
 }
 
 /// Record an oversized event that was skipped due to exceeding MAX_EVENT_DATA_BYTES.
 pub fn record_oversized_event() {
-    m::counter!("soroban_pulse_events_oversized_total", 1u64);
+    m::counter!("soroban_pulse_events_oversized_total").increment(1);
 }
 
 /// Record a duplicate event
 pub fn record_duplicate_event() {
-    m::counter!("soroban_pulse_events_duplicate_total", 1u64);
+    m::counter!("soroban_pulse_events_duplicate_total").increment(1);
 }
 
 /// Record an XDR validation failure (issue #267)
 pub fn record_xdr_invalid() {
-    m::counter!("soroban_pulse_events_xdr_invalid_total", 1u64);
+    m::counter!("soroban_pulse_events_xdr_invalid_total").increment(1);
 }
 
 /// Record a bloom filter hit (pre-filtered duplicate) (issue #266)
 pub fn record_bloom_filter_hit() {
-    m::counter!("soroban_pulse_bloom_filter_hits_total", 1u64);
+    m::counter!("soroban_pulse_bloom_filter_hits_total").increment(1);
 }
 
 /// Record a Kinesis publish failure (issue #265)
 pub fn record_kinesis_publish_failure() {
-    m::counter!("soroban_pulse_kinesis_publish_failures_total", 1u64);
+    m::counter!("soroban_pulse_kinesis_publish_failures_total").increment(1);
 }
 
 /// Record a Pub/Sub publish failure (issue #264)
 pub fn record_pubsub_publish_failure() {
-    m::counter!("soroban_pulse_pubsub_publish_failures_total", 1u64);
+    m::counter!("soroban_pulse_pubsub_publish_failures_total").increment(1);
 }
 
 /// Record a rate-limited request rejection (429 Too Many Requests)
 pub fn record_rate_limit_rejected() {
-    m::counter!("soroban_pulse_rate_limit_rejected_total", 1u64);
+    m::counter!("soroban_pulse_rate_limit_rejected_total").increment(1);
 }
 
 /// Record a persistent webhook delivery failure (all retries exhausted)
 pub fn record_webhook_failure() {
-    m::counter!("soroban_pulse_webhook_failures_total", 1u64);
+    m::counter!("soroban_pulse_webhook_failures_total").increment(1);
 }
 
 /// Record an email notification failure
 pub fn record_email_failure() {
-    m::counter!("soroban_pulse_email_failures_total", 1u64);
+    m::counter!("soroban_pulse_email_failures_total").increment(1);
 }
 
 pub fn record_replay_job() {
-    m::counter!("soroban_pulse_replay_jobs_total", 1u64);
+    m::counter!("soroban_pulse_replay_jobs_total").increment(1);
 }
 
 /// Record HTTP request duration
@@ -113,18 +113,24 @@ pub fn record_http_request_duration(
     route: &str,
     status: &str,
 ) {
-    m::histogram!("soroban_pulse_http_request_duration_seconds", duration.as_secs_f64(), "method" => method.to_string(), "route" => route.to_string(), "status" => status.to_string());
+    m::histogram!(
+        "soroban_pulse_http_request_duration_seconds",
+        "method" => method.to_string(),
+        "route" => route.to_string(),
+        "status" => status.to_string()
+    )
+    .record(duration.as_secs_f64());
 }
 
 /// Update the active SSE connections count
 pub fn update_sse_connections(count: usize) {
-    m::gauge!("soroban_pulse_sse_active_connections", count as f64);
+    m::gauge!("soroban_pulse_sse_active_connections").set(count as f64);
 }
 
 /// Update DB connection pool metrics
 pub fn update_db_pool_metrics(pool: &PgPool) {
-    m::gauge!("soroban_pulse_db_pool_size", pool.size() as f64);
-    m::gauge!("soroban_pulse_db_pool_idle", pool.num_idle() as f64);
+    m::gauge!("soroban_pulse_db_pool_size").set(pool.size() as f64);
+    m::gauge!("soroban_pulse_db_pool_idle").set(pool.num_idle() as f64);
 }
 
 /// Update the process RSS memory gauge (Linux only).
@@ -136,7 +142,7 @@ pub fn update_process_memory_bytes() {
             if let Some(rest) = line.strip_prefix("VmRSS:") {
                 if let Some(kb_str) = rest.split_whitespace().next() {
                     if let Ok(kb) = kb_str.parse::<u64>() {
-                        m::gauge!("soroban_pulse_process_memory_bytes", (kb * 1024) as f64);
+                        m::gauge!("soroban_pulse_process_memory_bytes").set((kb * 1024) as f64);
                     }
                 }
                 break;

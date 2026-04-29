@@ -151,6 +151,26 @@
             }
           },
           {
+            "name": "from_timestamp",
+            "in": "query",
+            "description": "Return events at or after this timestamp (ISO 8601 format, e.g., 2026-03-14T00:00:00Z)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "to_timestamp",
+            "in": "query",
+            "description": "Return events at or before this timestamp (ISO 8601 format, e.g., 2026-03-14T00:00:00Z)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
             "name": "sort",
             "in": "query",
             "description": "Sort order: asc (oldest first) or desc (newest first, default)",
@@ -164,6 +184,16 @@
             "name": "topic_sym",
             "in": "query",
             "description": "Filter by first topic symbol (uses topic_0_sym generated column index)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "search",
+            "in": "query",
+            "description": "Full-text search query for event_data (searches all string values in the JSON)",
             "required": false,
             "schema": {
               "type": "string",
@@ -466,6 +496,21 @@
           "topic_sym": {
             "type": "string",
             "description": "Filter by first topic symbol (uses topic_0_sym generated column index).",
+            "nullable": true
+          },
+          "search": {
+            "type": "string",
+            "description": "Full-text search query for event_data (searches all string values in the JSON).",
+            "nullable": true
+          },
+          "from_timestamp": {
+            "type": "string",
+            "description": "Filter events at or after this timestamp (ISO 8601 format).",
+            "nullable": true
+          },
+          "to_timestamp": {
+            "type": "string",
+            "description": "Filter events at or before this timestamp (ISO 8601 format).",
             "nullable": true
           }
         }

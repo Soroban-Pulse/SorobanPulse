@@ -17,6 +17,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-opentelemetry = { version = "0.22", optional = true }
 opentelemetry = { version = "0.21", optional = true }
 opentelemetry-otlp = { version = "0.14", optional = true }
+opentelemetry_sdk = { version = "0.21", optional = true }
 dotenvy = "0.15"
 toml = "0.8"
 thiserror = "1"
@@ -57,16 +58,21 @@ google-cloud-pubsub = { version = "0.33", optional = true }
 # Email notifications
 lettre = { version = "0.11", default-features = false, features = ["tokio1-rustls-tls", "smtp-transport", "builder"] }
 
+# JSON Schema validation
+jsonschema = "0.18"
+
 # Issue #XXX: Lua scripting for event transformation (optional, behind lua feature flag)
 mlua = { version = "0.9", features = ["lua54", "async", "serialize"], optional = true }
 
 [features]
-otel = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-otlp"]
-encryption = ["aes-gcm", "rand"]
-kinesis = ["aws-sdk-kinesis", "aws-config"]
-pubsub = ["google-cloud-pubsub"]
+default = []
+otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
+zipkin = ["dep:opentelemetry", "dep:opentelemetry-zipkin", "dep:opentelemetry_sdk"]
+encryption = ["dep:aes-gcm", "dep:rand"]
+kinesis = ["dep:aws-sdk-kinesis", "dep:aws-config"]
+pubsub = ["dep:google-cloud-pubsub"]
 archive = []
-lua = ["mlua"]
+lua = ["dep:mlua"]
 
 [dev-dependencies]
 sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-rustls", "chrono", "uuid", "json", "migrate"] }
@@ -77,6 +83,10 @@ tempfile = "3"
 flate2 = "1"
 parquet = { version = "53", default-features = false, features = ["snap"] }
 arrow-array = { version = "53" }
+
+[dependencies.opentelemetry-zipkin]
+version = "0.19"
+optional = true
 
 [[bench]]
 name = "pagination"
@@ -89,11 +99,3 @@ harness = false
 [[bench]]
 name = "compression"
 harness = false
-
-[features]
-default = []
-otel = ["dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
-zipkin = ["dep:opentelemetry", "dep:opentelemetry-zipkin", "dep:opentelemetry_sdk"]
-
-[dependencies]
-opentelemetry-zipkin = { version = "0.19", optional = true }

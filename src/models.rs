@@ -81,6 +81,12 @@ pub struct PaginationParams {
     pub in_successful_call: Option<bool>,
     /// Filter by the first topic symbol (uses topic_0_sym generated column index).
     pub topic_sym: Option<String>,
+    /// Full-text search query for event_data (uses event_data_tsv tsvector index).
+    pub search: Option<String>,
+    /// Filter events at or after this timestamp (ISO 8601 format).
+    pub from_timestamp: Option<String>,
+    /// Filter events at or before this timestamp (ISO 8601 format).
+    pub to_timestamp: Option<String>,
 }
 
 /// Sort order for event list endpoints.

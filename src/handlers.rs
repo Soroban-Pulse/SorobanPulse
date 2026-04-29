@@ -174,6 +174,12 @@ pub(crate) fn validate_tx_hash(tx_hash: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate and parse ISO 8601 timestamp string.
+fn validate_timestamp(ts: &str) -> Result<DateTime<Utc>, AppError> {
+    ts.parse::<DateTime<Utc>>()
+        .map_err(|_| AppError::Validation(format!("invalid timestamp format: {}", ts)))
+}
+
 async fn build_health_response(state: &AppState) -> (StatusCode, Value) {
     let mut db_ok = true;
     let db_status: &str;
@@ -756,7 +762,6 @@ pub async fn ws_events(
                                     continue;
                                 }
                             }
-                            event.event_data = decrypt_event_data(&event.event_data, enc_key.as_ref(), enc_key_old.as_ref());
                             let text = serde_json::to_string(&event).unwrap_or_default();
                             if socket.send(Message::Text(text.into())).await.is_err() {
                                 break;
@@ -1059,8 +1064,11 @@ fn ndjson_response(events: impl Iterator<Item = Value>) -> Response<Body> {
         ("event_type" = Option<crate::models::EventType>, Query, description = "Filter by event type: contract, diagnostic, system"),
         ("from_ledger" = Option<i64>, Query, description = "Return events at or after this ledger"),
         ("to_ledger" = Option<i64>, Query, description = "Return events at or before this ledger"),
+        ("from_timestamp" = Option<String>, Query, description = "Return events at or after this timestamp (ISO 8601 format, e.g., 2026-03-14T00:00:00Z)"),
+        ("to_timestamp" = Option<String>, Query, description = "Return events at or before this timestamp (ISO 8601 format, e.g., 2026-03-14T00:00:00Z)"),
         ("sort" = Option<String>, Query, description = "Sort order: asc (oldest first) or desc (newest first, default)"),
         ("topic_sym" = Option<String>, Query, description = "Filter by first topic symbol (uses topic_0_sym generated column index)"),
+        ("search" = Option<String>, Query, description = "Full-text search query for event_data (searches all string values in the JSON)"),
     ),
     responses(
         (status = 200, description = "Paginated list of events (JSON or NDJSON depending on Accept header)",
@@ -1083,6 +1091,27 @@ pub async fn get_events(
         if from > to {
             return Err(AppError::Validation(
                 "from_ledger must be <= to_ledger".to_string(),
+            ));
+        }
+    }
+
+    // Validate and parse timestamp range
+    let from_ts = if let Some(ref ts) = params.from_timestamp {
+        Some(validate_timestamp(ts)?)
+    } else {
+        None
+    };
+    let to_ts = if let Some(ref ts) = params.to_timestamp {
+        Some(validate_timestamp(ts)?)
+    } else {
+        None
+    };
+
+    // Validate timestamp range
+    if let (Some(from), Some(to)) = (from_ts, to_ts) {
+        if from > to {
+            return Err(AppError::Validation(
+                "from_timestamp must be <= to_timestamp".to_string(),
             ));
         }
     }
@@ -1138,6 +1167,18 @@ pub async fn get_events(
             conditions.push(format!("topic_0_sym = ${bind_idx}"));
             bind_idx += 1;
         }
+        if params.search.is_some() {
+            conditions.push(format!("event_data_tsv @@ plainto_tsquery('english', ${bind_idx})"));
+            bind_idx += 1;
+        }
+        if from_ts.is_some() {
+            conditions.push(format!("timestamp >= ${bind_idx}"));
+            bind_idx += 1;
+        }
+        if to_ts.is_some() {
+            conditions.push(format!("timestamp <= ${bind_idx}"));
+            bind_idx += 1;
+        }
 
         let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
@@ -1173,6 +1214,15 @@ pub async fn get_events(
             q = q.bind(isc);
         }
         if let Some(ref ts) = params.topic_sym {
+            q = q.bind(ts);
+        }
+        if let Some(ref search) = params.search {
+            q = q.bind(search);
+        }
+        if let Some(ts) = from_ts {
+            q = q.bind(ts);
+        }
+        if let Some(ts) = to_ts {
             q = q.bind(ts);
         }
         q = q.bind(limit);
@@ -1240,6 +1290,18 @@ pub async fn get_events(
         conditions.push(format!("topic_0_sym = ${bind_idx}"));
         bind_idx += 1;
     }
+    if params.search.is_some() {
+        conditions.push(format!("event_data_tsv @@ plainto_tsquery('english', ${bind_idx})"));
+        bind_idx += 1;
+    }
+    if from_ts.is_some() {
+        conditions.push(format!("timestamp >= ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if to_ts.is_some() {
+        conditions.push(format!("timestamp <= ${bind_idx}"));
+        bind_idx += 1;
+    }
 
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -1286,6 +1348,15 @@ pub async fn get_events(
     if let Some(ref ts) = params.topic_sym {
         q = q.bind(ts);
     }
+    if let Some(ref search) = params.search {
+        q = q.bind(search);
+    }
+    if let Some(ts) = from_ts {
+        q = q.bind(ts);
+    }
+    if let Some(ts) = to_ts {
+        q = q.bind(ts);
+    }
     q = q.bind(limit).bind(offset);
 
     let rows = q.fetch_all(&state.read_pool).await?;
@@ -1326,6 +1397,15 @@ pub async fn get_events(
             cq = cq.bind(isc);
         }
         if let Some(ref ts) = params.topic_sym {
+            cq = cq.bind(ts);
+        }
+        if let Some(ref search) = params.search {
+            cq = cq.bind(search);
+        }
+        if let Some(ts) = from_ts {
+            cq = cq.bind(ts);
+        }
+        if let Some(ts) = to_ts {
             cq = cq.bind(ts);
         }
         let count = cq.fetch_one(&state.read_pool).await?;
@@ -2181,6 +2261,10 @@ pub async fn get_events_diff(
     }).unwrap()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/contracts",
+    tag = "events",
     params(
         ("page" = Option<i64>, Query, description = "Page number (default 1)"),
         ("limit" = Option<i64>, Query, description = "Items per page (1-100, default 20)"),
