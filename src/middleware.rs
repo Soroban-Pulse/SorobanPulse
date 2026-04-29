@@ -21,14 +21,30 @@ pub async fn request_id_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// The resolved tenant for the current request.
+/// Injected as a request extension by `auth_middleware` when multi-tenant mode
+/// is enabled.  Handlers read this via `req.extensions().get::<TenantId>()`.
+#[derive(Clone, Debug)]
+pub struct TenantId(pub String);
+
 #[derive(Clone)]
 pub struct AuthState {
     pub api_keys: Vec<String>,
+    /// key_hash → tenant_id mapping; populated only in multi-tenant mode.
+    pub tenant_map: Arc<std::collections::HashMap<String, String>>,
+    pub multi_tenant: bool,
+}
+
+/// SHA-256 hex digest of a raw API key — used as the lookup key in tenant_map.
+pub fn hash_api_key(key: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(key.as_bytes());
+    format!("{:x}", h.finalize())
 }
 
 pub async fn auth_middleware(
     State(state): State<Arc<AuthState>>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
     let path = req.uri().path();
@@ -54,6 +70,25 @@ pub async fn auth_middleware(
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({ "error": "unauthorized" })),
             ));
+        }
+
+        // In multi-tenant mode, resolve and inject the tenant_id extension.
+        if state.multi_tenant {
+            let key = provided_key.unwrap_or("");
+            let key_hash = hash_api_key(key);
+            match state.tenant_map.get(&key_hash) {
+                Some(tid) => {
+                    req.extensions_mut().insert(TenantId(tid.clone()));
+                }
+                None => {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({
+                            "error": "api key is not associated with a tenant"
+                        })),
+                    ));
+                }
+            }
         }
     }
 
@@ -163,7 +198,11 @@ mod tests {
     use tower::ServiceExt;
 
     async fn setup_app(api_keys: Vec<String>) -> Router {
-        let auth_state = Arc::new(AuthState { api_keys });
+        let auth_state = Arc::new(AuthState {
+            api_keys,
+            tenant_map: Arc::new(std::collections::HashMap::new()),
+            multi_tenant: false,
+        });
         Router::new()
             .route("/test", get(|| async { "OK" }))
             .route("/health", get(|| async { "OK" }))

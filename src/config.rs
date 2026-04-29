@@ -213,6 +213,18 @@ pub struct Config {
     pub contract_count_cache_ttl_secs: u64,
     /// How often standby replicas retry the advisory lock (seconds).
     pub indexer_lock_retry_secs: u64,
+    /// Enable multi-tenant mode. When true, every API key must be mapped to a
+    /// tenant_id in the api_key_tenants table and all queries are scoped to that
+    /// tenant.  Disabled by default to preserve single-tenant behaviour.
+    pub multi_tenant: bool,
+    /// Per-tenant contract filter for the indexer.
+    /// Format: "tenant1:CABC...,CDEF...;tenant2:CXYZ..."
+    /// When set, the indexer only stores events whose contract_id appears in the
+    /// allow-list for the matching tenant.  Empty = index all contracts.
+    pub tenant_contract_filter: std::collections::HashMap<String, Vec<String>>,
+    /// The tenant_id this indexer instance stamps on every event it inserts.
+    /// Only meaningful when multi_tenant = true.  Set via INDEXER_TENANT_ID env var.
+    pub indexer_tenant_id: Option<String>,
 }
 
 impl Default for Config {
@@ -267,6 +279,9 @@ impl Default for Config {
             contract_count_cache_size: 1000,
             contract_count_cache_ttl_secs: 30,
             indexer_lock_retry_secs: 30,
+            multi_tenant: false,
+            tenant_contract_filter: std::collections::HashMap::new(),
+            indexer_tenant_id: None,
         }
     }
 }
@@ -507,6 +522,33 @@ where
             None
         }
     }
+}
+
+/// Parse TENANT_CONTRACT_FILTER env var.
+///
+/// Format: `"tenant1:CABC...,CDEF...;tenant2:CXYZ..."`
+/// Each semicolon-separated segment is `tenant_id:contract1,contract2,...`.
+/// Returns an empty map when the variable is unset or empty.
+fn parse_tenant_contract_filter() -> std::collections::HashMap<String, Vec<String>> {
+    let raw = match std::env::var("TENANT_CONTRACT_FILTER") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return std::collections::HashMap::new(),
+    };
+    let mut map = std::collections::HashMap::new();
+    for segment in raw.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some((tenant, contracts_str)) = segment.split_once(':') {
+            let tenant = tenant.trim().to_string();
+            let contracts: Vec<String> = contracts_str
+                .split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            if !tenant.is_empty() && !contracts.is_empty() {
+                map.insert(tenant, contracts);
+            }
+        }
+    }
+    map
 }
 
 impl Config {
@@ -887,6 +929,11 @@ impl Config {
             contract_count_cache_size,
             contract_count_cache_ttl_secs,
             indexer_lock_retry_secs,
+            multi_tenant: env_or_file("MULTI_TENANT", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
+                .unwrap_or(false),
+            tenant_contract_filter: parse_tenant_contract_filter(),
+            indexer_tenant_id: env_or_file("INDEXER_TENANT_ID", &file),
         }
     }
 }

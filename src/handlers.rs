@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
+    middleware::TenantId,
     models::{
         self, BatchTxRequest, ContractSummary, ExportParams, PaginationParams, ReplayRequest,
         StreamParams,
@@ -57,6 +58,25 @@ static CONTRACTS_CACHE: OnceLock<Mutex<Option<CacheEntry>>> = OnceLock::new();
 
 fn contracts_cache() -> &'static Mutex<Option<CacheEntry>> {
     CONTRACTS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Extract the tenant_id from request extensions when multi-tenant mode is active.
+/// Returns `None` in single-tenant mode (extension not present).
+fn extract_tenant_id(extensions: &axum::http::Extensions) -> Option<&str> {
+    extensions.get::<TenantId>().map(|t| t.0.as_str())
+}
+
+/// Append a `tenant_id = $N` condition when multi-tenant mode is active.
+/// Returns the bind index incremented by 1 if a condition was added.
+fn maybe_add_tenant_condition(
+    conditions: &mut Vec<String>,
+    bind_idx: &mut i32,
+    tenant_id: Option<&str>,
+) {
+    if tenant_id.is_some() {
+        conditions.push(format!("tenant_id = ${bind_idx}"));
+        *bind_idx += 1;
+    }
 }
 
 /// Encode a (ledger, id) pair as an opaque URL-safe base64 cursor.
@@ -1112,7 +1132,10 @@ pub async fn get_events(
     State(state): State<AppState>,
     Query(params): Query<PaginationParams>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
 ) -> Result<impl IntoResponse, AppError> {
+    let tenant_id = extract_tenant_id(&extensions).map(|s| s.to_owned());
+    let tenant_id = tenant_id.as_deref();
     // Validate ledger range
     if let (Some(from), Some(to)) = (params.from_ledger, params.to_ledger) {
         if from > to {
@@ -1206,6 +1229,7 @@ pub async fn get_events(
             conditions.push(format!("timestamp <= ${bind_idx}"));
             bind_idx += 1;
         }
+        maybe_add_tenant_condition(&mut conditions, &mut bind_idx, tenant_id);
 
         let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
@@ -1251,6 +1275,9 @@ pub async fn get_events(
         }
         if let Some(ts) = to_ts {
             q = q.bind(ts);
+        }
+        if let Some(tid) = tenant_id {
+            q = q.bind(tid);
         }
         q = q.bind(limit);
 
@@ -1337,6 +1364,7 @@ pub async fn get_events(
         conditions.push(format!("timestamp <= ${bind_idx}"));
         bind_idx += 1;
     }
+    maybe_add_tenant_condition(&mut conditions, &mut bind_idx, tenant_id);
 
     let where_clause = if conditions.is_empty() {
         String::new()
@@ -1392,6 +1420,9 @@ pub async fn get_events(
     if let Some(ts) = to_ts {
         q = q.bind(ts);
     }
+    if let Some(tid) = tenant_id {
+        q = q.bind(tid);
+    }
     q = q.bind(limit).bind(offset);
 
     let rows = q.fetch_all(&state.read_pool).await?;
@@ -1444,15 +1475,30 @@ pub async fn get_events(
         if let Some(ts) = to_ts {
             cq = cq.bind(ts);
         }
+        if let Some(tid) = tenant_id {
+            cq = cq.bind(tid);
+        }
         let count = cq.fetch_one(&state.read_pool).await?;
         (count, false)
     } else {
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT reltuples::bigint FROM pg_class WHERE relname = 'events'",
-        )
-        .fetch_one(&state.read_pool)
-        .await?;
-        (count, true)
+        // In multi-tenant mode we can't use the pg_class estimate (it's for the whole table).
+        // Fall back to an exact count scoped to the tenant.
+        if tenant_id.is_some() {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM events WHERE tenant_id = $1",
+            )
+            .bind(tenant_id)
+            .fetch_one(&state.read_pool)
+            .await?;
+            (count, false)
+        } else {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT reltuples::bigint FROM pg_class WHERE relname = 'events'",
+            )
+            .fetch_one(&state.read_pool)
+            .await?;
+            (count, true)
+        }
     };
 
     // Build ETag from last row's id + created_at + total
@@ -2587,6 +2633,51 @@ mod tests {
             prometheus_handle,
             2000,
             config,
+        )
+    }
+
+    /// Build a router with multi-tenant mode enabled.
+    /// `tenant_map` maps raw API key → tenant_id.
+    fn create_multitenant_test_router(
+        pool: PgPool,
+        tenant_map: std::collections::HashMap<String, String>,
+    ) -> axum::Router {
+        use crate::middleware::hash_api_key;
+        use tokio::sync::broadcast;
+
+        let health_state = Arc::new(HealthState::new(60));
+        let indexer_state = Arc::new(IndexerState::new());
+        let prometheus_handle = crate::metrics::init_metrics();
+        let mut config = crate::config::Config::default();
+        config.multi_tenant = true;
+
+        // api_keys = all raw keys in the map
+        let api_keys: Vec<String> = tenant_map.keys().cloned().collect();
+        // Convert raw key → hash for the tenant_map
+        let hashed_map: std::collections::HashMap<String, String> = tenant_map
+            .iter()
+            .map(|(k, v)| (hash_api_key(k), v.clone()))
+            .collect();
+
+        crate::routes::create_router_with_tx_and_tenant_map(
+            pool.clone(),
+            pool,
+            api_keys,
+            &[],
+            60,
+            false,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            broadcast::channel(256).0,
+            15000,
+            1000,
+            2000,
+            None,
+            None,
+            config,
+            None,
+            Arc::new(hashed_map),
         )
     }
 
@@ -4694,6 +4785,162 @@ mod tests {
         let v2: Value = serde_json::from_slice(&body2).unwrap();
         let event_data = &v2["data"][0]["event_data"];
         assert!(event_data.is_string(), "event_data should be base64 string on cursor page");
+    }
+
+    // Multi-tenant isolation tests
+    #[sqlx::test(migrations = "./migrations")]
+    async fn multitenant_tenant_a_cannot_see_tenant_b_events(pool: PgPool) {
+        // Insert events for two different tenants
+        for (tenant, contract, tx) in [
+            ("tenant_a", "C1111111111111111111111111111111111111111111111111111111", "a".repeat(64)),
+            ("tenant_b", "C2222222222222222222222222222222222222222222222222222222", "b".repeat(64)),
+        ] {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, tenant_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(contract)
+            .bind("contract")
+            .bind(tx)
+            .bind(100_i64)
+            .bind(Utc::now())
+            .bind(json!({"tenant": tenant}))
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut tenant_map = std::collections::HashMap::new();
+        tenant_map.insert("key_a".to_string(), "tenant_a".to_string());
+        tenant_map.insert("key_b".to_string(), "tenant_b".to_string());
+        let app = create_multitenant_test_router(pool, tenant_map);
+
+        // Tenant A should only see its own event
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events")
+                    .header("X-Api-Key", "key_a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let data = v["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1, "tenant_a should see exactly 1 event");
+        assert_eq!(data[0]["event_data"]["tenant"], json!("tenant_a"));
+
+        // Tenant B should only see its own event
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events")
+                    .header("X-Api-Key", "key_b")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        let data = v["data"].as_array().unwrap();
+        assert_eq!(data.len(), 1, "tenant_b should see exactly 1 event");
+        assert_eq!(data[0]["event_data"]["tenant"], json!("tenant_b"));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn multitenant_unknown_key_returns_403(pool: PgPool) {
+        // key_a is in api_keys but NOT in tenant_map → 403
+        let mut tenant_map = std::collections::HashMap::new();
+        // key_a is registered but has no tenant mapping
+        // We simulate this by giving key_b a mapping but not key_a
+        tenant_map.insert("key_b".to_string(), "tenant_b".to_string());
+
+        // Manually build a router where key_a is in api_keys but not in tenant_map
+        use crate::middleware::hash_api_key;
+        use tokio::sync::broadcast;
+        let health_state = Arc::new(HealthState::new(60));
+        let indexer_state = Arc::new(IndexerState::new());
+        let prometheus_handle = crate::metrics::init_metrics();
+        let mut config = crate::config::Config::default();
+        config.multi_tenant = true;
+        let hashed_map: std::collections::HashMap<String, String> = tenant_map
+            .iter()
+            .map(|(k, v)| (hash_api_key(k), v.clone()))
+            .collect();
+        let app = crate::routes::create_router_with_tx_and_tenant_map(
+            pool.clone(),
+            pool,
+            vec!["key_a".to_string(), "key_b".to_string()],
+            &[],
+            60,
+            false,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            broadcast::channel(256).0,
+            15000,
+            1000,
+            2000,
+            None,
+            None,
+            config,
+            None,
+            Arc::new(hashed_map),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events")
+                    .header("X-Api-Key", "key_a")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    async fn singletenent_mode_returns_all_events(pool: PgPool) {
+        // In single-tenant mode, events with NULL tenant_id are returned for all callers
+        for tx in ["a".repeat(64), "b".repeat(64)] {
+            sqlx::query(
+                "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+                 VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind("C1111111111111111111111111111111111111111111111111111111")
+            .bind("contract")
+            .bind(tx)
+            .bind(100_i64)
+            .bind(Utc::now())
+            .bind(json!({"x": 1}))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let app = create_test_router(pool);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["data"].as_array().unwrap().len(), 2);
     }
 
     // Replay endpoint tests
