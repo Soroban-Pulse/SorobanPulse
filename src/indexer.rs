@@ -346,10 +346,11 @@ impl<R: RpcClient> Indexer<R> {
 
         loop {
             // Respect shutdown signal while waiting to acquire the lock.
+            let mut shutdown_rx = self.shutdown_rx.clone();
             tokio::select! {
                 _ = interval.tick() => {}
-                _ = self.shutdown_rx.clone().changed() => {
-                    if *self.shutdown_rx.borrow() {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
                         info!("Indexer shutting down before acquiring lock");
                         metrics::record_indexer_is_leader(false);
                         return;
