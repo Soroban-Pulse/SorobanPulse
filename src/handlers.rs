@@ -296,7 +296,7 @@ async fn build_health_response(state: &AppState) -> (StatusCode, Value) {
     path = "/health",
     tag = "system",
     responses(
-        (status = 200, description = "Service is healthy"),
+        (status = 200, description = "Service is healthy", body = serde_json::Value),
         (status = 503, description = "Service is degraded", body = ErrorResponse),
     )
 )]
@@ -310,7 +310,7 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Value>) 
     path = "/healthz/live",
     tag = "system",
     responses(
-        (status = 200, description = "Process is alive"),
+        (status = 200, description = "Process is alive", body = serde_json::Value),
     )
 )]
 pub async fn health_live() -> (StatusCode, Json<Value>) {
@@ -322,7 +322,7 @@ pub async fn health_live() -> (StatusCode, Json<Value>) {
     path = "/healthz/ready",
     tag = "system",
     responses(
-        (status = 200, description = "Service is ready"),
+        (status = 200, description = "Service is ready", body = serde_json::Value),
         (status = 503, description = "Service is not ready", body = ErrorResponse),
     )
 )]
@@ -333,10 +333,10 @@ pub async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<Va
 
 #[utoipa::path(
     get,
-    path = "/status",
+    path = "/v1/status",
     tag = "system",
     responses(
-        (status = 200, description = "Indexer operational status"),
+        (status = 200, description = "Indexer operational status", body = serde_json::Value),
     )
 )]
 pub async fn status(State(state): State<AppState>) -> Json<Value> {
@@ -1171,6 +1171,34 @@ pub async fn get_events(
         validate_contract_id(cid)?;
     }
 
+    // Parse and validate contract_ids if provided
+    let contract_ids_list: Vec<String> = if let Some(ref cids) = params.contract_ids {
+        let ids: Vec<&str> = cids.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        
+        if ids.is_empty() {
+            return Err(AppError::Validation(
+                "contract_ids parameter is empty".to_string(),
+            ));
+        }
+        
+        if ids.len() > PaginationParams::MAX_CONTRACT_IDS_FILTER {
+            return Err(AppError::Validation(
+                format!(
+                    "contract_ids exceeds maximum of {} IDs",
+                    PaginationParams::MAX_CONTRACT_IDS_FILTER
+                ),
+            ));
+        }
+        
+        for id in &ids {
+            validate_contract_id(id)?;
+        }
+        
+        ids.iter().map(|s| s.to_string()).collect()
+    } else {
+        Vec::new()
+    };
+
     let limit = params.limit();
     let columns = resolve_columns(&params)?;
     let dir = params
@@ -1195,6 +1223,10 @@ pub async fn get_events(
 
         if params.contract_id.is_some() {
             conditions.push(format!("contract_id = ${bind_idx}"));
+            bind_idx += 1;
+        }
+        if !contract_ids_list.is_empty() {
+            conditions.push(format!("contract_id = ANY(${bind_idx}::text[])"));
             bind_idx += 1;
         }
         if params.event_type.is_some() {
@@ -1251,6 +1283,9 @@ pub async fn get_events(
         let mut q = sqlx::query(&query_str).bind(cursor_ledger).bind(cursor_id);
         if let Some(ref cid) = params.contract_id {
             q = q.bind(cid);
+        }
+        if !contract_ids_list.is_empty() {
+            q = q.bind(&contract_ids_list);
         }
         if let Some(ref et) = params.event_type {
             q = q.bind(et);
@@ -1332,6 +1367,10 @@ pub async fn get_events(
         conditions.push(format!("contract_id = ${bind_idx}"));
         bind_idx += 1;
     }
+    if !contract_ids_list.is_empty() {
+        conditions.push(format!("contract_id = ANY(${bind_idx}::text[])"));
+        bind_idx += 1;
+    }
     if params.event_type.is_some() {
         conditions.push(format!("event_type = ${bind_idx}"));
         bind_idx += 1;
@@ -1395,6 +1434,9 @@ pub async fn get_events(
     let mut q = sqlx::query(&query_str);
     if let Some(ref cid) = params.contract_id {
         q = q.bind(cid);
+    }
+    if !contract_ids_list.is_empty() {
+        q = q.bind(&contract_ids_list);
     }
     if let Some(ref et) = params.event_type {
         q = q.bind(et);

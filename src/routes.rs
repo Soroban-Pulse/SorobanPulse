@@ -73,6 +73,8 @@ pub struct AppState {
     ),
     paths(
         handlers::health,
+        handlers::health_live,
+        handlers::health_ready,
         handlers::status,
         handlers::get_events,
         handlers::get_event_stats,
