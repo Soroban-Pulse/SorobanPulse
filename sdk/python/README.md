@@ -77,6 +77,64 @@ async with openapi_client.ApiClient(configuration) as api_client:
 
 ```
 
+## Retry Configuration
+
+The client automatically retries requests that fail with transient server errors. By default it retries up to **3 times** with exponential backoff and jitter on HTTP status codes `429`, `500`, `502`, `503`, and `504`.
+
+### Default behaviour
+
+```python
+import openapi_client
+
+configuration = openapi_client.Configuration(
+    host="https://api.example.com",
+    # max_retries=3 and retry_on_status=[429,500,502,503,504] are the defaults
+)
+```
+
+### Custom retry settings
+
+```python
+import openapi_client
+
+configuration = openapi_client.Configuration(
+    host="https://api.example.com",
+    max_retries=5,
+    retry_on_status=[429, 503],
+)
+```
+
+### Disabling retries
+
+```python
+configuration = openapi_client.Configuration(
+    host="https://api.example.com",
+    max_retries=0,
+)
+```
+
+### Retry-After support
+
+When the server responds with a `Retry-After` header (e.g. `Retry-After: 5`), the client waits exactly that many seconds before the next attempt instead of using exponential backoff.
+
+### Backoff formula
+
+For attempt *n* (0-indexed) without a `Retry-After` header:
+
+```
+delay = 2^n + random(0, 1)  seconds
+```
+
+| Attempt | Base delay |
+| ------- | ---------- |
+| 1st retry | 1 s + jitter |
+| 2nd retry | 2 s + jitter |
+| 3rd retry | 4 s + jitter |
+
+After exhausting all retries the last server response is returned to the caller.
+
+---
+
 ## Documentation for API Endpoints
 
 All URIs are relative to *http://localhost*

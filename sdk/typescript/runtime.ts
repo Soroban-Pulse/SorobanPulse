@@ -26,6 +26,8 @@ export interface ConfigurationParameters {
     accessToken?: string | Promise<string> | ((name?: string, scopes?: string[]) => string | Promise<string>); // parameter for oauth2 security
     headers?: HTTPHeaders; //header params we want to use on every request
     credentials?: RequestCredentials; //value for the credentials param we want to use on each request
+    maxRetries?: number; // maximum number of retries for transient server errors (default: 3)
+    retryOnStatus?: number[]; // HTTP status codes that trigger a retry (default: [429, 500, 502, 503, 504])
 }
 
 export class Configuration {
@@ -82,6 +84,14 @@ export class Configuration {
     get credentials(): RequestCredentials | undefined {
         return this.configuration.credentials;
     }
+
+    get maxRetries(): number {
+        return this.configuration.maxRetries ?? 3;
+    }
+
+    get retryOnStatus(): number[] {
+        return this.configuration.retryOnStatus ?? [429, 500, 502, 503, 504];
+    }
 }
 
 export const DefaultConfig = new Configuration();
@@ -133,11 +143,32 @@ export class BaseAPI {
 
     protected async request(context: RequestOpts, initOverrides?: RequestInit | InitOverrideFunction): Promise<Response> {
         const { url, init } = await this.createFetchParams(context, initOverrides);
-        const response = await this.fetchApi(url, init);
-        if (response && (response.status >= 200 && response.status < 300)) {
-            return response;
+        const maxRetries = this.configuration.maxRetries;
+        const retryOnStatus = this.configuration.retryOnStatus;
+
+        let response: Response | undefined;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            response = await this.fetchApi(url, init);
+            if (response && response.status >= 200 && response.status < 300) {
+                return response;
+            }
+            if (response && retryOnStatus.includes(response.status) && attempt < maxRetries) {
+                const retryAfterHeader = response.headers.get('retry-after');
+                let delayMs: number;
+                if (retryAfterHeader !== null) {
+                    const parsed = parseFloat(retryAfterHeader);
+                    delayMs = isNaN(parsed)
+                        ? (Math.pow(2, attempt) + Math.random()) * 1000
+                        : parsed * 1000;
+                } else {
+                    delayMs = (Math.pow(2, attempt) + Math.random()) * 1000;
+                }
+                await new Promise<void>(resolve => setTimeout(resolve, delayMs));
+                continue;
+            }
+            throw new ResponseError(response, 'Response returned an error code');
         }
-        throw new ResponseError(response, 'Response returned an error code');
+        throw new ResponseError(response!, 'Response returned an error code');
     }
 
     private async createFetchParams(context: RequestOpts, initOverrides?: RequestInit | InitOverrideFunction) {

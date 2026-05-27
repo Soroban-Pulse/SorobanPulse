@@ -207,6 +207,8 @@ class Configuration:
         socket_options: Optional[Any]=None,
         datetime_format: str="%Y-%m-%dT%H:%M:%S.%f%z",
         date_format: str="%Y-%m-%d",
+        max_retries: int=3,
+        retry_on_status: Optional[List[int]]=None,
         *,
         debug: Optional[bool] = None,
     ) -> None:
@@ -331,6 +333,14 @@ class Configuration:
 
         self.date_format = date_format
         """date format
+        """
+
+        self.max_retries = max_retries
+        """Maximum number of retries for transient server errors (5xx, 429).
+        """
+
+        self.retry_on_status = retry_on_status if retry_on_status is not None else [429, 500, 502, 503, 504]
+        """HTTP status codes that trigger a retry.
         """
 
     def __deepcopy__(self, memo:  Dict[int, Any]) -> Self:

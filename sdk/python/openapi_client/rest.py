@@ -12,8 +12,10 @@
 """  # noqa: E501
 
 
+import asyncio
 import io
 import json
+import random
 import re
 import ssl
 from typing import Optional, Union
@@ -57,6 +59,8 @@ class RESTClientObject:
 
         # maxsize is number of requests to host that are allowed in parallel
         self.maxsize = configuration.connection_pool_maxsize
+        self.max_retries = configuration.max_retries
+        self.retry_on_status = configuration.retry_on_status
 
         self.ssl_context = ssl.create_default_context(
             cafile=configuration.ssl_ca_cert,
@@ -178,8 +182,23 @@ class RESTClientObject:
         if self.pool_manager is None:
             self.pool_manager = self._create_pool_manager()
 
-        r = await self.pool_manager.request(**args)
-        return RESTResponse(r)
+        for attempt in range(self.max_retries + 1):
+            r = await self.pool_manager.request(**args)
+            if r.status_code not in self.retry_on_status or attempt >= self.max_retries:
+                return RESTResponse(r)
+
+            retry_after = r.headers.get("retry-after") or r.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    delay = float(retry_after)
+                except ValueError:
+                    delay = (2 ** attempt) + random.uniform(0, 1)
+            else:
+                delay = (2 ** attempt) + random.uniform(0, 1)
+
+            await asyncio.sleep(delay)
+
+        return RESTResponse(r)  # unreachable; satisfies type checker
 
     def _create_pool_manager(self) -> httpx.AsyncClient:
         limits = httpx.Limits(max_connections=self.maxsize)
