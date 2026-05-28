@@ -247,6 +247,8 @@ pub struct Config {
     pub pruning_interval_hours: u64,
     // Issue #325: SSE Last-Event-ID replay limit
     pub sse_replay_limit: u64,
+    // Issue #396: Indexer checkpoint persistence
+    pub indexer_ignore_checkpoint: bool,
 }
 
 impl Default for Config {
@@ -319,6 +321,7 @@ impl Default for Config {
             retention_days: 90,
             pruning_interval_hours: 24,
             sse_replay_limit: 500,
+            indexer_ignore_checkpoint: false,
         }
     }
 }
@@ -1013,6 +1016,9 @@ impl Config {
             sse_replay_limit: env_or_file("SSE_REPLAY_LIMIT", &file)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500),
+            indexer_ignore_checkpoint: env_or_file("INDEXER_IGNORE_CHECKPOINT", &file)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(false),
         }
     }
 }

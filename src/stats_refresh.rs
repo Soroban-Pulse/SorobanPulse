@@ -20,6 +20,8 @@ pub async fn refresh_all(pool: &PgPool) {
     for view in VIEWS {
         refresh_one(pool, view).await;
     }
+    // Also refresh table statistics
+    refresh_table_stats(pool).await;
 }
 
 async fn refresh_one(pool: &PgPool, view: &str) {
@@ -81,6 +83,43 @@ fn is_lock_timeout(e: &sqlx::Error) -> bool {
         e,
         sqlx::Error::Database(db) if db.code().as_deref() == Some(PG_LOCK_NOT_AVAILABLE)
     )
+}
+
+/// Refresh table statistics (ANALYZE) and update the stats age metric
+async fn refresh_table_stats(pool: &PgPool) {
+    let start = Instant::now();
+    
+    let mut conn = match pool.acquire().await {
+        Ok(c) => c,
+        Err(e) => {
+            error!(error = %e, "Failed to acquire DB connection for ANALYZE");
+            return;
+        }
+    };
+
+    // Run ANALYZE on the events table
+    if let Err(e) = sqlx::query("ANALYZE events")
+        .execute(&mut *conn)
+        .await
+    {
+        error!(error = %e, "Failed to ANALYZE events table");
+        return;
+    }
+
+    // Get the age of the statistics
+    if let Ok(Some((last_analyze,))) = sqlx::query_as::<_, (Option<chrono::DateTime<chrono::Utc>>,)>(
+        "SELECT last_analyze FROM pg_stat_user_tables WHERE relname = 'events'"
+    )
+    .fetch_optional(&mut *conn)
+    .await
+    {
+        if let Some(last_analyze) = last_analyze {
+            let now = chrono::Utc::now();
+            let age_secs = (now - last_analyze).num_seconds().max(0) as u64;
+            crate::metrics::update_stats_age_seconds(age_secs);
+            info!(age_secs, "Table statistics refreshed");
+        }
+    }
 }
 
 /// Spawn a background task that refreshes the materialized views every `interval_secs` seconds.

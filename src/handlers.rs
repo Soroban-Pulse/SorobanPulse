@@ -1646,6 +1646,30 @@ pub async fn get_events(
         "pagination": "offset — migrate to cursor parameter for better performance",
     });
 
+    let mut body_obj = body.as_object().unwrap().clone();
+    
+    // Add approximation metadata when using approximate count
+    if approximate {
+        // Get stats age and dead tuple ratio
+        let stats_info: (Option<chrono::DateTime<chrono::Utc>>, Option<f64>) = sqlx::query_as(
+            "SELECT last_analyze, CASE WHEN n_live_tup > 0 THEN (n_dead_tup::float / n_live_tup) * 100 ELSE 0 END \
+             FROM pg_stat_user_tables WHERE relname = 'events'"
+        )
+        .fetch_optional(&state.read_pool)
+        .await
+        .unwrap_or(None)
+        .map(|(last_analyze, error_pct)| (last_analyze, error_pct))
+        .unwrap_or((None, None));
+        
+        if let Some(error_pct) = stats_info.1 {
+            body_obj.insert("approximate_error_pct".to_string(), json!(error_pct.min(100.0)));
+        }
+        if let Some(last_analyze) = stats_info.0 {
+            body_obj.insert("last_analyzed".to_string(), json!(last_analyze.to_rfc3339()));
+        }
+    }
+
+    let body = serde_json::Value::Object(body_obj);
     let mut response = Json(body).into_response();
     if let Some(ref tag) = etag {
         response.headers_mut().insert("ETag", tag.parse().unwrap());
@@ -1756,6 +1780,28 @@ pub async fn export_events(
 
     let rows = q.fetch_all(&state.pool).await?;
 
+    // Get total count of available rows (for Content-Range header)
+    let total_count: i64 = {
+        let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
+        let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
+        if let Some(ref cid) = params.contract_id {
+            cq = cq.bind(cid);
+        }
+        if let Some(ref et) = params.event_type {
+            cq = cq.bind(et);
+        }
+        if let Some(fl) = params.from_ledger {
+            cq = cq.bind(fl);
+        }
+        if let Some(tl) = params.to_ledger {
+            cq = cq.bind(tl);
+        }
+        cq.fetch_one(&state.pool).await?
+    };
+
+    let returned_count = rows.len() as i64;
+    let content_range = format!("items 0-{}/{}", returned_count.saturating_sub(1), total_count);
+
     #[cfg(feature = "parquet")]
     if want_parquet {
         use crate::parquet_export::{write_events_parquet, EventRow};
@@ -1785,6 +1831,7 @@ pub async fn export_events(
                 header::CONTENT_DISPOSITION,
                 "attachment; filename=\"events.parquet\"",
             )
+            .header("Content-Range", content_range)
             .body(Body::from(bytes))
             .unwrap());
     }
@@ -1814,6 +1861,7 @@ pub async fn export_events(
             header::CONTENT_DISPOSITION,
             "attachment; filename=\"events.csv\"",
         )
+        .header("Content-Range", content_range)
         .body(Body::from(csv))
         .unwrap())
 }

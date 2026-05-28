@@ -716,8 +716,12 @@ impl<R: RpcClient> Indexer<R> {
     #[instrument(skip(self), fields(start_ledger = start_ledger))]
     async fn fetch_and_store_events(&self, start_ledger: u64) -> Result<FetchResult, IndexerFetchError> {
         let cycle_start = std::time::Instant::now();
-        // Resume from persisted cursor if available, otherwise start from ledger.
-        let mut cursor: Option<String> = self.load_checkpoint().await;
+        // Resume from persisted cursor if available (unless INDEXER_IGNORE_CHECKPOINT is set), otherwise start from ledger.
+        let mut cursor: Option<String> = if self.config.indexer_ignore_checkpoint {
+            None
+        } else {
+            self.load_checkpoint().await
+        };
         let mut latest_ledger = start_ledger;
         let mut total_fetched = 0;
         let mut total_inserted = 0;
@@ -730,6 +734,7 @@ impl<R: RpcClient> Indexer<R> {
         tracing::debug!(
             start_ledger = start_ledger,
             cursor = cursor.as_deref().unwrap_or("<none>"),
+            ignore_checkpoint = self.config.indexer_ignore_checkpoint,
             "Indexer cycle starting",
         );
 
@@ -836,6 +841,12 @@ impl<R: RpcClient> Indexer<R> {
             // Persist the cursor that was just consumed so restarts resume correctly.
             if let Some(ref c) = next_cursor.as_ref().or(cursor.as_ref()) {
                 let _ = Self::save_checkpoint(&mut db_tx, c).await;
+                // Extract ledger from cursor (format: "ledger-id") and update metric
+                if let Some(ledger_str) = c.split('-').next() {
+                    if let Ok(ledger) = ledger_str.parse::<u64>() {
+                        crate::metrics::update_checkpoint_ledger(ledger);
+                    }
+                }
             }
             // Persist ledger state so /status is accurate after a restart.
             let _ = Self::save_indexer_state(&mut db_tx, start_ledger, latest_ledger).await;

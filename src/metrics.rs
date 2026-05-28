@@ -42,6 +42,16 @@ pub fn update_indexer_lag(lag: u64) {
     m::gauge!("soroban_pulse_indexer_lag_ledgers").set(lag as f64);
 }
 
+/// Update the last checkpointed ledger
+pub fn update_checkpoint_ledger(ledger: u64) {
+    m::gauge!("soroban_pulse_indexer_checkpoint_ledger").set(ledger as f64);
+}
+
+/// Update the age of table statistics (seconds since last ANALYZE)
+pub fn update_stats_age_seconds(age_secs: u64) {
+    m::gauge!("soroban_pulse_stats_last_analyzed_age_seconds").set(age_secs as f64);
+}
+
 /// Set the is_leader gauge: 1.0 when this replica holds the advisory lock, 0.0 otherwise.
 pub fn record_indexer_is_leader(is_leader: bool) {
     m::gauge!("soroban_pulse_indexer_is_leader").set(if is_leader { 1.0 } else { 0.0 });
