@@ -42,6 +42,16 @@ pub fn update_indexer_lag(lag: u64) {
     m::gauge!("soroban_pulse_indexer_lag_ledgers").set(lag as f64);
 }
 
+/// Update the last checkpointed ledger
+pub fn update_checkpoint_ledger(ledger: u64) {
+    m::gauge!("soroban_pulse_indexer_checkpoint_ledger").set(ledger as f64);
+}
+
+/// Update the age of table statistics (seconds since last ANALYZE)
+pub fn update_stats_age_seconds(age_secs: u64) {
+    m::gauge!("soroban_pulse_stats_last_analyzed_age_seconds").set(age_secs as f64);
+}
+
 /// Set the is_leader gauge: 1.0 when this replica holds the advisory lock, 0.0 otherwise.
 pub fn record_indexer_is_leader(is_leader: bool) {
     m::gauge!("soroban_pulse_indexer_is_leader").set(if is_leader { 1.0 } else { 0.0 });
@@ -115,6 +125,11 @@ pub fn record_kinesis_publish_failure() {
 /// Record a Pub/Sub publish failure (issue #264)
 pub fn record_pubsub_publish_failure() {
     m::counter!("soroban_pulse_pubsub_publish_failures_total").increment(1);
+}
+
+/// Record a Pub/Sub message with ordering key set (issue #398)
+pub fn record_pubsub_ordering_key_set() {
+    m::counter!("soroban_pulse_pubsub_ordering_key_set_total").increment(1);
 }
 
 /// Record a rate-limited request rejection (429 Too Many Requests)
@@ -200,6 +215,11 @@ pub fn record_http_request_duration(
 /// Update the active SSE connections count
 pub fn update_sse_connections(count: usize) {
     m::gauge!("soroban_pulse_sse_active_connections").set(count as f64);
+}
+
+/// Record SSE multi-stream contract IDs per connection (histogram)
+pub fn record_sse_multi_contract_ids(count: u64) {
+    m::histogram!("soroban_pulse_sse_multi_contract_ids").record(count as f64);
 }
 
 /// Update DB connection pool metrics

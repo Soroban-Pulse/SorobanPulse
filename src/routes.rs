@@ -61,6 +61,10 @@ pub struct AppState {
     pub schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
     /// key_hash → tenant_id; populated only when multi_tenant is enabled.
     pub tenant_map: Arc<std::collections::HashMap<String, String>>,
+    /// Cache for stats results (Issue #404)
+    pub stats_cache: moka::future::Cache<String, serde_json::Value>,
+    /// Shutdown signal for SSE streams (Issue #405)
+    pub shutdown_rx: tokio::sync::watch::Receiver<bool>,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -100,6 +104,7 @@ pub struct AppState {
         handlers::register_contract_schema,
         handlers::get_contract_schema,
         handlers::delete_contract_schema,
+        handlers::validate_event_data_against_schema,
     ),
     components(schemas(
         crate::models::Event,
@@ -115,6 +120,7 @@ pub struct AppState {
         crate::models::DiffParams,
         crate::models::ContractDiff,
         crate::models::DiffResponse,
+        crate::error::ValidationErrorDetail,
     )),
     tags(
         (name = "events", description = "Event indexing endpoints"),
@@ -230,6 +236,7 @@ pub fn create_router_with_tx_and_tenant_map(
     config: crate::config::Config,
     schema_validator: Option<Arc<crate::schema_validator::SchemaValidator>>,
     tenant_map: Arc<std::collections::HashMap<String, String>>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Router {
     let cors = build_cors(allowed_origins);
 
@@ -243,6 +250,10 @@ pub fn create_router_with_tx_and_tenant_map(
         .time_to_live(std::time::Duration::from_secs(
             config.contract_count_cache_ttl_secs,
         ))
+        .build();
+    let stats_cache = moka::future::Cache::builder()
+        .max_capacity(1)
+        .time_to_live(std::time::Duration::from_secs(config.stats_cache_ttl_secs))
         .build();
     let app_state = AppState {
         pool,
@@ -261,6 +272,8 @@ pub fn create_router_with_tx_and_tenant_map(
         config,
         schema_validator,
         tenant_map,
+        stats_cache,
+        shutdown_rx,
     };
 
     // Build governor config: burst = rate_limit_per_minute, replenish 1 token per (60/rate) seconds.
@@ -303,6 +316,8 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
         .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
         .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
+        .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
+        .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
         .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
         .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
         .route("/subscriptions/{id}/ack", axum::routing::post(subscriptions::ack_subscription));

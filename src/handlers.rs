@@ -446,6 +446,25 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
 pub async fn get_event_stats(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     use std::collections::HashMap;
 
+    let cache_key = "stats";
+
+    // Try to get from cache
+    if let Some(cached) = state.stats_cache.get(cache_key).await {
+        crate::metrics::record_stats_cache_hit();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_str(&format!(
+                "public, max-age={}",
+                state.config.stats_cache_ttl_secs
+            ))
+            .unwrap_or_else(|_| axum::http::HeaderValue::from_static("public, max-age=30")),
+        );
+        return Ok((headers, Json(cached)));
+    }
+
+    crate::metrics::record_stats_cache_miss();
+
     // Total events and ledger range from raw table (fast with index)
     let totals_row = sqlx::query(
         "SELECT COUNT(*) AS total_events, MIN(ledger) AS min_ledger, MAX(ledger) AS max_ledger FROM events",
@@ -517,13 +536,25 @@ pub async fn get_event_stats(State(state): State<AppState>) -> Result<impl IntoR
         computed_at: Utc::now(),
     };
 
+    let stats_json = serde_json::to_value(&stats)?;
+
+    // Store in cache
+    state
+        .stats_cache
+        .insert(cache_key.to_string(), stats_json.clone())
+        .await;
+
     let mut headers = HeaderMap::new();
     headers.insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("public, max-age=60"),
+        axum::http::HeaderValue::from_str(&format!(
+            "public, max-age={}",
+            state.config.stats_cache_ttl_secs
+        ))
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("public, max-age=30")),
     );
 
-    Ok((headers, Json(stats)))
+    Ok((headers, Json(stats_json)))
 }
 
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -647,6 +678,22 @@ pub async fn stream_events_multi(
     }
 
     let ids: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).collect();
+
+    // Validate number of contract IDs does not exceed limit
+    if ids.len() > state.config.sse_multi_max_contract_ids {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("too many contract IDs (max {})", state.config.sse_multi_max_contract_ids),
+                "code": "VALIDATION_ERROR",
+                "limit": state.config.sse_multi_max_contract_ids,
+                "provided": ids.len(),
+            })),
+        ));
+    }
+
+    // Record histogram metric for contract IDs per connection
+    crate::metrics::record_sse_multi_contract_ids(ids.len() as u64);
 
     // Validate every ID; collect all invalid ones for a helpful error message.
     let invalid: Vec<String> = ids
@@ -1008,8 +1055,9 @@ async fn stream_events_internal(
             enc_key_old,
             tenant_id,
             false, // closed
+            state.shutdown_rx.clone(),
         ),
-        move |(mut rx, filter, ka, cols, ek, ek_old, tid, closed)| async move {
+        move |(mut rx, filter, ka, cols, ek, ek_old, tid, closed, mut shutdown_rx)| async move {
             if closed {
                 return None;
             }
@@ -1036,18 +1084,23 @@ async fn stream_events_internal(
                                 .id(event.id.to_string())
                                 .retry(Duration::from_millis(ka))
                                 .data(data);
-                            return Some((Ok(sse), (rx, filter, ka, cols, ek, ek_old, tid, false)));
+                            return Some((Ok(sse), (rx, filter, ka, cols, ek, ek_old, tid, false, shutdown_rx)));
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             let close_event = Event::default().event("close").data("stream closed");
-                            return Some((Ok(close_event), (rx, filter, ka, cols, ek, ek_old, tid, true)));
+                            return Some((Ok(close_event), (rx, filter, ka, cols, ek, ek_old, tid, true, shutdown_rx)));
                         }
                     },
                     _ = interval.tick() => {
                         let ts = chrono::Utc::now().to_rfc3339();
                         let ping = Event::default().event("ping").data(ts);
-                        return Some((Ok(ping), (rx, filter, ka, cols, ek, ek_old, tid, false)));
+                        return Some((Ok(ping), (rx, filter, ka, cols, ek, ek_old, tid, false, shutdown_rx)));
+                    }
+                    _ = shutdown_rx.changed() => {
+                        // Server is shutting down, emit close event
+                        let close_event = Event::default().event("close").data("server shutting down");
+                        return Some((Ok(close_event), (rx, filter, ka, cols, ek, ek_old, tid, true, shutdown_rx)));
                     }
                 }
             }
@@ -1794,6 +1847,30 @@ pub async fn get_events(
         "pagination": "offset — migrate to cursor parameter for better performance",
     });
 
+    let mut body_obj = body.as_object().unwrap().clone();
+    
+    // Add approximation metadata when using approximate count
+    if approximate {
+        // Get stats age and dead tuple ratio
+        let stats_info: (Option<chrono::DateTime<chrono::Utc>>, Option<f64>) = sqlx::query_as(
+            "SELECT last_analyze, CASE WHEN n_live_tup > 0 THEN (n_dead_tup::float / n_live_tup) * 100 ELSE 0 END \
+             FROM pg_stat_user_tables WHERE relname = 'events'"
+        )
+        .fetch_optional(&state.read_pool)
+        .await
+        .unwrap_or(None)
+        .map(|(last_analyze, error_pct)| (last_analyze, error_pct))
+        .unwrap_or((None, None));
+        
+        if let Some(error_pct) = stats_info.1 {
+            body_obj.insert("approximate_error_pct".to_string(), json!(error_pct.min(100.0)));
+        }
+        if let Some(last_analyze) = stats_info.0 {
+            body_obj.insert("last_analyzed".to_string(), json!(last_analyze.to_rfc3339()));
+        }
+    }
+
+    let body = serde_json::Value::Object(body_obj);
     let mut response = Json(body).into_response();
     if let Some(ref tag) = etag {
         response.headers_mut().insert("ETag", tag.parse().unwrap());
@@ -1904,6 +1981,28 @@ pub async fn export_events(
 
     let rows = q.fetch_all(&state.pool).await?;
 
+    // Get total count of available rows (for Content-Range header)
+    let total_count: i64 = {
+        let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
+        let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
+        if let Some(ref cid) = params.contract_id {
+            cq = cq.bind(cid);
+        }
+        if let Some(ref et) = params.event_type {
+            cq = cq.bind(et);
+        }
+        if let Some(fl) = params.from_ledger {
+            cq = cq.bind(fl);
+        }
+        if let Some(tl) = params.to_ledger {
+            cq = cq.bind(tl);
+        }
+        cq.fetch_one(&state.pool).await?
+    };
+
+    let returned_count = rows.len() as i64;
+    let content_range = format!("items 0-{}/{}", returned_count.saturating_sub(1), total_count);
+
     #[cfg(feature = "parquet")]
     if want_parquet {
         use crate::parquet_export::{write_events_parquet, EventRow};
@@ -1933,6 +2032,7 @@ pub async fn export_events(
                 header::CONTENT_DISPOSITION,
                 "attachment; filename=\"events.parquet\"",
             )
+            .header("Content-Range", content_range)
             .body(Body::from(bytes))
             .unwrap());
     }
@@ -1962,6 +2062,7 @@ pub async fn export_events(
             header::CONTENT_DISPOSITION,
             "attachment; filename=\"events.csv\"",
         )
+        .header("Content-Range", content_range)
         .body(Body::from(csv))
         .unwrap())
 }
@@ -2310,10 +2411,11 @@ pub async fn get_events_by_tx_batch(
     State(state): State<AppState>,
     Json(body): Json<crate::models::BatchTxRequest>,
 ) -> Result<Json<Value>, AppError> {
-    if body.hashes.len() > 100 {
-        return Err(AppError::Validation(
-            "too many hashes: maximum is 100".to_string(),
-        ));
+    if body.hashes.len() > state.config.batch_tx_max_size {
+        return Err(AppError::Validation(format!(
+            "too many hashes: maximum is {}",
+            state.config.batch_tx_max_size
+        )));
     }
 
     // Validate all hashes; collect invalid ones for a helpful error.
@@ -2330,7 +2432,13 @@ pub async fn get_events_by_tx_batch(
         )));
     }
 
-    let hashes: Vec<String> = body.hashes.iter().map(|h| h.to_lowercase()).collect();
+    // Deduplicate hashes using HashSet
+    let mut unique_hashes: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for h in &body.hashes {
+        unique_hashes.insert(h.to_lowercase());
+    }
+    let deduplicated_count = unique_hashes.len();
+    let hashes: Vec<String> = unique_hashes.into_iter().collect();
 
     // Single query using ANY().
     let rows = sqlx::query(
@@ -2373,7 +2481,11 @@ pub async fn get_events_by_tx_batch(
         }
     }
 
-    Ok(Json(Value::Object(result)))
+    // Add deduplicated_count to response
+    let mut response_obj = result;
+    response_obj.insert("deduplicated_count".to_string(), Value::Number(deduplicated_count.into()));
+
+    Ok(Json(Value::Object(response_obj)))
 }
 
 #[utoipa::path(
@@ -2659,10 +2771,32 @@ pub async fn get_events_diff(
     State(state): State<AppState>,
     Query(params): Query<crate::models::DiffParams>,
 ) -> Result<Json<Value>, AppError> {
-    if params.from_ledger > params.to_ledger {
+    // Validate from_ledger and to_ledger are positive
+    if params.from_ledger < 0 {
         return Err(AppError::Validation(
-            "from_ledger must be <= to_ledger".to_string(),
+            "from_ledger must be a positive integer".to_string(),
         ));
+    }
+    if params.to_ledger < 0 {
+        return Err(AppError::Validation(
+            "to_ledger must be a positive integer".to_string(),
+        ));
+    }
+
+    // Validate from_ledger < to_ledger
+    if params.from_ledger >= params.to_ledger {
+        return Err(AppError::Validation(
+            "from_ledger must be less than to_ledger".to_string(),
+        ));
+    }
+
+    // Validate ledger range does not exceed maximum
+    let ledger_range = params.to_ledger - params.from_ledger;
+    if ledger_range > state.config.max_ledger_range as i64 {
+        return Err(AppError::Validation(format!(
+            "ledger range exceeds maximum of {}",
+            state.config.max_ledger_range
+        )));
     }
 
     // Single query: count per (contract_id, event_type) in range
@@ -6916,5 +7050,52 @@ pub async fn delete_contract_schema(
         ))
     } else {
         Err(AppError::NotFound)
+    }
+}
+
+/// Validate event data against a contract's JSON Schema
+#[utoipa::path(
+    post,
+    path = "/v1/admin/contracts/{contract_id}/validate",
+    tag = "admin",
+    params(
+        ("contract_id" = String, Path, description = "Contract ID")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Validation result"),
+        (status = 400, description = "Validation failed with error details"),
+        (status = 404, description = "No schema registered for this contract"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("api_key" = [])
+    )
+)]
+pub async fn validate_event_data_against_schema(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+    Json(event_data): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_contract_id(&contract_id)?;
+
+    let validator = state.schema_validator
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Schema validator not initialized".to_string()))?;
+
+    match validator.validate_event_data(&contract_id, &event_data).await {
+        None => Err(AppError::NotFound),
+        Some((true, _)) => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "valid": true,
+                "message": "Event data is valid"
+            }))
+        )),
+        Some((false, errors)) => {
+            let error_msg = format!("Event data validation failed with {} error(s)", errors.len());
+            Err(AppError::ValidationWithDetails(error_msg, errors))
+        }
     }
 }

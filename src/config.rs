@@ -176,6 +176,8 @@ pub struct Config {
     pub sse_keepalive_interval_ms: u64,
     pub sse_max_connections: usize,
     pub sse_drain_timeout_secs: u64,
+    /// Maximum number of contract IDs per SSE multi-stream connection (default 100).
+    pub sse_multi_max_contract_ids: usize,
     pub environment: Environment,
     pub max_body_size_bytes: usize,
     pub log_sample_rate: u32,
@@ -205,6 +207,8 @@ pub struct Config {
     // Issue #264: GCP Pub/Sub streaming
     pub pubsub_project_id: Option<String>,
     pub pubsub_topic_id: Option<String>,
+    // Issue #398: Pub/Sub message ordering
+    pub pubsub_enable_message_ordering: bool,
     /// Maximum allowed size of serialized event_data in bytes.
     pub max_event_data_bytes: usize,
     /// Maximum rows for CSV/JSON export.
@@ -247,6 +251,8 @@ pub struct Config {
     pub pruning_interval_hours: u64,
     // Issue #325: SSE Last-Event-ID replay limit
     pub sse_replay_limit: u64,
+    // Issue #396: Indexer checkpoint persistence
+    pub indexer_ignore_checkpoint: bool,
 }
 
 impl Default for Config {
@@ -297,6 +303,7 @@ impl Default for Config {
             aws_region: None,
             pubsub_project_id: None,
             pubsub_topic_id: None,
+            pubsub_enable_message_ordering: true,
             max_event_data_bytes: 65536,
             export_max_rows: 10_000,
             contract_count_cache_size: 1000,
@@ -319,6 +326,7 @@ impl Default for Config {
             retention_days: 90,
             pruning_interval_hours: 24,
             sse_replay_limit: 500,
+            indexer_ignore_checkpoint: false,
         }
     }
 }
@@ -808,6 +816,16 @@ impl Config {
         )
         .unwrap_or(5);
 
+        let sse_multi_max_contract_ids = parse_int_range::<usize>(
+            "SSE_MULTI_MAX_CONTRACT_IDS",
+            &env_or_file_or("SSE_MULTI_MAX_CONTRACT_IDS", &file, "100"),
+            1,
+            usize::MAX,
+            "100",
+            &mut errors,
+        )
+        .unwrap_or(5);
+
         let max_body_size_bytes = parse_int::<usize>(
             "MAX_BODY_SIZE_BYTES",
             &env_or_file_or("MAX_BODY_SIZE_BYTES", &file, "1048576"),
@@ -939,6 +957,7 @@ impl Config {
             sse_keepalive_interval_ms,
             sse_max_connections,
             sse_drain_timeout_secs,
+            sse_multi_max_contract_ids,
             environment,
             max_body_size_bytes,
             log_sample_rate,
@@ -969,6 +988,9 @@ impl Config {
             aws_region: env::var("AWS_REGION").ok().filter(|s| !s.is_empty()),
             pubsub_project_id: env::var("PUBSUB_PROJECT_ID").ok().filter(|s| !s.is_empty()),
             pubsub_topic_id: env::var("PUBSUB_TOPIC_ID").ok().filter(|s| !s.is_empty()),
+            pubsub_enable_message_ordering: env_or_file("PUBSUB_ENABLE_MESSAGE_ORDERING", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
+                .unwrap_or(true),
             max_event_data_bytes: parse_int::<usize>(
                 "MAX_EVENT_DATA_BYTES",
                 &env_or_file_or("MAX_EVENT_DATA_BYTES", &file, "65536"),
@@ -1026,6 +1048,13 @@ impl Config {
             sse_replay_limit: env_or_file("SSE_REPLAY_LIMIT", &file)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500),
+            max_ledger_range: parse_int::<u64>(
+                "MAX_LEDGER_RANGE",
+                &env_or_file_or("MAX_LEDGER_RANGE", &file, "100000"),
+                "100000",
+                &mut errors,
+            )
+            .unwrap_or(100_000),
         }
     }
 }
