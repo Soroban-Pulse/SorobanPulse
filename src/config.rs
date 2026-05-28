@@ -247,6 +247,8 @@ pub struct Config {
     pub pruning_interval_hours: u64,
     // Issue #325: SSE Last-Event-ID replay limit
     pub sse_replay_limit: u64,
+    /// Maximum ledger range for diff queries (default 100 000).
+    pub max_ledger_range: u64,
 }
 
 impl Default for Config {
@@ -1013,6 +1015,13 @@ impl Config {
             sse_replay_limit: env_or_file("SSE_REPLAY_LIMIT", &file)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(500),
+            max_ledger_range: parse_int::<u64>(
+                "MAX_LEDGER_RANGE",
+                &env_or_file_or("MAX_LEDGER_RANGE", &file, "100000"),
+                "100000",
+                &mut errors,
+            )
+            .unwrap_or(100_000),
         }
     }
 }
