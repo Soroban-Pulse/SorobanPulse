@@ -191,6 +191,31 @@ pub fn record_replay_job() {
     m::counter!("soroban_pulse_replay_jobs_total").increment(1);
 }
 
+/// Record indexer cycle duration (seconds)
+pub fn record_indexer_cycle_duration(duration_secs: f64) {
+    m::histogram!("soroban_pulse_indexer_cycle_duration_seconds").record(duration_secs);
+}
+
+/// Record events per cycle
+pub fn record_indexer_events_per_cycle(count: u64) {
+    m::histogram!("soroban_pulse_indexer_events_per_cycle").record(count as f64);
+}
+
+/// Record out-of-order events (ledger sequence < current cursor)
+pub fn record_out_of_order_events(count: u64) {
+    m::counter!("soroban_pulse_indexer_out_of_order_events_total").increment(count);
+}
+
+/// Record oversized RPC response
+pub fn record_oversized_rpc_response() {
+    m::counter!("soroban_pulse_rpc_oversized_response_total").increment(1);
+}
+
+/// Update indexer lock wait duration (seconds)
+pub fn update_indexer_lock_wait_duration(duration_secs: f64) {
+    m::gauge!("soroban_pulse_indexer_lock_wait_seconds").set(duration_secs);
+}
+
 /// Record events pruned
 pub fn increment_events_pruned(count: u64) {
     m::counter!("soroban_pulse_events_pruned_total").increment(count);
