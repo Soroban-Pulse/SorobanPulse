@@ -109,6 +109,8 @@ pub struct AppState {
         handlers::start_mask_events,
         handlers::get_mask_job_status,
         handlers::get_timeseries,
+        handlers::get_contract_summary,
+        handlers::get_contracts_search,
     ),
     components(schemas(
         crate::models::Event,
@@ -116,6 +118,11 @@ pub struct AppState {
         crate::models::SortOrder,
         crate::models::PaginationParams,
         crate::models::ContractSummary,
+        crate::models::ContractDetailSummary,
+        crate::models::LedgerRange,
+        crate::models::EventTypeBreakdown,
+        crate::models::ContractSearchResult,
+        crate::models::ContractSearchParams,
         crate::models::EventStats,
         crate::models::ContractStatEntry,
         crate::models::ReplayRequest,
@@ -369,6 +376,8 @@ pub fn create_router_with_tx_and_tenant_map(
             get(handlers::get_events_by_ledger_hash),
         )
         .route("/contracts", get(handlers::get_contracts))
+        .route("/contracts/search", get(handlers::get_contracts_search))
+        .route("/contracts/{contract_id}/summary", get(handlers::get_contract_summary))
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
         .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
         .route("/admin/mask-events", axum::routing::post(handlers::start_mask_events))

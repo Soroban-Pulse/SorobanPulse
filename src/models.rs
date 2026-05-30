@@ -97,6 +97,8 @@ pub struct PaginationParams {
     pub to_timestamp: Option<String>,
     /// Return event_data as base64-encoded gzip-compressed JSON (default: false).
     pub compact: Option<bool>,
+    /// Filter events by contract ID prefix (minimum 4 characters, uses LIKE 'prefix%').
+    pub contract_id_prefix: Option<String>,
 }
 
 /// Sort order for event list endpoints.
@@ -343,6 +345,49 @@ pub struct ContractSummary {
     pub first_seen_ledger: i64,
     pub last_seen_ledger: i64,
     pub last_event_at: DateTime<Utc>,
+}
+
+/// Detailed per-contract summary returned by GET /v1/contracts/:contract_id/summary.
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
+pub struct ContractDetailSummary {
+    pub contract_id: String,
+    pub total_events: i64,
+    pub first_event_at: Option<DateTime<Utc>>,
+    pub last_event_at: Option<DateTime<Utc>>,
+    pub unique_tx_count: i64,
+    pub ledger_range: LedgerRange,
+    pub event_type_breakdown: EventTypeBreakdown,
+    /// Whether the data was served from the materialized view (true) or a live query (false).
+    pub from_cache: bool,
+}
+
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
+pub struct LedgerRange {
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
+pub struct EventTypeBreakdown {
+    pub contract: i64,
+    pub diagnostic: i64,
+    pub system: i64,
+}
+
+/// A single result from the contract ID prefix search endpoint.
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct ContractSearchResult {
+    pub contract_id: String,
+    pub event_count: i64,
+    pub last_event_at: Option<DateTime<Utc>>,
+}
+
+/// Query parameters for GET /v1/contracts/search
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ContractSearchParams {
+    /// Prefix to search for (minimum 4 characters).
+    pub q: Option<String>,
+    pub limit: Option<i64>,
 }
 
 /// Aggregate statistics for indexed events.

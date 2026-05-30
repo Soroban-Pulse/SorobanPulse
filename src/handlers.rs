@@ -26,7 +26,8 @@ use crate::{
     middleware::TenantId,
     models::{
         self, BatchTxRequest, ContractSummary, ExportParams, PaginationParams, ReplayRequest,
-        StreamParams,
+        StreamParams, ContractDetailSummary, ContractSearchParams, ContractSearchResult,
+        EventTypeBreakdown, LedgerRange,
     },
     routes::AppState,
 };
@@ -1302,6 +1303,7 @@ fn ndjson_response(events: impl Iterator<Item = Value>) -> Response<Body> {
         ("topic_sym" = Option<String>, Query, description = "Filter by first topic symbol (uses topic_0_sym generated column index)"),
         ("search" = Option<String>, Query, description = "Full-text search query for event_data (searches all string values in the JSON)"),
         ("compact" = Option<bool>, Query, description = "Return event_data as a base64-encoded gzip-compressed JSON string instead of the full JSON object. Clients that need the full data can decode it; clients that only need metadata can ignore it. Default: false."),
+        ("contract_id_prefix" = Option<String>, Query, description = "Filter events by contract ID prefix (minimum 4 alphanumeric characters, uses LIKE 'prefix%' with the contract_id index)."),
     ),
     responses(
         (status = 200, description = "Paginated list of events (JSON or NDJSON depending on Accept header). When compact=true, each event's event_data field is a base64-encoded gzip-compressed JSON string (Content-Encoding: gzip).",
@@ -1391,6 +1393,21 @@ pub async fn get_events(
         Vec::new()
     };
 
+    // Validate contract_id_prefix if provided (#459)
+    if let Some(ref prefix) = params.contract_id_prefix {
+        let trimmed = prefix.trim();
+        if trimmed.len() < 4 {
+            return Err(AppError::Validation(
+                "contract_id_prefix must be at least 4 characters".to_string(),
+            ));
+        }
+        if !trimmed.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(AppError::Validation(
+                "contract_id_prefix must contain only alphanumeric characters".to_string(),
+            ));
+        }
+    }
+
     let limit = params.limit();
     let columns = resolve_columns(&params)?;
     let sort_order = params.sort.unwrap_or(crate::models::SortOrder::Desc);
@@ -1426,6 +1443,10 @@ pub async fn get_events(
         }
         if !contract_ids_list.is_empty() {
             conditions.push(format!("contract_id = ANY(${bind_idx}::text[])"));
+            bind_idx += 1;
+        }
+        if params.contract_id_prefix.is_some() {
+            conditions.push(format!("contract_id LIKE ${bind_idx}"));
             bind_idx += 1;
         }
         if params.event_type.is_some() {
@@ -1526,6 +1547,9 @@ pub async fn get_events(
         }
         if !contract_ids_list.is_empty() {
             q = q.bind(&contract_ids_list);
+        }
+        if let Some(ref prefix) = params.contract_id_prefix {
+            q = q.bind(format!("{}%", prefix.trim()));
         }
         if let Some(ref et) = params.event_type {
             q = q.bind(et);
@@ -1676,6 +1700,10 @@ pub async fn get_events(
         conditions.push(format!("contract_id = ANY(${bind_idx}::text[])"));
         bind_idx += 1;
     }
+    if params.contract_id_prefix.is_some() {
+        conditions.push(format!("contract_id LIKE ${bind_idx}"));
+        bind_idx += 1;
+    }
     if params.event_type.is_some() {
         conditions.push(format!("event_type = ${bind_idx}"));
         bind_idx += 1;
@@ -1764,6 +1792,9 @@ pub async fn get_events(
     }
     if !contract_ids_list.is_empty() {
         q = q.bind(&contract_ids_list);
+    }
+    if let Some(ref prefix) = params.contract_id_prefix {
+        q = q.bind(format!("{}%", prefix.trim()));
     }
     if let Some(ref et) = params.event_type {
         q = q.bind(et);
@@ -3350,6 +3381,207 @@ pub async fn get_contracts(
     });
 
     Ok(Json(result))
+}
+
+/// In-process TTL cache for per-contract summary data.
+static CONTRACT_SUMMARY_CACHE: OnceLock<Mutex<std::collections::HashMap<String, (ContractDetailSummary, std::time::Instant)>>> = OnceLock::new();
+
+fn contract_summary_cache() -> &'static Mutex<std::collections::HashMap<String, (ContractDetailSummary, std::time::Instant)>> {
+    CONTRACT_SUMMARY_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// TTL for contract summary cache entries (configurable via env, default 60s).
+fn summary_cache_ttl() -> std::time::Duration {
+    let secs: u64 = std::env::var("CONTRACT_SUMMARY_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    std::time::Duration::from_secs(secs)
+}
+
+/// GET /v1/contracts/:contract_id/summary
+///
+/// Returns a per-contract summary: total events, first/last event timestamp,
+/// event type breakdown, unique tx count, and ledger range.
+///
+/// Uses the `mv_contract_summary` materialized view as the primary data source.
+/// Falls back to a direct query if the view is stale or unavailable.
+/// Results are cached in-process with a configurable TTL.
+#[utoipa::path(
+    get,
+    path = "/v1/contracts/{contract_id}/summary",
+    tag = "events",
+    params(
+        ("contract_id" = String, Path, description = "Stellar contract ID (56-char, starts with C)"),
+    ),
+    responses(
+        (status = 200, description = "Contract summary", body = crate::models::ContractDetailSummary),
+        (status = 400, description = "Invalid contract_id format", body = ErrorResponse),
+        (status = 404, description = "Contract not found", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn get_contract_summary(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    validate_contract_id(&contract_id)?;
+
+    let ttl = summary_cache_ttl();
+
+    // Check in-process cache
+    {
+        let cache = contract_summary_cache().lock().await;
+        if let Some((summary, inserted_at)) = cache.get(&contract_id) {
+            if inserted_at.elapsed() < ttl {
+                return Ok(Json(serde_json::to_value(summary)?));
+            }
+        }
+    }
+
+    // Try materialized view first
+    let mv_row = sqlx::query(
+        "SELECT total_events, first_event_at, last_event_at, min_ledger, max_ledger, \
+         unique_tx_count, contract_events, diagnostic_events, system_events \
+         FROM mv_contract_summary WHERE contract_id = $1",
+    )
+    .bind(&contract_id)
+    .fetch_optional(&state.read_pool)
+    .await;
+
+    let summary = match mv_row {
+        Ok(Some(row)) => {
+            ContractDetailSummary {
+                contract_id: contract_id.clone(),
+                total_events: row.try_get("total_events")?,
+                first_event_at: row.try_get("first_event_at")?,
+                last_event_at: row.try_get("last_event_at")?,
+                unique_tx_count: row.try_get("unique_tx_count")?,
+                ledger_range: LedgerRange {
+                    min: row.try_get("min_ledger")?,
+                    max: row.try_get("max_ledger")?,
+                },
+                event_type_breakdown: EventTypeBreakdown {
+                    contract: row.try_get("contract_events")?,
+                    diagnostic: row.try_get("diagnostic_events")?,
+                    system: row.try_get("system_events")?,
+                },
+                from_cache: true,
+            }
+        }
+        // Materialized view missing or stale — fall back to direct query
+        _ => {
+            let row = sqlx::query(
+                "SELECT \
+                    COUNT(*)                                                        AS total_events, \
+                    MIN(timestamp)                                                  AS first_event_at, \
+                    MAX(timestamp)                                                  AS last_event_at, \
+                    MIN(ledger)                                                     AS min_ledger, \
+                    MAX(ledger)                                                     AS max_ledger, \
+                    COUNT(DISTINCT tx_hash)                                         AS unique_tx_count, \
+                    COUNT(*) FILTER (WHERE event_type = 'contract')                 AS contract_events, \
+                    COUNT(*) FILTER (WHERE event_type = 'diagnostic')               AS diagnostic_events, \
+                    COUNT(*) FILTER (WHERE event_type = 'system')                   AS system_events \
+                 FROM events WHERE contract_id = $1",
+            )
+            .bind(&contract_id)
+            .fetch_one(&state.read_pool)
+            .await?;
+
+            let total_events: i64 = row.try_get("total_events")?;
+            if total_events == 0 {
+                return Err(AppError::NotFound);
+            }
+
+            ContractDetailSummary {
+                contract_id: contract_id.clone(),
+                total_events,
+                first_event_at: row.try_get("first_event_at")?,
+                last_event_at: row.try_get("last_event_at")?,
+                unique_tx_count: row.try_get("unique_tx_count")?,
+                ledger_range: LedgerRange {
+                    min: row.try_get("min_ledger")?,
+                    max: row.try_get("max_ledger")?,
+                },
+                event_type_breakdown: EventTypeBreakdown {
+                    contract: row.try_get("contract_events")?,
+                    diagnostic: row.try_get("diagnostic_events")?,
+                    system: row.try_get("system_events")?,
+                },
+                from_cache: false,
+            }
+        }
+    };
+
+    // Check for not-found after materialized view path
+    if summary.total_events == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    // Store in cache
+    {
+        let mut cache = contract_summary_cache().lock().await;
+        cache.insert(contract_id, (summary.clone(), std::time::Instant::now()));
+    }
+
+    Ok(Json(serde_json::to_value(&summary)?))
+}
+
+/// GET /v1/contracts/search?q=prefix
+///
+/// Returns contract IDs matching the given prefix (minimum 4 characters).
+/// Uses a `LIKE 'prefix%'` query against the existing `contract_id` index.
+#[utoipa::path(
+    get,
+    path = "/v1/contracts/search",
+    tag = "events",
+    params(
+        ("q" = String, Query, description = "Contract ID prefix to search for (minimum 4 characters)"),
+        ("limit" = Option<i64>, Query, description = "Maximum results to return (1–100, default 20)"),
+    ),
+    responses(
+        (status = 200, description = "Matching contract IDs with event counts", body = Vec<crate::models::ContractSearchResult>),
+        (status = 400, description = "Prefix too short (< 4 chars) or missing", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn get_contracts_search(
+    State(state): State<AppState>,
+    Query(params): Query<ContractSearchParams>,
+) -> Result<Json<Value>, AppError> {
+    let prefix = params.q.as_deref().unwrap_or("").trim().to_string();
+
+    if prefix.len() < 4 {
+        return Err(AppError::Validation(
+            "q must be at least 4 characters to prevent full-table scans".to_string(),
+        ));
+    }
+
+    // Sanitize: only allow alphanumeric characters in the prefix to prevent injection
+    if !prefix.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err(AppError::Validation(
+            "q must contain only alphanumeric characters".to_string(),
+        ));
+    }
+
+    let limit = params.limit.unwrap_or(20).clamp(1, 100);
+    let like_pattern = format!("{}%", prefix);
+
+    let rows = sqlx::query_as::<_, ContractSearchResult>(
+        "SELECT contract_id, COUNT(*) AS event_count, MAX(timestamp) AS last_event_at \
+         FROM events WHERE contract_id LIKE $1 \
+         GROUP BY contract_id ORDER BY event_count DESC LIMIT $2",
+    )
+    .bind(&like_pattern)
+    .bind(limit)
+    .fetch_all(&state.read_pool)
+    .await?;
+
+    Ok(Json(json!({
+        "data": rows,
+        "query": prefix,
+        "limit": limit,
+    })))
 }
 
 /// Query the min and max indexed ledger from the events table.
