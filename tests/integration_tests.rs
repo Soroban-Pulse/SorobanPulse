@@ -772,6 +772,125 @@ async fn stats_requires_auth_when_key_configured(pool: PgPool) {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn contract_history_returns_daily_buckets_from_matview(pool: PgPool) {
+    let contract_id = "CH23456789012345678901234567890123456789012345678901234X";
+    for (day, tx_hash) in [
+        ("2026-05-28T12:00:00Z", "100000000000000000000000000000000000000000000000000000000000000a"),
+        ("2026-05-28T13:00:00Z", "100000000000000000000000000000000000000000000000000000000000000b"),
+        ("2026-05-30T12:00:00Z", "100000000000000000000000000000000000000000000000000000000000000c"),
+    ] {
+        sqlx::query(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+             VALUES ($1, 'contract', $2, 1, $3::timestamptz, '{}'::jsonb)",
+        )
+        .bind(contract_id)
+        .bind(tx_hash)
+        .bind(day)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("REFRESH MATERIALIZED VIEW mv_contract_summary").execute(&pool).await.unwrap();
+
+    let app = make_router(pool, None);
+    let resp = app.oneshot(Request::builder()
+        .uri(format!("/v1/contracts/{contract_id}/stats/history?bucket=1d&from=2026-05-28&to=2026-05-30"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 3);
+    assert_eq!(data[0]["event_count"], 2);
+    assert_eq!(data[0]["unique_tx_count"], 2);
+    assert_eq!(data[1]["event_count"], 0);
+    assert_eq!(data[2]["event_count"], 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn related_tx_endpoint_follows_event_data_tx_hash_references(pool: PgPool) {
+    let contract_a = "CA23456789012345678901234567890123456789012345678901234X";
+    let contract_b = "CB23456789012345678901234567890123456789012345678901234X";
+    let root = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let related = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    sqlx::query(
+        "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+         VALUES ($1, 'contract', $2, 1, NOW(), $3)",
+    )
+    .bind(contract_a)
+    .bind(root)
+    .bind(serde_json::json!({"value": {"related_tx_hash": related}, "topic": ["swap"]}))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+         VALUES ($1, 'contract', $2, 2, NOW(), '{}'::jsonb)",
+    )
+    .bind(contract_b)
+    .bind(related)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = make_router(pool, None);
+    let resp = app.oneshot(Request::builder()
+        .uri(format!("/v1/events/tx/{root}/related?depth=1"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resp.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(body["total"], 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn abi_registration_retrieval_and_backfill_decoded_data(pool: PgPool) {
+    let contract_id = "CD23456789012345678901234567890123456789012345678901234X";
+    let tx_hash = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    sqlx::query(
+        "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data)
+         VALUES ($1, 'contract', $2, 1, NOW(), $3)",
+    )
+    .bind(contract_id)
+    .bind(tx_hash)
+    .bind(serde_json::json!({"topic": ["transfer"], "value": {"from": "GABC", "to": "GDEF", "amount": "1000"}}))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let app = make_router(pool.clone(), None);
+    let abi = serde_json::json!([{"name": "transfer", "inputs": [{"name": "from"}, {"name": "to"}, {"name": "amount"}]}]);
+    let resp = app.clone().oneshot(Request::builder()
+        .method("POST")
+        .uri(format!("/v1/admin/contracts/{contract_id}/abi"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(abi.to_string())).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = app.oneshot(Request::builder()
+        .uri(format!("/v1/admin/contracts/{contract_id}/abi"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    for _ in 0..20 {
+        let decoded: Option<serde_json::Value> =
+            sqlx::query_scalar("SELECT event_data_decoded FROM events WHERE tx_hash = $1")
+                .bind(tx_hash)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if decoded.as_ref().and_then(|v| v.get("amount")) == Some(&serde_json::json!("1000")) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("event_data_decoded was not backfilled");
+}
+
 // --- GET /v1/events with empty DB ---
 
 #[sqlx::test(migrations = "./migrations")]

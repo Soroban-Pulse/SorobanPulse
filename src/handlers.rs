@@ -608,6 +608,96 @@ pub async fn get_event_stats(State(state): State<AppState>) -> Result<impl IntoR
     Ok((headers, Json(stats_json)))
 }
 
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct ContractHistoryParams {
+    pub bucket: Option<String>,
+    pub days: Option<i64>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/contracts/{contract_id}/stats/history",
+    tag = "events",
+    params(
+        ("contract_id" = String, Path, description = "Stellar contract ID"),
+        ("bucket" = Option<String>, Query, description = "Aggregation bucket. Currently only 1d is supported"),
+        ("days" = Option<i64>, Query, description = "Number of daily buckets to return"),
+        ("from" = Option<String>, Query, description = "Start date, YYYY-MM-DD"),
+        ("to" = Option<String>, Query, description = "End date, YYYY-MM-DD"),
+    ),
+    responses(
+        (status = 200, description = "Daily contract event and unique transaction history", body = serde_json::Value),
+        (status = 400, description = "Invalid contract_id, bucket, or date range", body = ErrorResponse),
+    )
+)]
+pub async fn get_contract_stats_history(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+    Query(params): Query<ContractHistoryParams>,
+) -> Result<Json<Value>, AppError> {
+    validate_contract_id(&contract_id)?;
+    let bucket = params.bucket.as_deref().unwrap_or("1d");
+    if bucket != "1d" {
+        return Err(AppError::Validation("unsupported bucket: only bucket=1d is supported".to_string()));
+    }
+
+    let today = Utc::now().date_naive();
+    let (start_date, end_date) = if params.from.is_some() || params.to.is_some() {
+        let from = params.from.as_deref().ok_or_else(|| AppError::Validation("from is required when to is provided".to_string()))?;
+        let to = params.to.as_deref().ok_or_else(|| AppError::Validation("to is required when from is provided".to_string()))?;
+        let start = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d")
+            .map_err(|_| AppError::Validation("from must be YYYY-MM-DD".to_string()))?;
+        let end = chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d")
+            .map_err(|_| AppError::Validation("to must be YYYY-MM-DD".to_string()))?;
+        (start, end)
+    } else {
+        let days = params.days.unwrap_or(30);
+        if !(1..=366).contains(&days) {
+            return Err(AppError::Validation("days must be between 1 and 366".to_string()));
+        }
+        (today - chrono::Duration::days(days - 1), today)
+    };
+    if start_date > end_date {
+        return Err(AppError::Validation("from must be <= to".to_string()));
+    }
+    if (end_date - start_date).num_days() + 1 > 366 {
+        return Err(AppError::Validation("date range cannot exceed 366 daily buckets".to_string()));
+    }
+
+    let start = std::time::Instant::now();
+    let rows = sqlx::query(
+        r#"
+        SELECT d::date AS date,
+               COALESCE(m.event_count, 0)::bigint AS event_count,
+               COALESCE(m.unique_tx_count, 0)::bigint AS unique_tx_count
+        FROM generate_series($2::date, $3::date, interval '1 day') AS d
+        LEFT JOIN mv_contract_summary m
+          ON m.contract_id = $1 AND m.event_date = d::date
+        ORDER BY d::date ASC
+        "#,
+    )
+    .bind(&contract_id)
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(&state.read_pool)
+    .await?;
+    crate::metrics::record_contract_history_query_duration(start.elapsed());
+
+    let data = rows
+        .into_iter()
+        .map(|row| {
+            let date: chrono::NaiveDate = row.try_get("date")?;
+            let event_count: i64 = row.try_get("event_count")?;
+            let unique_tx_count: i64 = row.try_get("unique_tx_count")?;
+            Ok(json!({ "date": date, "event_count": event_count, "unique_tx_count": unique_tx_count }))
+        })
+        .collect::<Result<Vec<_>, sqlx::Error>>()?;
+
+    Ok(Json(json!({ "contract_id": contract_id, "bucket": bucket, "data": data })))
+}
+
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     crate::metrics::update_db_pool_metrics(&state.pool);
     state.prometheus_handle.render()
@@ -2639,6 +2729,113 @@ pub async fn get_events_by_tx(
     })))
 }
 
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct RelatedTxParams {
+    pub depth: Option<u8>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/events/tx/{tx_hash}/related",
+    tag = "events",
+    params(
+        ("tx_hash" = String, Path, description = "Root transaction hash (64 hex chars)"),
+        ("depth" = Option<u8>, Query, description = "Reference traversal depth, default 1, max 3"),
+    ),
+    responses(
+        (status = 200, description = "Events from transactions referenced by event_data", body = serde_json::Value),
+        (status = 400, description = "Invalid tx_hash or depth", body = ErrorResponse),
+    )
+)]
+pub async fn get_related_events_by_tx(
+    State(state): State<AppState>,
+    Path(tx_hash): Path<String>,
+    Query(params): Query<RelatedTxParams>,
+) -> Result<Json<Value>, AppError> {
+    let root_tx_hash = tx_hash.to_lowercase();
+    validate_tx_hash(&root_tx_hash)?;
+    let max_depth = params.depth.unwrap_or(1);
+    if max_depth > 3 {
+        return Err(AppError::Validation("depth must be between 0 and 3".to_string()));
+    }
+
+    let mut seen = std::collections::HashSet::from([root_tx_hash.clone()]);
+    let mut frontier = vec![root_tx_hash.clone()];
+    let mut all_events = Vec::new();
+
+    for depth in 0..=max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let rows = sqlx::query(
+            "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, event_data_decoded, created_at, schema_version, 0::bigint AS total_count
+             FROM events WHERE tx_hash = ANY($1) ORDER BY ledger DESC, id DESC",
+        )
+        .bind(&frontier)
+        .fetch_all(&state.read_pool)
+        .await?;
+
+        let mut next = Vec::new();
+        for row in rows {
+            let event_data: Value = row.try_get("event_data")?;
+            collect_tx_refs(&event_data, &mut next);
+            all_events.push(row_to_event_json(&row)?);
+        }
+        if depth == max_depth {
+            break;
+        }
+        frontier = next
+            .into_iter()
+            .map(|h| h.to_lowercase())
+            .filter(|h| validate_tx_hash(h).is_ok())
+            .filter(|h| seen.insert(h.clone()))
+            .collect();
+    }
+
+    let total = all_events.len();
+    Ok(Json(json!({ "tx_hash": root_tx_hash, "depth": max_depth, "data": all_events, "total": total })))
+}
+
+fn collect_tx_refs(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if is_tx_ref_key(key) {
+                    if let Some(tx_hash) = value.as_str() {
+                        out.push(tx_hash.to_string());
+                    }
+                }
+                collect_tx_refs(value, out);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_tx_refs(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_tx_ref_key(key: &str) -> bool {
+    matches!(key, "tx_hash" | "transaction_hash" | "related_tx_hash" | "parent_tx_hash" | "child_tx_hash")
+}
+
+fn row_to_event_json(row: &sqlx::postgres::PgRow) -> Result<Value, AppError> {
+    Ok(json!({
+        "id": row.try_get::<Uuid, _>("id")?,
+        "contract_id": row.try_get::<String, _>("contract_id")?,
+        "event_type": row.try_get::<String, _>("event_type")?,
+        "tx_hash": row.try_get::<String, _>("tx_hash")?,
+        "ledger": row.try_get::<i64, _>("ledger")?,
+        "timestamp": row.try_get::<DateTime<Utc>, _>("timestamp")?,
+        "event_data": row.try_get::<Value, _>("event_data")?,
+        "event_data_decoded": row.try_get::<Option<Value>, _>("event_data_decoded")?,
+        "created_at": row.try_get::<DateTime<Utc>, _>("created_at")?,
+        "schema_version": row.try_get::<i32, _>("schema_version")?,
+    }))
+}
+
 #[utoipa::path(
     post,
     path = "/v1/events/tx/batch",
@@ -2920,9 +3117,47 @@ pub async fn register_contract_abi(
     .execute(&state.pool)
     .await?;
 
+    let pool = state.pool.clone();
+    let backfill_contract_id = contract_id.clone();
+    let backfill_abi = abi.clone();
+    tokio::spawn(async move {
+        crate::abi::decode_existing_events(pool, backfill_contract_id, backfill_abi).await;
+    });
+
     Ok(Json(
         json!({ "contract_id": contract_id, "status": "registered" }),
     ))
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/admin/contracts/{contract_id}/abi",
+    tag = "admin",
+    params(
+        ("contract_id" = String, Path, description = "Stellar contract ID"),
+    ),
+    responses(
+        (status = 200, description = "Registered ABI", body = serde_json::Value),
+        (status = 400, description = "Invalid contract_id", body = ErrorResponse),
+        (status = 404, description = "ABI not found", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn get_contract_abi(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    validate_contract_id(&contract_id)?;
+    let row = sqlx::query("SELECT abi, created_at, updated_at FROM contract_abis WHERE contract_id = $1")
+        .bind(&contract_id)
+        .fetch_optional(&state.read_pool)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    let abi: Value = row.try_get("abi")?;
+    let created_at: DateTime<Utc> = row.try_get("created_at")?;
+    let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
+    Ok(Json(json!({ "contract_id": contract_id, "abi": abi, "created_at": created_at, "updated_at": updated_at })))
 }
 
 /// Anonymize a specific event for GDPR compliance.

@@ -8,6 +8,7 @@ use tracing::{error, info, warn};
 const VIEWS: &[&str] = &[
     "events_daily_summary",
     "events_contract_summary",
+    "mv_contract_summary",
     "events_hourly_volume",
 ];
 

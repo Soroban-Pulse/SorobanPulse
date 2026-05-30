@@ -260,6 +260,12 @@ pub fn record_timeseries_query_duration(duration: std::time::Duration) {
         .record(duration.as_secs_f64());
 }
 
+/// Record contract history query duration
+pub fn record_contract_history_query_duration(duration: std::time::Duration) {
+    m::histogram!("soroban_pulse_contract_history_query_duration_seconds")
+        .record(duration.as_secs_f64());
+}
+
 /// Record SSE multi-stream contract IDs per connection (histogram)
 pub fn record_sse_multi_contract_ids(count: u64) {
     m::histogram!("soroban_pulse_sse_multi_contract_ids").record(count as f64);

@@ -1,3 +1,4 @@
+pub mod abi;
 pub mod bloom_filter;
 pub mod config;
 pub mod db;

@@ -345,6 +345,175 @@
         }
       }
     },
+    "/v1/admin/contracts/{contract_id}/abi": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "get_contract_abi",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "path",
+            "description": "Stellar contract ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Registered ABI"
+          },
+          "404": {
+            "description": "ABI not found"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "admin"
+        ],
+        "operationId": "register_contract_abi",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "path",
+            "description": "Stellar contract ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "ABI JSON array",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "ABI registered and existing events queued for decoding"
+          },
+          "400": {
+            "description": "Invalid contract_id or ABI"
+          }
+        }
+      }
+    },
+    "/v1/contracts/{contract_id}/stats/history": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "get_contract_stats_history",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "path",
+            "description": "Stellar contract ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "bucket",
+            "in": "query",
+            "description": "Aggregation bucket. Currently only 1d is supported",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "description": "Number of daily buckets to return",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "Start date, YYYY-MM-DD",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "End date, YYYY-MM-DD",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Array of {date, event_count, unique_tx_count} objects"
+          },
+          "400": {
+            "description": "Invalid contract_id, bucket, or date range"
+          }
+        }
+      }
+    },
+    "/v1/events/tx/{tx_hash}/related": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "get_related_events_by_tx",
+        "parameters": [
+          {
+            "name": "tx_hash",
+            "in": "path",
+            "description": "Root transaction hash (64 hex chars)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "depth",
+            "in": "query",
+            "description": "Reference traversal depth, default 1, max 3",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0,
+              "maximum": 3,
+              "nullable": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Events from transactions referenced by event_data"
+          },
+          "400": {
+            "description": "Invalid tx_hash or depth"
+          }
+        }
+      }
+    },
     "/v1/events/tx/{tx_hash}": {
       "get": {
         "tags": [
@@ -487,7 +656,7 @@
             "type": "integer",
             "format": "int64",
             "nullable": true
-          }
+          },
            "sort": {
              "type": "string",
              "nullable": true,
@@ -510,6 +679,10 @@
     {
       "name": "system",
       "description": "Health and observability endpoints"
+    },
+    {
+      "name": "admin",
+      "description": "Administrative endpoints"
     }
   ]
 }

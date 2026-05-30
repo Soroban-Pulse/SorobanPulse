@@ -82,11 +82,13 @@ pub struct AppState {
         handlers::status,
         handlers::get_events,
         handlers::get_event_stats,
+        handlers::get_contract_stats_history,
         handlers::get_events_diff,
         handlers::export_events,
         handlers::get_recent_events,
         handlers::get_events_by_contract,
         handlers::get_events_by_tx,
+        handlers::get_related_events_by_tx,
         handlers::get_events_by_ledger_hash,
         handlers::get_events_by_tx_batch,
         handlers::stream_events,
@@ -98,6 +100,7 @@ pub struct AppState {
         handlers::replay_events,
         handlers::start_reencrypt,
         handlers::register_contract_abi,
+        handlers::get_contract_abi,
         handlers::anonymize_event,
         handlers::pause_indexer,
         handlers::resume_indexer,
@@ -325,7 +328,7 @@ pub fn create_router_with_tx_and_tenant_map(
     let admin_routes = Router::new()
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
         .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
-        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi))
+        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
         .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
         .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
         .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
@@ -340,6 +343,7 @@ pub fn create_router_with_tx_and_tenant_map(
     let v1 = Router::new()
         .route("/events", get(handlers::get_events))
         .route("/events/stats", get(handlers::get_event_stats))
+        .route("/contracts/{contract_id}/stats/history", get(handlers::get_contract_stats_history))
         .route("/events/diff", get(handlers::get_events_diff))
         .route("/events/export", get(handlers::export_events))
         .route("/events/timeseries", get(handlers::get_timeseries))
@@ -363,6 +367,7 @@ pub fn create_router_with_tx_and_tenant_map(
             "/admin/events/bulk",
             axum::routing::post(handlers::bulk_insert_events),
         )
+        .route("/events/tx/{tx_hash}/related", get(handlers::get_related_events_by_tx))
         .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
         .route(
             "/events/ledger-hash/{hash}",
@@ -373,7 +378,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
         .route("/admin/mask-events", axum::routing::post(handlers::start_mask_events))
         .route("/admin/mask-events/{job_id}", get(handlers::get_mask_job_status))
-        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi))
+        .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
         .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
         .route("/admin/events/contract/{contract_id}", axum::routing::delete(handlers::delete_contract_events))
         .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
