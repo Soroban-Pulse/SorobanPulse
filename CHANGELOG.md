@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Email bounce handling: a `POST /v1/notifications/email/bounce` webhook (SendGrid / AWS SES / Mailgun compatible) records bounced addresses in a new `email_bounces` table; bounced recipients are skipped on future sends, and each bounce increments the `soroban_pulse_email_bounces_total` counter. Documented in `docs/deployment.md`.
 - Email notification feature for event alerts with batching (one email per minute maximum)
 - Email configuration via `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`, `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO`, and `EMAIL_CONTRACT_FILTER` environment variables
 - Email notifications can be filtered by contract ID using `EMAIL_CONTRACT_FILTER`

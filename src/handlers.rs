@@ -539,6 +539,41 @@ pub async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<Va
     (status, Json(body))
 }
 
+/// Webhook that receives email bounce notifications from SendGrid, AWS SES
+/// (including SNS-wrapped notifications) and Mailgun (Issue #484). Bounced
+/// addresses are persisted so future notifications skip them.
+#[utoipa::path(
+    post,
+    path = "/v1/notifications/email/bounce",
+    tag = "system",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Bounce payload processed", body = serde_json::Value),
+    )
+)]
+pub async fn email_bounce_webhook(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let recipients = crate::email::extract_bounced_recipients(&payload);
+    let mut recorded = 0usize;
+    for recipient in &recipients {
+        match crate::email::record_bounce(&state.pool, recipient).await {
+            Ok(()) => {
+                crate::metrics::record_email_bounce();
+                recorded += 1;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, email = %recipient.email, "Failed to record email bounce");
+            }
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "received": recipients.len(), "recorded": recorded })),
+    )
+}
+
 #[utoipa::path(
     get,
     path = "/v1/status",

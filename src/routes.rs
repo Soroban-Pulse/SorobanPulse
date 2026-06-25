@@ -82,6 +82,7 @@ pub struct AppState {
         handlers::health,
         handlers::health_live,
         handlers::health_ready,
+        handlers::email_bounce_webhook,
         handlers::status,
         handlers::get_events,
         handlers::get_event_stats,
@@ -399,6 +400,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
         .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
         .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
+        .route("/notifications/email/bounce", axum::routing::post(handlers::email_bounce_webhook))
         .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
         .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
         .route("/subscriptions/{id}/ack", axum::routing::post(subscriptions::ack_subscription));
