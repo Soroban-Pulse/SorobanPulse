@@ -152,6 +152,8 @@ fn parse_hh_mm(value: &str) -> Option<u32> {
         return None;
     }
     Some(hours * 60 + minutes)
+}
+
 /// The `List-Unsubscribe` header (RFC 2369). Lets conforming mail clients
 /// surface a native unsubscribe action pointing at our unsubscribe URL.
 #[derive(Clone)]
@@ -548,52 +550,9 @@ impl EmailNotifier {
             html.push_str("</ul>");
         }
 
-        // Send a separate message to each recipient so every email carries its
-        // own unsubscribe link (Issue #483). Recipients who have opted out are
-        // skipped entirely.
-        let mut sent = 0usize;
-        for recipient in &self.to {
-            if is_unsubscribed(&self.pool, recipient).await {
-                info!(recipient = %recipient, "Recipient has unsubscribed, skipping");
-                continue;
-            }
-
-            let unsubscribe_url = get_or_create_unsubscribe_token(&self.pool, recipient)
-                .await
-                .map(|token| {
-                    format!(
-                        "{}/unsubscribe?token={}",
-                        self.base_url.trim_end_matches('/'),
-                        token
-                    )
-                });
-
-            let mut personalized = body.clone();
-            if let Some(ref url) = unsubscribe_url {
-                personalized.push_str(&format!(
-                    "\n--\nYou are receiving this because you subscribed to Soroban Pulse \
-                     notifications.\nTo unsubscribe, visit: {url}\n"
-                ));
-            }
-
-            if let Err(e) = self
-                .send_email(recipient, &subject, &personalized, unsubscribe_url.as_deref())
-                .await
-            {
-                error!(error = %e, recipient = %recipient, "Failed to send email notification");
-                metrics::record_email_failure();
-            } else {
-                sent += 1;
-            }
-        }
-
-        if sent > 0 {
-            info!(
-                recipients = sent,
-                event_count = events.len(),
-                "Email notification sent successfully"
-            );
-        }
+        html.push_str("</body></html>");
+        html
+    }
 
     /// Send an email to a single recipient using SMTP. When `unsubscribe_url`
     /// is set, a `List-Unsubscribe` header is added so mail clients can offer a
@@ -705,29 +664,6 @@ mod tests {
         );
         assert_eq!(sender_domain("trailing@").as_deref(), None);
     }
-
-    #[test]
-    fn test_email_notifier_creation() {
-        // `connect_lazy` builds a pool handle without opening a connection,
-        // so this stays a pure unit test (no live database required).
-        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/soroban_pulse_test")
-            .expect("lazy pool");
-        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap();
-        let notifier = EmailNotifier::new(
-            "smtp.example.com".to_string(),
-            587,
-            Some("user".to_string()),
-            Some(SecretString::new("pass".to_string())),
-            "from@example.com".to_string(),
-            vec!["to@example.com".to_string()],
-            vec![],
-            RetryPolicy::default(),
-            Schedule::Immediate,
-            None,
-            pool,
-            pool,
-            "https://pulse.example.com".to_string(),
-        );
 
     #[test]
     fn test_email_notifier_creation() {
@@ -902,6 +838,8 @@ mod tests {
         assert!(quiet.contains(ts("2026-06-25T12:00:00Z")));
         assert!(!quiet.contains(ts("2026-06-25T08:00:00Z")));
         assert!(!quiet.contains(ts("2026-06-25T18:00:00Z")));
+    }
+
     // Issue #487: open tracking
     #[test]
     fn test_build_html_body_includes_tracking_pixel() {
