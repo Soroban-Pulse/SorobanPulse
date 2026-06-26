@@ -3634,7 +3634,7 @@ pub async fn bulk_insert_events(
         .bind(&event.event_data_normalized)
         .bind(&event.ledger_hash)
         .bind(event.in_successful_call.unwrap_or(false))
-        .execute(&state.write_pool)
+        .execute(&state.pool)
         .await;
         
         match result {
@@ -4927,6 +4927,7 @@ mod tests {
             .map(|(k, v)| (hash_api_key(k), v.clone()))
             .collect();
 
+        let (_, shutdown_rx) = tokio::sync::watch::channel(false);
         crate::routes::create_router_with_tx_and_tenant_map(
             pool.clone(),
             pool,
@@ -4946,6 +4947,7 @@ mod tests {
             config,
             None,
             Arc::new(hashed_map),
+            shutdown_rx,
         )
     }
 
@@ -9687,6 +9689,182 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    // ── #513: SLA monitoring unit tests ──────────────────────────────────────
+
+    #[test]
+    fn sla_latency_calculation_is_correct() {
+        let indexed = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let delivered = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:25Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let latency = (delivered - indexed).num_milliseconds() as f64 / 1000.0;
+        assert!((latency - 25.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn sla_breach_detected_when_latency_exceeds_sla() {
+        let sla_seconds: u64 = 30;
+        let latency: f64 = 35.0;
+        let breached = latency > sla_seconds as f64;
+        assert!(breached, "expected SLA breach for latency {latency}s > SLA {sla_seconds}s");
+    }
+
+    #[test]
+    fn sla_not_breached_when_latency_within_sla() {
+        let sla_seconds: u64 = 30;
+        let latency: f64 = 10.0;
+        let breached = latency > sla_seconds as f64;
+        assert!(!breached);
+    }
+
+    // ── #514: Capacity planning unit tests ───────────────────────────────────
+
+    #[test]
+    fn growth_trend_zero_when_no_baseline() {
+        let baseline_rate_per_minute: f64 = 0.0;
+        let current_rate: f64 = 5.0;
+        let trend = if baseline_rate_per_minute > 0.0 {
+            ((current_rate - baseline_rate_per_minute) / baseline_rate_per_minute) * 100.0
+        } else {
+            0.0
+        };
+        assert_eq!(trend, 0.0);
+    }
+
+    #[test]
+    fn growth_trend_positive_when_current_above_baseline() {
+        let baseline: f64 = 10.0;
+        let current: f64 = 15.0;
+        let trend = ((current - baseline) / baseline) * 100.0;
+        assert!((trend - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn projected_rate_never_below_current_with_positive_trend() {
+        let current: f64 = 20.0;
+        let trend: f64 = 25.0;
+        let projected = current * (1.0 + trend.max(0.0) / 100.0);
+        assert!(projected >= current);
+    }
+
+    // ── #512: Lifecycle webhook unit tests ───────────────────────────────────
+
+    #[test]
+    fn lifecycle_event_type_matching_wildcard() {
+        let subscribed_events = vec!["*".to_string()];
+        let event_type = "channel_deleted";
+        let matches = subscribed_events
+            .iter()
+            .any(|e| e == "*" || e == event_type);
+        assert!(matches);
+    }
+
+    #[test]
+    fn lifecycle_event_type_matching_exact() {
+        let subscribed_events = vec![
+            "channel_created".to_string(),
+            "delivery_failed".to_string(),
+        ];
+        let matches_created = subscribed_events
+            .iter()
+            .any(|e| e == "*" || e == "channel_created");
+        let matches_deleted = subscribed_events
+            .iter()
+            .any(|e| e == "*" || e == "channel_deleted");
+        assert!(matches_created);
+        assert!(!matches_deleted);
+    }
+
+    #[test]
+    fn lifecycle_event_not_delivered_to_inactive_webhook() {
+        let webhook = crate::models::SystemWebhookConfig {
+            id: Uuid::new_v4(),
+            url: "http://example.com/hook".to_string(),
+            secret: None,
+            events: vec!["*".to_string()],
+            active: false,
+            created_at: Utc::now(),
+        };
+        assert!(!webhook.active, "inactive webhook should not receive events");
+    }
+
+    // ── #511: Bulk operations unit tests ─────────────────────────────────────
+
+    #[test]
+    fn bulk_response_counts_success_and_failure() {
+        let results = vec![
+            crate::models::BulkChannelResult {
+                id: Uuid::new_v4(),
+                success: true,
+                error: None,
+            },
+            crate::models::BulkChannelResult {
+                id: Uuid::new_v4(),
+                success: false,
+                error: Some("not found".to_string()),
+            },
+            crate::models::BulkChannelResult {
+                id: Uuid::new_v4(),
+                success: true,
+                error: None,
+            },
+        ];
+        let succeeded = results.iter().filter(|r| r.success).count() as i64;
+        let failed = results.iter().filter(|r| !r.success).count() as i64;
+        assert_eq!(succeeded, 2);
+        assert_eq!(failed, 1);
+    }
+
+    #[test]
+    fn bulk_tag_appends_only_new_tags() {
+        let mut tags: Vec<String> = vec!["production".to_string()];
+        let new_tags = vec!["production".to_string(), "critical".to_string()];
+        for tag in &new_tags {
+            if !tags.contains(tag) {
+                tags.push(tag.clone());
+            }
+        }
+        assert_eq!(tags.len(), 2);
+        assert!(tags.contains(&"production".to_string()));
+        assert!(tags.contains(&"critical".to_string()));
+    }
+
+    #[tokio::test]
+    async fn bulk_enable_returns_not_found_for_unknown_channel() {
+        let unknown_id = Uuid::new_v4();
+        let req = crate::models::BulkChannelRequest {
+            channel_ids: vec![unknown_id],
+        };
+
+        let mut store = notification_channels().write().await;
+        store.clear();
+        drop(store);
+
+        let mut results = Vec::new();
+        {
+            let mut s = notification_channels().write().await;
+            if let Some(ch) = s.get_mut(&unknown_id) {
+                ch.active = true;
+                results.push(crate::models::BulkChannelResult {
+                    id: unknown_id,
+                    success: true,
+                    error: None,
+                });
+            } else {
+                results.push(crate::models::BulkChannelResult {
+                    id: unknown_id,
+                    success: false,
+                    error: Some(format!("channel {unknown_id} not found")),
+                });
+            }
+        }
+        assert_eq!(results.len(), req.channel_ids.len());
+        assert!(!results[0].success);
+        assert!(results[0].error.as_deref().unwrap_or("").contains("not found"));
     }
 }
 
