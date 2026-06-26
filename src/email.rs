@@ -138,6 +138,8 @@ pub struct EmailNotifier {
     to: Vec<String>,
     contract_filter: Vec<String>,
     retry_policy: RetryPolicy,
+    /// Issue #480: language used to render notification templates (default `en`).
+    language: String,
     pool: sqlx::PgPool,
     /// Base URL used to build unsubscribe links (Issue #483).
     base_url: String,
@@ -154,6 +156,7 @@ impl EmailNotifier {
         to: Vec<String>,
         contract_filter: Vec<String>,
         retry_policy: RetryPolicy,
+        language: String,
         pool: sqlx::PgPool,
         base_url: String,
     ) -> Self {
@@ -166,6 +169,7 @@ impl EmailNotifier {
             to,
             contract_filter,
             retry_policy,
+            language,
             pool,
             base_url,
         }
@@ -530,6 +534,7 @@ mod tests {
         assert_eq!(notifier.smtp_port, 587);
         assert_eq!(notifier.from, "from@example.com");
         assert_eq!(notifier.to.len(), 1);
+        assert_eq!(notifier.language, "en");
     }
 
     #[test]

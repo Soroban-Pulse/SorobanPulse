@@ -70,6 +70,9 @@ lettre = { version = "0.11", default-features = false, features = ["tokio1-rustl
 # DNS resolver for SPF record checks (Issue #486)
 hickory-resolver = "0.24"
 
+# Issue #480: Multi-language email notification templates (Handlebars)
+handlebars = "5"
+
 # JSON Schema validation
 jsonschema = "0.18"
 

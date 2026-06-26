@@ -53,6 +53,40 @@ pub async fn get_import_job_status(Path(job_id): Path<String>) -> impl IntoRespo
     let status = import_jobs().read().await.get(&job_id).cloned().unwrap_or("not_found".to_string());
     Json(json!({"job_id": job_id, "status": status, "progress": 42}))
 }
+
+/// Issue #480: List the available multi-language email notification templates.
+///
+/// `GET /v1/admin/notification-templates`
+///
+/// Returns the languages for which a bundled Handlebars template exists, the
+/// configured default language, and the on-disk template path for each entry.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/notification-templates",
+    tag = "admin",
+    responses(
+        (status = 200, description = "List of available notification templates")
+    )
+)]
+pub async fn list_notification_templates() -> impl IntoResponse {
+    let templates: Vec<Value> = crate::email::SUPPORTED_LANGUAGES
+        .iter()
+        .map(|lang| {
+            json!({
+                "language": lang,
+                "engine": "handlebars",
+                "format": "text",
+                "file": format!("notification_templates/email_{lang}.hbs"),
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "default_language": "en",
+        "count": templates.len(),
+        "templates": templates,
+    }))
+}
 use axum::body::Body;
 use axum::http::{header, HeaderMap};
 use axum::response::sse::{Event, Sse};
