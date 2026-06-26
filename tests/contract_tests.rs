@@ -95,13 +95,11 @@ mod contract_tests {
         // Validate response has matching fields
         let response_data = &server_response["data"];
         assert_eq!(
-            client_request["contract_id"],
-            response_data["contract_id"],
+            client_request["contract_id"], response_data["contract_id"],
             "Response must echo the requested contract_id"
         );
         assert_eq!(
-            client_request["webhook_url"],
-            response_data["webhook_url"],
+            client_request["webhook_url"], response_data["webhook_url"],
             "Response must echo the webhook_url"
         );
         assert!(response_data["id"].is_string());
@@ -238,11 +236,7 @@ mod contract_tests {
         for ts in timestamps {
             // Verify ISO 8601 format (can parse)
             let _parsed = chrono::DateTime::parse_from_rfc3339(ts);
-            assert!(
-                _parsed.is_ok(),
-                "Timestamp {} must be valid ISO 8601",
-                ts
-            );
+            assert!(_parsed.is_ok(), "Timestamp {} must be valid ISO 8601", ts);
         }
     }
 
@@ -267,16 +261,10 @@ mod contract_tests {
     /// Verifies all responses use application/json
     #[test]
     fn contract_content_type_json() {
-        let content_types = vec![
-            "application/json",
-            "application/json; charset=utf-8",
-        ];
+        let content_types = vec!["application/json", "application/json; charset=utf-8"];
 
         for ct in content_types {
-            assert!(
-                ct.contains("application/json"),
-                "Content-Type must be JSON"
-            );
+            assert!(ct.contains("application/json"), "Content-Type must be JSON");
         }
     }
 

@@ -237,7 +237,7 @@ mod filter_tests {
 
 #[cfg(test)]
 mod timestamp_tests {
-    use chrono::{DateTime, Utc, Duration, NaiveDate};
+    use chrono::{DateTime, Duration, NaiveDate, Utc};
     use proptest::prelude::*;
 
     fn valid_iso8601_timestamp() -> impl Strategy<Value = String> {
