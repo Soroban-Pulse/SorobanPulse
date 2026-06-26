@@ -7,6 +7,7 @@
 )]
 mod bloom_filter;
 mod config;
+mod content_filter;
 mod db;
 mod email;
 mod encryption;
@@ -234,6 +235,12 @@ async fn main() -> anyhow::Result<()> {
                             && !webhook_contract_filter.contains(&event.contract_id)
                         {
                             continue;
+                        }
+                        // Apply content filter if configured (Issue #477).
+                        if let Some(ref cf) = webhook_content_filter {
+                            if !cf.evaluate(&event.value) {
+                                continue;
+                            }
                         }
                         let client = http_client.clone();
                         let url = webhook_url.clone();

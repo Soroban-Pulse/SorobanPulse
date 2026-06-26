@@ -39,6 +39,30 @@ fn env_or_file_or(key: &str, file: &toml::Table, default: &str) -> String {
     env_or_file(key, file).unwrap_or_else(|| default.to_string())
 }
 
+/// Parse the optional webhook content filter (Issue #477) from
+/// `WEBHOOK_CONTENT_FILTER`, which holds a JSON object such as
+/// `{"path":"$.amount","op":"gt","value":"1000000"}`. An unparseable or invalid
+/// filter is logged and ignored so a bad value never disables delivery silently
+/// at startup.
+fn parse_webhook_content_filter() -> Option<crate::content_filter::ContentFilter> {
+    let raw = env::var("WEBHOOK_CONTENT_FILTER")
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
+    match serde_json::from_str::<crate::content_filter::ContentFilter>(&raw) {
+        Ok(filter) => match filter.validate() {
+            Ok(()) => Some(filter),
+            Err(e) => {
+                tracing::warn!(error = %e, "Ignoring invalid WEBHOOK_CONTENT_FILTER");
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "Ignoring unparseable WEBHOOK_CONTENT_FILTER");
+            None
+        }
+    }
+}
+
 /// Shared operational state updated by the indexer and read by the /status handler.
 pub struct IndexerState {
     pub current_ledger: AtomicU64,
