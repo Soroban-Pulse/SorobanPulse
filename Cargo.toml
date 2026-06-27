@@ -123,6 +123,10 @@ version = "53"
 version = "0.19"
 optional = true
 
+[[bin]]
+name = "gen_postman"
+path = "src/bin/gen_postman.rs"
+
 [[bench]]
 name = "pagination"
 harness = false
