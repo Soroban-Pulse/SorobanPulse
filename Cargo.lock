@@ -5198,7 +5198,7 @@ dependencies = [
  "opentelemetry 0.21.0",
  "opentelemetry-otlp",
  "opentelemetry-zipkin",
- "opentelemetry_sdk 0.21.2",
+ "opentelemetry_sdk 0.31.0",
  "parquet",
  "proptest",
  "rand 0.8.5",
