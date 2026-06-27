@@ -11080,7 +11080,8 @@ pub async fn list_feature_flags(State(state): State<AppState>) -> Result<Json<Va
         })
         .collect();
 
-    Ok(Json(json!({ "flags": flags, "count": flags.len() })))
+    let count = flags.len();
+    Ok(Json(json!({ "flags": flags, "count": count })))
 }
 
 /// Return the feature flag audit trail (most recent 100 entries).
@@ -11118,5 +11119,6 @@ pub async fn get_feature_flag_audit(State(state): State<AppState>) -> Result<Jso
         })
         .collect();
 
-    Ok(Json(json!({ "entries": entries, "count": entries.len() })))
+    let count = entries.len();
+    Ok(Json(json!({ "entries": entries, "count": count })))
 }
