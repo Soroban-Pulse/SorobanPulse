@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-db lint fmt run docker-up docker-down migrate clean gen-openapi
+.PHONY: help build test test-db lint fmt run docker-up docker-down migrate clean gen-openapi gen-postman
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -50,6 +50,9 @@ clean: ## Remove build artifacts
 gen-openapi: ## Regenerate openapi.json from handler signatures and sync docs/openapi.json
 	cargo run --bin gen_openapi > openapi.json
 	cp openapi.json docs/openapi.json
+
+gen-postman: gen-openapi ## Regenerate Postman collection and environment files from OpenAPI spec
+	cargo run --bin gen_postman -- --input openapi.json --output-dir postman/
 changelog: ## Generate changelog from git history (requires git-cliff)
 	@command -v git-cliff >/dev/null 2>&1 || { echo "git-cliff not installed. Install with: cargo install git-cliff"; exit 1; }
 	git-cliff --unreleased
