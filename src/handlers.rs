@@ -11967,3 +11967,57 @@ mod temporal_tests {
         assert_eq!(v["total"], 0);
     }
 }
+
+// ── Issue #632: GET /v1/features ────────────────────────────────────────────
+
+/// Query whether a feature flag is enabled for the given context.
+///
+/// `GET /v1/features?flag_name=feature-x&contract_id=CABC...`
+#[utoipa::path(
+    get,
+    path = "/v1/features",
+    tag = "system",
+    params(
+        ("flag_name" = String, Query, description = "Feature flag name (required)"),
+        ("contract_id" = String, Query, description = "Contract ID for targeting (optional)"),
+        ("user_id" = String, Query, description = "User ID for targeting (optional)"),
+        ("ip_address" = String, Query, description = "IP address for targeting (optional)"),
+        ("region" = String, Query, description = "Region for targeting (optional)"),
+    ),
+    responses(
+        (status = 200, description = "Feature flag status"),
+        (status = 400, description = "Missing required parameters"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn get_feature_flag_status(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    let flag_name = params
+        .get("flag_name")
+        .ok_or_else(|| AppError::BadRequest("Missing required parameter: flag_name".to_string()))?
+        .clone();
+
+    let context = crate::feature_flags::FeatureFlagContext {
+        contract_id: params.get("contract_id").cloned(),
+        user_id: params.get("user_id").cloned(),
+        ip_address: params.get("ip_address").cloned(),
+        region: params.get("region").cloned(),
+    };
+
+    let enabled = crate::feature_flags::is_feature_enabled(&state.pool, &flag_name, &context)
+        .await
+        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
+
+    Ok(Json(json!({
+        "flag_name": flag_name,
+        "enabled": enabled,
+        "context": {
+            "contract_id": context.contract_id,
+            "user_id": context.user_id,
+            "ip_address": context.ip_address,
+            "region": context.region,
+        }
+    })))
+}
