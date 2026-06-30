@@ -13,6 +13,7 @@ pub mod distributed_tracing;
 pub mod email;
 pub mod encryption;
 pub mod error;
+pub mod graceful_shutdown;
 pub mod handlers;
 pub mod indexer;
 pub mod kinesis;

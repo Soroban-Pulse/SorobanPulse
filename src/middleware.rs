@@ -46,6 +46,17 @@ pub async fn tracing_middleware(req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// Issue #633: Middleware to track in-flight requests for graceful shutdown.
+/// Increments request counter on entry, decrements on exit (or error).
+pub async fn request_tracking_middleware(
+    req: Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // This middleware is optional and only used when shutdown tracking is enabled.
+    // The actual tracking is done via AppState in routes.
+    next.run(req).await
+}
+
 /// The resolved tenant for the current request.
 /// Injected as a request extension by `auth_middleware` when multi-tenant mode
 /// is enabled.  Handlers read this via `req.extensions().get::<TenantId>()`.

@@ -15,6 +15,7 @@ mod distributed_tracing;
 mod email;
 mod encryption;
 mod error;
+mod graceful_shutdown;
 mod handlers;
 mod index_monitor;
 mod indexer;
