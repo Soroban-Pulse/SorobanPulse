@@ -87,6 +87,20 @@ pub fn record_invalid_contract_id() {
     m::counter!("soroban_pulse_events_invalid_contract_id_total").increment(1);
 }
 
+/// Record a passed XDR validation (issue #616)
+pub fn record_xdr_validation_pass() {
+    m::counter!("soroban_pulse_xdr_validation_pass_total").increment(1);
+}
+
+/// Record a failed XDR validation with a field label (issue #616)
+pub fn record_xdr_validation_fail(field: &str) {
+    m::counter!(
+        "soroban_pulse_xdr_validation_fail_total",
+        "field" => field.to_string()
+    )
+    .increment(1);
+}
+
 /// Record an archive integrity failure (issue #371)
 pub fn record_archive_integrity_failure() {
     m::counter!("soroban_pulse_archive_integrity_failures_total").increment(1);
@@ -295,6 +309,52 @@ pub fn record_content_dedup_hit() {
 /// Record that an event fingerprint was computed and stored (Issue #582).
 pub fn record_fingerprint_stored() {
     m::counter!("soroban_pulse_fingerprints_stored_total").increment(1);
+}
+
+/// Record a schema validation pass (issue #617)
+pub fn record_schema_validation_pass(contract_id: &str) {
+    m::counter!(
+        "soroban_pulse_schema_validation_pass_total",
+        "contract_id" => contract_id.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a schema validation failure (issue #617)
+pub fn record_schema_validation_fail(contract_id: &str) {
+    m::counter!(
+        "soroban_pulse_schema_validation_fail_total",
+        "contract_id" => contract_id.to_string()
+    )
+    .increment(1);
+}
+
+/// Record an anonymization operation (issue #618)
+pub fn record_anonymization_applied(rule_name: &str) {
+    m::counter!(
+        "soroban_pulse_anonymization_applied_total",
+        "rule" => rule_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a PII detection hit (issue #618)
+pub fn record_pii_detected(field: &str) {
+    m::counter!(
+        "soroban_pulse_pii_detected_total",
+        "field" => field.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a session-level bloom filter dedup hit (issue #615)
+pub fn record_session_bloom_hit() {
+    m::counter!("soroban_pulse_session_bloom_hits_total").increment(1);
+}
+
+/// Record a session bloom filter reset on new ledger (issue #615)
+pub fn record_session_bloom_reset() {
+    m::counter!("soroban_pulse_session_bloom_resets_total").increment(1);
 }
 
 /// Record contract history query duration

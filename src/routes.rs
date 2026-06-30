@@ -102,6 +102,8 @@ pub struct AppState {
     pub sse_ring_buffer: std::sync::Arc<crate::sse_ring_buffer::SseRingBuffer>,
     /// TTL-bounded query result cache for materialized-view backed queries.
     pub query_result_cache: std::sync::Arc<moka::future::Cache<String, serde_json::Value>>,
+    /// Issue #618: Anonymization rules configuration.
+    pub anonymization_config: Option<Arc<crate::anonymization::AnonymizationConfig>>,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -150,6 +152,7 @@ pub struct AppState {
         handlers::get_contract_schema,
         handlers::delete_contract_schema,
         handlers::validate_event_data_against_schema,
+        handlers::list_contract_schemas,
         handlers::start_mask_events,
         handlers::get_mask_job_status,
         handlers::get_timeseries,
@@ -159,6 +162,10 @@ pub struct AppState {
         handlers::check_contract_exists,
         handlers::get_config,
         handlers::reload_config,
+        handlers::get_anonymization_config,
+        handlers::upsert_anonymization_rule,
+        handlers::delete_anonymization_rule,
+        handlers::scan_event_for_pii,
     ),
     components(schemas(
         crate::models::Event,
@@ -380,6 +387,7 @@ pub fn create_router_with_tx_and_tenant_map(
         abi_cache,
         sse_ring_buffer,
         query_result_cache,
+        anonymization_config: None,
     };
 
     // Spawn cache invalidation task: subscribe to the broadcast channel and
@@ -414,6 +422,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
         .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
         .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
+        .route("/admin/schemas", axum::routing::get(handlers::list_contract_schemas))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&admin_auth_state),
             middleware::admin_auth_middleware,
@@ -459,6 +468,10 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/contracts/exists", get(handlers::check_contract_exists))
         .route("/config", get(handlers::get_config))
         .route("/admin/config/reload", axum::routing::post(handlers::reload_config))
+        .route("/config/anonymization", axum::routing::get(handlers::get_anonymization_config))
+        .route("/config/anonymization/rules", axum::routing::post(handlers::upsert_anonymization_rule))
+        .route("/config/anonymization/rules/{name}", axum::routing::delete(handlers::delete_anonymization_rule))
+        .route("/config/anonymization/scan", axum::routing::post(handlers::scan_event_for_pii))
         .route("/contracts/{contract_id}/summary", get(handlers::get_contract_summary))
         .route("/contracts/{contract_id}/event-counts", get(handlers::get_contract_event_counts))
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
@@ -473,6 +486,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
         .route("/admin/contracts/{contract_id}/schema", axum::routing::post(handlers::register_contract_schema).get(handlers::get_contract_schema).delete(handlers::delete_contract_schema))
         .route("/admin/contracts/{contract_id}/validate", axum::routing::post(handlers::validate_event_data_against_schema))
+        .route("/admin/schemas", axum::routing::get(handlers::list_contract_schemas))
         .route("/notifications/email/bounce", axum::routing::post(handlers::email_bounce_webhook))
         .route("/subscriptions", axum::routing::post(subscriptions::create_subscription))
         .route("/subscriptions/{id}", get(subscriptions::get_subscription).delete(subscriptions::cancel_subscription))
