@@ -10455,6 +10455,8 @@ pub async fn list_archive(State(state): State<AppState>) -> Result<Json<Value>, 
 pub struct RegisterSchemaRequest {
     /// JSON Schema definition (Draft 7)
     pub schema: Value,
+    /// Optional human-readable description of this schema (issue #617 versioning)
+    pub description: Option<String>,
 }
 
 /// Register or update a JSON Schema for a contract
@@ -10489,17 +10491,55 @@ pub async fn register_contract_schema(
         .ok_or_else(|| AppError::Internal("Schema validator not initialized".to_string()))?;
 
     validator
-        .register_schema(&contract_id, &payload.schema)
+        .register_schema_described(
+            &contract_id,
+            &payload.schema,
+            payload.description.as_deref(),
+        )
         .await
         .map_err(|e| AppError::Validation(format!("Invalid schema: {}", e)))?;
 
+    // Return the current version after registration
+    let info = validator.get_schema_info(&contract_id).await;
     Ok((
         StatusCode::OK,
         Json(json!({
             "status": "ok",
-            "message": "Schema registered successfully"
+            "message": "Schema registered successfully",
+            "contract_id": contract_id,
+            "version": info.map(|i| i.version).unwrap_or(1),
         })),
     ))
+}
+
+/// List all registered JSON Schemas (metadata only, no schema body)
+#[utoipa::path(
+    get,
+    path = "/v1/admin/schemas",
+    tag = "admin",
+    responses(
+        (status = 200, description = "List of registered schemas"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(
+        ("api_key" = [])
+    )
+)]
+pub async fn list_contract_schemas(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let validator = state
+        .schema_validator
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Schema validator not initialized".to_string()))?;
+
+    let schemas = validator
+        .list_schemas()
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    Ok((StatusCode::OK, Json(json!({ "schemas": schemas }))))
 }
 
 /// Get the JSON Schema for a contract
@@ -12252,4 +12292,143 @@ pub struct ConfigReloadRequest {
     /// New slow query threshold in milliseconds
     #[serde(default)]
     pub slow_query_threshold_ms: Option<u64>,
+}
+
+// ── Issue #618: Anonymization pipeline API handlers ──────────────────────────
+
+use crate::anonymization::AnonymizationRuleRequest;
+
+/// List all configured anonymization rules
+#[utoipa::path(
+    get,
+    path = "/v1/config/anonymization",
+    tag = "config",
+    responses(
+        (status = 200, description = "List of anonymization rules"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_anonymization_config(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    match state.anonymization_config.as_ref() {
+        Some(cfg) => {
+            let rules = cfg.get_rules().await;
+            Ok(Json(json!({ "rules": rules })))
+        }
+        None => {
+            let defaults = crate::anonymization::default_rules();
+            Ok(Json(json!({ "rules": defaults, "source": "built_in_defaults" })))
+        }
+    }
+}
+
+/// Create or update an anonymization rule
+#[utoipa::path(
+    post,
+    path = "/v1/config/anonymization/rules",
+    tag = "config",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Rule created or updated"),
+        (status = 400, description = "Invalid rule"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn upsert_anonymization_rule(
+    State(state): State<AppState>,
+    Json(payload): Json<AnonymizationRuleRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let cfg = state
+        .anonymization_config
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Anonymization config not initialized".to_string()))?;
+
+    let rule = cfg
+        .upsert_rule(&payload)
+        .await
+        .map_err(|e| AppError::Validation(e.to_string()))?;
+
+    Ok((StatusCode::OK, Json(json!({ "status": "ok", "rule": rule }))))
+}
+
+/// Delete an anonymization rule by name
+#[utoipa::path(
+    delete,
+    path = "/v1/config/anonymization/rules/{name}",
+    tag = "config",
+    params(
+        ("name" = String, Path, description = "Rule name")
+    ),
+    responses(
+        (status = 200, description = "Rule deleted"),
+        (status = 404, description = "Rule not found"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn delete_anonymization_rule(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    let cfg = state
+        .anonymization_config
+        .as_ref()
+        .ok_or_else(|| AppError::Internal("Anonymization config not initialized".to_string()))?;
+
+    let deleted = cfg
+        .delete_rule(&name)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    if deleted {
+        Ok((StatusCode::OK, Json(json!({ "status": "ok", "deleted": name }))))
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+/// Scan a single event's data for PII (dry-run, does not modify the event)
+#[utoipa::path(
+    post,
+    path = "/v1/config/anonymization/scan",
+    tag = "config",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "PII scan result"),
+        (status = 401, description = "Unauthorized"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn scan_event_for_pii(
+    State(state): State<AppState>,
+    Json(event_data): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, AppError> {
+    let detection_rules = match state.anonymization_config.as_ref() {
+        Some(cfg) => cfg.compile_detection_rules().await,
+        None => {
+            crate::anonymization::default_rules()
+                .iter()
+                .filter(|r| r.enabled)
+                .filter_map(|r| Regex::new(&r.pattern).ok().map(|re| (r.name.clone(), re)))
+                .collect()
+        }
+    };
+
+    let result = crate::anonymization::scan_for_pii(&event_data, &detection_rules);
+    let detections: Vec<serde_json::Value> = result
+        .detections
+        .iter()
+        .map(|d| json!({ "field": d.field_path, "rule": d.rule_name }))
+        .collect();
+
+    Ok(Json(json!({
+        "pii_detected": !detections.is_empty(),
+        "detections": detections,
+    })))
 }

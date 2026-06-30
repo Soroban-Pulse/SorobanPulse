@@ -1,4 +1,5 @@
 pub mod abi;
+pub mod anonymization;
 pub mod codegen;
 pub mod event_compression;
 pub mod ledger_hashes;
