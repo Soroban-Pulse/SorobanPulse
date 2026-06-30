@@ -11967,3 +11967,66 @@ mod temporal_tests {
         assert_eq!(v["total"], 0);
     }
 }
+
+// ============================================================================
+// Issue #627: Bloom filter based contract existence check
+// ============================================================================
+
+/// Check if a contract has any indexed events using the bloom filter.
+///
+/// `GET /v1/contracts/exists?id=CABC...`
+///
+/// Returns whether the contract is likely to exist based on the bloom filter.
+/// This is a fast check without a database query.
+#[utoipa::path(
+    get,
+    path = "/v1/contracts/exists",
+    tag = "contracts",
+    params(
+        ("id", description = "Contract ID to check"),
+    ),
+    responses(
+        (status = 200, description = "Contract existence check result", body = ContractExistsResponse),
+        (status = 400, description = "Invalid contract ID"),
+    )
+)]
+pub async fn check_contract_exists(
+    State(state): State<AppState>,
+    Query(params): Query<ContractExistsParams>,
+) -> Result<impl IntoResponse, AppError> {
+    use models::ContractId;
+    
+    let contract_id = params.id.trim();
+    
+    // Validate contract ID format
+    ContractId::validate(contract_id)?;
+    
+    // Check if contract exists in bloom filter
+    let exists_in_filter = if let Some(ref filter) = state.indexer_state.bloom_filter {
+        filter.contains_contract(contract_id)
+    } else {
+        // If bloom filter is not available, do a DB lookup
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE contract_id = $1 LIMIT 1"
+        )
+        .bind(contract_id)
+        .fetch_one(&state.pool)
+        .await?;
+        count > 0
+    };
+    
+    Ok(Json(models::ContractExistsResponse {
+        contract_id: contract_id.to_string(),
+        exists: exists_in_filter,
+        method: if state.indexer_state.bloom_filter.is_some() {
+            "bloom_filter".to_string()
+        } else {
+            "database_query".to_string()
+        },
+    }))
+}
+
+#[derive(serde::Deserialize)]
+pub struct ContractExistsParams {
+    pub id: String,
+}

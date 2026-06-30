@@ -1233,3 +1233,14 @@ pub struct ChannelGroupResponse {
     pub updated_at: DateTime<Utc>,
 }
 
+
+// ── Issue #627: Contract existence check ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ContractExistsResponse {
+    pub contract_id: String,
+    /// true if the contract has indexed events, false otherwise
+    pub exists: bool,
+    /// "bloom_filter" or "database_query" indicating how the check was performed
+    pub method: String,
+}
