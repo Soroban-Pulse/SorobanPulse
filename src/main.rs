@@ -11,6 +11,7 @@ mod config;
 mod content_filter;
 mod db;
 mod dedup;
+mod distributed_tracing;
 mod email;
 mod encryption;
 mod error;

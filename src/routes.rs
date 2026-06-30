@@ -642,6 +642,9 @@ pub fn create_router_with_tx_and_tenant_map(
         ))
         .layer(axum::middleware::from_fn(middleware::head_middleware))
         .layer(axum::middleware::from_fn(middleware::request_id_middleware))
+        .layer(axum::middleware::from_fn(
+            middleware::tracing_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             auth_state,
             middleware::auth_middleware,
