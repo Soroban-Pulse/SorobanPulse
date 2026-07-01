@@ -1159,6 +1159,38 @@ impl Config {
         )
         .unwrap_or(30);
 
+        let batch_tx_max_size = parse_int::<usize>(
+            "BATCH_TX_MAX_SIZE",
+            &env_or_file_or("BATCH_TX_MAX_SIZE", &file, "100"),
+            "100",
+            &mut errors,
+        )
+        .unwrap_or(100);
+
+        let batch_events_max_size = parse_int::<usize>(
+            "BATCH_EVENTS_MAX_SIZE",
+            &env_or_file_or("BATCH_EVENTS_MAX_SIZE", &file, "10000"),
+            "10000",
+            &mut errors,
+        )
+        .unwrap_or(10_000);
+
+        let aggregation_cache_ttl_secs = parse_int::<u64>(
+            "AGGREGATION_CACHE_TTL_SECS",
+            &env_or_file_or("AGGREGATION_CACHE_TTL_SECS", &file, "60"),
+            "60",
+            &mut errors,
+        )
+        .unwrap_or(60);
+
+        let aggregation_cache_max_entries = parse_int::<u64>(
+            "AGGREGATION_CACHE_MAX_ENTRIES",
+            &env_or_file_or("AGGREGATION_CACHE_MAX_ENTRIES", &file, "1000"),
+            "1000",
+            &mut errors,
+        )
+        .unwrap_or(1_000);
+
         let event_data_encryption_key = env_or_file("EVENT_DATA_ENCRYPTION_KEY", &file)
             .and_then(|v| parse_hex_key_checked("EVENT_DATA_ENCRYPTION_KEY", &v, &mut errors));
 
