@@ -206,6 +206,16 @@ async fn main() -> anyhow::Result<()> {
     info!("Migrations applied successfully");
     info!(environment = ?config.environment, "Running environment");
 
+    // Warm the query plan cache with the five canonical query patterns so
+    // the first real requests are never cold misses. (#802)
+    {
+        let plan_cache = query_plan_cache::QueryPlanCache::with_defaults();
+        match plan_cache.warm_cache(&pool).await {
+            Ok(n) => info!(warmed = n, "Query plan cache warmed at startup"),
+            Err(e) => warn!(error = %e, "Query plan cache warming failed; continuing"),
+        }
+    }
+
     // Initialize schema validator and load schemas
     let schema_validator = Arc::new(schema_validator::SchemaValidator::new(pool.clone()));
     if let Err(e) = schema_validator.load_schemas().await {
