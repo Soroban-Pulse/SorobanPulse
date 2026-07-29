@@ -54,3 +54,4 @@ pub mod push_preload;
 pub mod pool_management;
 pub mod slo_tracker;
 pub mod statistics_management;
+pub mod partition_manager;
