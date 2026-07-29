@@ -14970,3 +14970,53 @@ pub async fn record_slo_sample(
     crate::slo_tracker::record_sli_sample(&tracker, slo_name, value).await;
     Ok(axum::http::StatusCode::ACCEPTED)
 }
+
+// ── Issue #817: Adaptive pool tuning handlers ─────────────────────────────
+
+/// GET /v1/admin/pool-config/adaptive
+///
+/// Returns the latest adaptive tuner snapshot, current runtime config,
+/// and advanced pool counters (timeouts, health failures, stale cleaned).
+pub async fn get_adaptive_pool_status(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let status = crate::adaptive_pool::AdaptivePoolStatus::from_state(&state.adaptive_pool);
+    Ok(Json(serde_json::to_value(&status).unwrap_or_else(|_| json!({"error": "serialization failed"}))))
+}
+
+/// PUT /v1/admin/pool-config/adaptive/config
+///
+/// Hot-reload the adaptive pool configuration at runtime without a restart.
+/// Saves the current config to a rollback history (up to 5 versions).
+///
+/// Body: JSON matching `AdaptivePoolConfig`.
+pub async fn update_adaptive_pool_config(
+    State(state): State<AppState>,
+    Json(new_config): Json<crate::adaptive_pool::AdaptivePoolConfig>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    state.adaptive_pool.apply_config(new_config).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))
+    })?;
+    let current = state.adaptive_pool.current_config();
+    Ok(Json(json!({
+        "status": "applied",
+        "config_version": current.config_version,
+        "config_variant": current.config_variant,
+    })))
+}
+
+/// POST /v1/admin/pool-config/adaptive/rollback
+///
+/// Roll back to the previous adaptive pool configuration version.
+pub async fn rollback_adaptive_pool_config(
+    State(state): State<AppState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let rolled_back = state.adaptive_pool.rollback().map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(json!({ "error": e })))
+    })?;
+    Ok(Json(json!({
+        "status": "rolled_back",
+        "config_version": rolled_back.config_version,
+        "config_variant": rolled_back.config_variant,
+    })))
+}
