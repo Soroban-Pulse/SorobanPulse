@@ -226,6 +226,49 @@
           "webhook_failures_per_hour": 0
         }
       }
+    },
+
+    "filter_scenarios": {
+      "description": "All filter permutations: event_type, ledger range, combined, exact_count, deep pagination, contract+filter, NDJSON, worst-case combinations.",
+      "script": "tests/load/filter_scenarios.js",
+      "slo": {
+        "simple_filter_p99_ms": 300,
+        "range_filter_p99_ms": 400,
+        "combined_filter_p99_ms": 500,
+        "exact_count_p99_ms": 2000,
+        "pagination_p99_ms": 400,
+        "contract_filter_p99_ms": 300,
+        "error_rate": 0.01
+      },
+      "baselines": {
+        "100k_events": {
+          "simple_filter_p99_ms": 15,
+          "range_filter_p99_ms": 25,
+          "combined_filter_p99_ms": 30,
+          "exact_count_p99_ms": 120,
+          "pagination_p99_ms": 12,
+          "contract_filter_p99_ms": 15,
+          "error_rate": 0.000
+        },
+        "1M_events": {
+          "simple_filter_p99_ms": 30,
+          "range_filter_p99_ms": 70,
+          "combined_filter_p99_ms": 100,
+          "exact_count_p99_ms": 500,
+          "pagination_p99_ms": 25,
+          "contract_filter_p99_ms": 35,
+          "error_rate": 0.000
+        },
+        "10M_events": {
+          "simple_filter_p99_ms": 70,
+          "range_filter_p99_ms": 190,
+          "combined_filter_p99_ms": 280,
+          "exact_count_p99_ms": 1500,
+          "pagination_p99_ms": 65,
+          "contract_filter_p99_ms": 80,
+          "error_rate": 0.001
+        }
+      }
     }
   },
 

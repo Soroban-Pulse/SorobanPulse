@@ -147,6 +147,16 @@ switch (scenario) {
     checkErrorRate("mc_error_rate",                   "error_rate",            "multi-contract error rate");
     break;
 
+  case "filter_scenarios":
+    checkLatency("fs_simple_filter_ms",   "p(99)", "simple_filter_p99_ms",   "simple filter p99");
+    checkLatency("fs_range_filter_ms",    "p(99)", "range_filter_p99_ms",    "range filter p99");
+    checkLatency("fs_combined_filter_ms", "p(99)", "combined_filter_p99_ms", "combined filter p99");
+    checkLatency("fs_exact_count_ms",     "p(99)", "exact_count_p99_ms",     "exact count p99");
+    checkLatency("fs_pagination_ms",      "p(99)", "pagination_p99_ms",      "deep pagination p99");
+    checkLatency("fs_contract_filter_ms", "p(99)", "contract_filter_p99_ms", "contract filter p99");
+    checkErrorRate("fs_error_rate",                 "error_rate",             "filter error rate");
+    break;
+
   case "webhook_delivery":
     checkLatency("wh_replay_latency_ms",  "p(99)", "replay_p99_ms",         "webhook replay p99");
     checkLatency("wh_metrics_latency_ms", "p(99)", "metrics_probe_p99_ms",  "metrics probe p99");
