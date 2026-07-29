@@ -77,6 +77,27 @@ mod push_notification;
 mod connection_pool;
 mod slo_tracker;
 
+// These modules were already part of the library target (see src/lib.rs) but
+// missing here, leaving `crate::pool_management` and friends unresolved in
+// handlers.rs when compiling the `soroban-pulse` binary. `clippy::pedantic`
+// is scoped off since these files were never linted against it before.
+#[allow(clippy::pedantic)]
+mod anonymization;
+#[allow(clippy::pedantic)]
+mod event_compression;
+#[allow(clippy::pedantic)]
+mod health_check;
+#[allow(clippy::pedantic)]
+mod ledger_hashes;
+#[allow(clippy::pedantic)]
+mod networks;
+#[allow(clippy::pedantic)]
+mod pool_management;
+#[allow(clippy::pedantic)]
+mod push_preload;
+#[allow(clippy::pedantic)]
+mod statistics_management;
+
 #[cfg(feature = "archive")]
 mod archiver;
 

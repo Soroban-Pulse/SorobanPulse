@@ -1,0 +1,84 @@
+name: Benchmarks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_test
+
+jobs:
+  benchmark:
+    name: Benchmark
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+
+      # Criterion compares each run against a saved "base" baseline and reports
+      # "Performance has regressed."/"Performance has improved." automatically.
+      # Restoring the most recent baseline captured on main gives PRs something
+      # real to compare against; a cold cache just means the first run of the day
+      # reports absolute numbers only (no regression to compare against yet).
+      - name: Restore benchmark baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ github.sha }}
+          restore-keys: |
+            criterion-baseline-
+
+      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
+
+      - name: Run benchmarks
+        run: |
+          cargo bench \
+            --bench pagination \
+            --bench compression \
+            --bench conditional_get \
+            --bench serialization \
+            --bench query_planning \
+            --bench streaming_response \
+            --bench db_queries \
+            2>&1 | tee bench_output.txt
+
+      - name: Check for regressions
+        run: |
+          if grep -q "Performance has regressed\." bench_output.txt; then
+            {
+              echo "## :warning: Performance regression detected"
+              echo '```'
+              grep -B3 "Performance has regressed\." bench_output.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "One or more benchmarks regressed beyond criterion's noise threshold. See the job summary for details."
+            exit 1
+          fi
+          echo "## :white_check_mark: No performance regressions detected" >> "$GITHUB_STEP_SUMMARY"
+
+      # Only persist the baseline from main so PRs always compare against main,
+      # never against another PR's (possibly regressed) results.
+      - name: Save benchmark baseline
+        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/cache/save@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ github.sha }}
