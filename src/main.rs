@@ -69,6 +69,7 @@ mod oncall;
 mod xdr_validation;
 mod replica_monitor;
 mod feature_flags;
+#[cfg(feature = "graphql")]
 mod graphql;
 mod sse_ring_buffer;
 mod query_cache;
