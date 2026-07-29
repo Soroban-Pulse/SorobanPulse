@@ -104,14 +104,12 @@ pub struct AppState {
     pub query_result_cache: std::sync::Arc<moka::future::Cache<String, serde_json::Value>>,
     /// Issue #618: Anonymization rules configuration.
     pub anonymization_config: Option<Arc<crate::anonymization::AnonymizationConfig>>,
-    /// Issue #817: Connection pool stats tracker.
+    /// Issue #817: Connection pool stats tracker (shared with pool monitor).
     pub pool_stats: Arc<crate::connection_pool::PoolStats>,
-    /// Issue #817: Adaptive pool tuner state.
+    /// Issue #817: Adaptive pool tuner — hot-reloadable config, snapshots, counters.
     pub adaptive_pool: Arc<crate::adaptive_pool::AdaptiveTunerState>,
-    /// Issue #817: Alias for pool used by handlers.
+    /// Issue #817: Alias so handlers can use `state.db` (same as `state.pool`).
     pub db: sqlx::PgPool,
-    /// Issue #818: Slow query tracker for optimization dashboard.
-    pub slow_query_tracker: Arc<crate::query_optimizer::SlowQueryTracker>,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -400,11 +398,6 @@ pub fn create_router_with_tx_and_tenant_map(
         config.db_min_connections,
     );
 
-    // Issue #818: slow query tracker (threshold from SLOW_QUERY_THRESHOLD_MS).
-    let slow_query_tracker = crate::query_optimizer::SlowQueryTracker::new(
-        config.slow_query_threshold_ms as f64,
-    );
-
     let app_state = AppState {
         db: pool.clone(),
         pool,
@@ -433,7 +426,6 @@ pub fn create_router_with_tx_and_tenant_map(
         anonymization_config: None,
         pool_stats,
         adaptive_pool,
-        slow_query_tracker,
     };
 
     // Spawn cache invalidation task: subscribe to the broadcast channel and
@@ -472,16 +464,9 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/pool-config", axum::routing::get(handlers::get_pool_tuning_guide))
         .route("/admin/pool-config/statistics", axum::routing::get(handlers::get_pool_statistics))
         .route("/admin/pool-config/health", axum::routing::get(handlers::get_pool_health))
-        // Issue #817: adaptive pool tuning
         .route("/admin/pool-config/adaptive", axum::routing::get(handlers::get_adaptive_pool_status))
         .route("/admin/pool-config/adaptive/config", axum::routing::put(handlers::update_adaptive_pool_config))
         .route("/admin/pool-config/adaptive/rollback", axum::routing::post(handlers::rollback_adaptive_pool_config))
-        // Issue #818: query optimization dashboard
-        .route("/admin/query/slow", axum::routing::get(handlers::get_slow_queries))
-        .route("/admin/query/slow/clear", axum::routing::delete(handlers::clear_slow_queries))
-        .route("/admin/query/explain", axum::routing::post(handlers::explain_query_handler))
-        .route("/admin/query/index-usage", axum::routing::get(handlers::get_index_usage))
-        .route("/admin/query/dashboard", axum::routing::get(handlers::get_query_dashboard))
         .route("/admin/statistics/report", axum::routing::get(handlers::get_statistics_report))
         .route("/admin/statistics/stale", axum::routing::get(handlers::detect_stale_statistics))
         .route("/admin/statistics/health", axum::routing::get(handlers::get_statistics_health))

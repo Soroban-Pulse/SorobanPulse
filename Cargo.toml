@@ -137,6 +137,10 @@ path = "src/bin/gen_postman.rs"
 name = "gen_subscription_scaffold"
 path = "src/bin/gen_subscription_scaffold.rs"
 
+[[bin]]
+name = "pg_tuning_advisor"
+path = "src/bin/pg_tuning_advisor.rs"
+
 [[bench]]
 name = "pagination"
 harness = false
@@ -151,4 +155,16 @@ harness = false
 
 [[bench]]
 name = "conditional_get"
+harness = false
+
+[[bench]]
+name = "serialization"
+harness = false
+
+[[bench]]
+name = "query_planning"
+harness = false
+
+[[bench]]
+name = "streaming_response"
 harness = false

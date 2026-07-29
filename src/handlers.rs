@@ -14974,14 +14974,22 @@ pub async fn record_slo_sample(
 // ── Issue #817: Adaptive pool tuning handlers ─────────────────────────────
 
 /// GET /v1/admin/pool-config/adaptive
+///
+/// Returns the latest adaptive tuner snapshot, current runtime config,
+/// and advanced pool counters (timeouts, health failures, stale cleaned).
 pub async fn get_adaptive_pool_status(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let status = crate::adaptive_pool::AdaptivePoolStatus::from_state(&state.adaptive_pool);
-    Ok(Json(serde_json::to_value(&status).unwrap_or(json!({"error": "serialization failed"}))))
+    Ok(Json(serde_json::to_value(&status).unwrap_or_else(|_| json!({"error": "serialization failed"}))))
 }
 
 /// PUT /v1/admin/pool-config/adaptive/config
+///
+/// Hot-reload the adaptive pool configuration at runtime without a restart.
+/// Saves the current config to a rollback history (up to 5 versions).
+///
+/// Body: JSON matching `AdaptivePoolConfig`.
 pub async fn update_adaptive_pool_config(
     State(state): State<AppState>,
     Json(new_config): Json<crate::adaptive_pool::AdaptivePoolConfig>,
@@ -14989,85 +14997,26 @@ pub async fn update_adaptive_pool_config(
     state.adaptive_pool.apply_config(new_config).map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e })))
     })?;
-    let cfg = state.adaptive_pool.current_config();
-    Ok(Json(json!({ "status": "applied", "config_version": cfg.config_version, "config_variant": cfg.config_variant })))
+    let current = state.adaptive_pool.current_config();
+    Ok(Json(json!({
+        "status": "applied",
+        "config_version": current.config_version,
+        "config_variant": current.config_variant,
+    })))
 }
 
 /// POST /v1/admin/pool-config/adaptive/rollback
+///
+/// Roll back to the previous adaptive pool configuration version.
 pub async fn rollback_adaptive_pool_config(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let cfg = state.adaptive_pool.rollback().map_err(|e| {
+    let rolled_back = state.adaptive_pool.rollback().map_err(|e| {
         (StatusCode::BAD_REQUEST, Json(json!({ "error": e })))
     })?;
-    Ok(Json(json!({ "status": "rolled_back", "config_version": cfg.config_version })))
-}
-
-// ── Issue #818: Query optimization handlers ───────────────────────────────
-
-/// GET /v1/admin/query/slow  — top slow queries ordered by avg latency.
-pub async fn get_slow_queries(
-    State(state): State<AppState>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Json<Value> {
-    let n = params.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(10);
-    let queries = state.slow_query_tracker.top_slow(n);
-    Json(json!({ "slow_queries": queries, "count": queries.len() }))
-}
-
-/// DELETE /v1/admin/query/slow/clear  — reset slow query log.
-pub async fn clear_slow_queries(State(state): State<AppState>) -> Json<Value> {
-    state.slow_query_tracker.clear();
-    Json(json!({ "status": "cleared" }))
-}
-
-/// POST /v1/admin/query/explain  — run EXPLAIN on a supplied query.
-///
-/// Body: `{ "query": "SELECT …", "analyze": false, "hints": [] }`
-pub async fn explain_query_handler(
-    State(state): State<AppState>,
-    Json(body): Json<Value>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let query = body.get("query")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(json!({ "error": "missing 'query' field" }))))?;
-
-    let analyze = body.get("analyze").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    // Apply any supplied hints.
-    let hints: Vec<crate::query_optimizer::QueryHint> = body
-        .get("hints")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let (hinted_query, _sets) = crate::query_optimizer::apply_hints(query, &hints);
-
-    let analysis = if analyze {
-        crate::query_optimizer::analyze_query(&state.pool, &hinted_query).await
-    } else {
-        crate::query_optimizer::explain_query(&state.pool, &hinted_query).await
-    };
-
-    analysis
-        .map(|a| Json(serde_json::to_value(&a).unwrap_or(json!({}))))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))))
-}
-
-/// GET /v1/admin/query/index-usage  — index usage statistics with unused index flags.
-pub async fn get_index_usage(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    crate::query_optimizer::get_index_usage(&state.pool)
-        .await
-        .map(|stats| Json(json!({ "indexes": stats, "count": stats.len() })))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))))
-}
-
-/// GET /v1/admin/query/dashboard  — full optimization dashboard.
-pub async fn get_query_dashboard(
-    State(state): State<AppState>,
-) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    crate::query_optimizer::build_dashboard(&state.pool, &state.slow_query_tracker)
-        .await
-        .map(|d| Json(serde_json::to_value(&d).unwrap_or(json!({}))))
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))))
+    Ok(Json(json!({
+        "status": "rolled_back",
+        "config_version": rolled_back.config_version,
+        "config_variant": rolled_back.config_variant,
+    })))
 }

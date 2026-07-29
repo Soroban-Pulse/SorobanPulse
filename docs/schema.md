@@ -232,3 +232,88 @@ The background task in `src/index_monitor.rs` runs on every cycle (`INDEX_CHECK_
 A Prometheus alert (`UnusedIndexesDetected`) fires when `soroban_pulse_unused_indexes_total > 0` for more than 24 hours. Unused indexes waste write throughput and storage; the alert prompts operators to review and drop obsolete indexes.
 
 > **Note:** `idx_scan` resets when `pg_stat_reset()` is called or the PostgreSQL instance is restarted. A newly created index will show `idx_scan = 0` until it is first used; allow one full monitoring cycle before treating it as unused.
+
+---
+
+## Migration Consolidation History
+
+The following indexes were dropped as part of issue #804 (migration
+`20260728000001_index_consolidation.sql`):
+
+| Dropped index | Reason | Surviving replacement |
+|---------------|--------|-----------------------|
+| `idx_events_contract_ledger` | Superseded by `idx_events_contract_type_ledger` which covers the same `(contract_id, ledger DESC)` pattern and additionally supports `event_type` filters | `idx_events_contract_type_ledger` |
+| `idx_events_event_data_topic_gin` | Covered by `idx_events_event_data_gin` (full-document `jsonb_path_ops`) and the per-position `idx_events_topic_1/2/3_gin` indexes | `idx_events_event_data_gin`, `idx_events_topic_1_gin`, `idx_events_topic_2_gin`, `idx_events_topic_3_gin` |
+
+All surviving indexes now carry a `COMMENT` describing their purpose (see the
+migration file for the full text).
+
+A full audit of all 60+ migrations is documented in [`docs/schema-audit.md`](schema-audit.md).
+
+---
+
+## Partition Maintenance
+
+The `events` table is partitioned by `timestamp` (monthly ranges) as of migration
+`20260727000002_partition_events_by_month.sql`.
+
+### Pre-creating future partitions
+
+The `create_future_partitions(N)` SQL function (defined in
+`scripts/manage_partitions.sql`) creates N months of partitions starting from
+the current month:
+
+```sql
+-- Create partitions for the next 3 months (run as needed or via cron)
+SELECT create_future_partitions(3);
+```
+
+The schema health check (`src/index_monitor.rs::run_schema_health_check`)
+emits a `WARN` log and increments
+`soroban_pulse_schema_missing_future_partitions` if fewer than 2 future months
+are pre-created. Alert on this gauge being `> 0` for more than 48 hours.
+
+### Verifying partition pruning
+
+Partition pruning is enabled by default in PostgreSQL 12+. Confirm:
+
+```sql
+SHOW enable_partition_pruning;  -- should be 'on'
+
+-- A query with a timestamp predicate should show only the relevant partition:
+EXPLAIN SELECT id FROM events
+WHERE timestamp >= '2026-07-01' AND timestamp < '2026-08-01'
+ORDER BY ledger DESC LIMIT 20;
+-- Expected: only events_2026_07 appears in the plan
+```
+
+Queries filtered only by `contract_id` (no timestamp) will scan all partitions
+but use the per-partition `idx_events_contract_type_ledger` index to limit rows.
+
+### Dropping old partitions
+
+Use `drop_old_partitions(N)` to remove partitions older than N months:
+
+```sql
+-- Drop partitions older than 12 months (data retention policy)
+SELECT drop_old_partitions(12);
+```
+
+Always take a backup before dropping partitions in production. Refer to
+`docs/data-retention.md` for the full retention policy.
+
+### `events_legacy` table
+
+`events_legacy` is the original non-partitioned `events` table preserved
+during the partitioning migration. It is not referenced by any application
+code (`grep` of `src/**/*.rs` returns zero matches). After confirming that all
+historical data has been migrated to the partitioned `events` table, it can be
+dropped:
+
+```sql
+-- Verify data completeness first:
+SELECT COUNT(*) FROM events_legacy;
+SELECT COUNT(*) FROM events;
+-- Then drop when counts match and data is confirmed migrated:
+DROP TABLE events_legacy;
+```
