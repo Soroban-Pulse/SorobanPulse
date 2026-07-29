@@ -1,10 +1,12 @@
 # =============================================================================
-# Root Module — SorobanPulse Infrastructure (Issue #650)
+# Root Module — SorobanPulse Infrastructure (Issue #650, #833)
 #
 # Wires together:
 #   - VPC + subnets + NAT gateway
 #   - RDS PostgreSQL
 #   - Application Load Balancer
+#   - ECS Fargate service
+#   - Automated backup storage
 #   - Monitoring / CloudWatch alarms
 # =============================================================================
 
@@ -78,6 +80,58 @@ module "alb" {
   health_check_interval  = var.health_check_interval
   health_check_threshold = var.health_check_threshold
   app_port               = var.app_port
+}
+
+# ---------------------------------------------------------------------------
+# ECS Fargate Service (Issue #833)
+# ---------------------------------------------------------------------------
+
+module "ecs" {
+  source = "./modules/ecs"
+
+  name_prefix        = local.name_prefix
+  aws_region         = var.aws_region
+  container_image    = var.ecs_container_image
+  task_cpu           = var.ecs_task_cpu
+  task_memory        = var.ecs_task_memory
+  desired_count      = var.app_container_count
+  app_port           = var.app_port
+  health_check_path  = var.health_check_path
+  private_subnet_ids = module.vpc.private_subnet_ids
+  security_group_ids = [module.vpc.app_security_group_id]
+  target_group_arn   = module.alb.target_group_arn
+  secret_arns        = [module.rds.db_secret_arn]
+  log_retention_days = var.log_retention_days
+
+  environment_variables = [
+    {
+      name  = "PORT"
+      value = tostring(var.app_port)
+    },
+    {
+      name  = "ENVIRONMENT"
+      value = var.environment
+    }
+  ]
+
+  secret_environment_variables = [
+    {
+      name      = "DATABASE_URL"
+      valueFrom = module.rds.db_secret_arn
+    }
+  ]
+}
+
+# ---------------------------------------------------------------------------
+# Automated Backup Storage (Issue #833)
+# ---------------------------------------------------------------------------
+
+module "backup" {
+  source = "./modules/backup"
+
+  name_prefix    = local.name_prefix
+  retention_days = var.backup_retention_days
+  force_destroy  = var.backup_force_destroy
 }
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 # =============================================================================
-# Input Variables — SorobanPulse Terraform (Issue #650)
+# Input Variables — SorobanPulse Terraform (Issue #650, #833)
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -13,11 +13,11 @@ variable "aws_region" {
 }
 
 variable "environment" {
-  description = "Deployment environment: staging | production."
+  description = "Deployment environment: dev | staging | production."
   type        = string
   validation {
-    condition     = contains(["staging", "production"], var.environment)
-    error_message = "environment must be 'staging' or 'production'."
+    condition     = contains(["dev", "staging", "production"], var.environment)
+    error_message = "environment must be 'dev', 'staging', or 'production'."
   }
 }
 
@@ -209,6 +209,44 @@ variable "app_container_count" {
   description = "Desired number of running application containers."
   type        = number
   default     = 2
+}
+
+# ---------------------------------------------------------------------------
+# ECS Fargate (Issue #833)
+# ---------------------------------------------------------------------------
+
+variable "ecs_task_cpu" {
+  description = "CPU units for the Fargate task (256 = 0.25 vCPU)."
+  type        = number
+  default     = 512
+}
+
+variable "ecs_task_memory" {
+  description = "Memory in MiB for the Fargate task."
+  type        = number
+  default     = 1024
+}
+
+variable "ecs_container_image" {
+  description = "Docker image URI for the application container."
+  type        = string
+  default     = "ghcr.io/soroban-pulse/sorobanpulse:latest"
+}
+
+# ---------------------------------------------------------------------------
+# Backup (Issue #833)
+# ---------------------------------------------------------------------------
+
+variable "backup_retention_days" {
+  description = "Number of days to retain S3 backups before expiration."
+  type        = number
+  default     = 90
+}
+
+variable "backup_force_destroy" {
+  description = "Allow the backup bucket to be destroyed even with objects inside."
+  type        = bool
+  default     = false
 }
 
 # ---------------------------------------------------------------------------

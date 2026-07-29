@@ -1,0 +1,76 @@
+# =============================================================================
+# Dev Environment — terraform.tfvars.example
+# SorobanPulse (Issue #833)
+#
+# Copy to terraform.tfvars and fill in real values before applying.
+# NEVER commit terraform.tfvars — it may contain sensitive data.
+#
+# Minimal configuration for local development and experimentation.
+# Uses the smallest instance types and disables HA features to reduce cost.
+# =============================================================================
+
+aws_region   = "us-east-1"
+environment  = "dev"
+project_name = "soroban-pulse"
+
+# ---------------------------------------------------------------------------
+# Networking — single AZ to minimize cost
+# ---------------------------------------------------------------------------
+vpc_cidr             = "10.2.0.0/16"
+availability_zones   = ["us-east-1a", "us-east-1b"]
+public_subnet_cidrs  = ["10.2.1.0/24", "10.2.2.0/24"]
+private_subnet_cidrs = ["10.2.11.0/24", "10.2.12.0/24"]
+enable_nat_gateway   = true
+single_nat_gateway   = true
+
+# ---------------------------------------------------------------------------
+# RDS — minimal instance for dev
+# ---------------------------------------------------------------------------
+db_instance_class               = "db.t3.micro"
+db_engine_version               = "16.3"
+db_name                         = "soroban_pulse_dev"
+db_username                     = "soroban_admin"
+db_allocated_storage            = 20
+db_max_allocated_storage        = 50
+db_backup_retention_period      = 1
+db_multi_az                     = false
+db_deletion_protection          = false
+db_apply_immediately            = true
+db_skip_final_snapshot          = true
+db_performance_insights_enabled = false
+db_monitoring_interval          = 0
+
+# ---------------------------------------------------------------------------
+# ALB
+# ---------------------------------------------------------------------------
+alb_internal            = false
+alb_access_logs_enabled = false
+alb_idle_timeout        = 60
+health_check_path       = "/healthz/ready"
+health_check_interval   = 30
+health_check_threshold  = 2
+app_port                = 3000
+app_container_count     = 1
+
+# Replace with a real ACM certificate ARN before applying:
+# certificate_arn = "arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/CERT_ID"
+
+# ---------------------------------------------------------------------------
+# ECS Fargate — minimal for dev
+# ---------------------------------------------------------------------------
+ecs_task_cpu    = 256
+ecs_task_memory = 512
+
+# ---------------------------------------------------------------------------
+# Backup — short retention for dev
+# ---------------------------------------------------------------------------
+backup_retention_days = 7
+
+# ---------------------------------------------------------------------------
+# Monitoring — relaxed thresholds for dev
+# ---------------------------------------------------------------------------
+rds_cpu_alarm_threshold     = 95
+rds_storage_alarm_threshold = 1073741824  # 1 GiB
+alb_5xx_alarm_threshold     = 50
+alb_latency_alarm_threshold = 5.0
+log_retention_days          = 7
