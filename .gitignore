@@ -75,7 +75,10 @@ add_openapi_info.py
 
 # Implementation summary / session artefacts
 IMPLEMENTATION_SUMMARY.md
+IMPLEMENTATION_SUMMARY_*.md
+IMPLEMENTATION_STATUS.md
 IMPLEMENTATION_COMPLETE.md
+INTEGRATIONS_IMPLEMENTATION.md
 SDK_IMPLEMENTATION_SUMMARY.md
 validate_implementation.ps1
 test_email_feature.sh
