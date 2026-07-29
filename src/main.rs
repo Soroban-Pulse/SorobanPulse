@@ -121,6 +121,10 @@ mod statistics_management;
 #[cfg(feature = "archive")]
 mod archiver;
 
+mod cloud_provider;
+mod cloud_replication;
+mod deployment_orchestrator;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
