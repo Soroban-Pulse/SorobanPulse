@@ -9,6 +9,7 @@
 /// operations when bloat exceeds configured thresholds.
 extern crate metrics as m;
 
+use chrono::Datelike;
 use sqlx::PgPool;
 use std::time::Duration;
 use tokio::sync::watch;
@@ -407,6 +408,163 @@ async fn check_indexes(pool: &PgPool) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// #804: Schema health check
+// ---------------------------------------------------------------------------
+
+/// Canonical queries used both by warm_cache() and by the schema health check.
+/// Keep in sync with `src/query_plan_cache.rs::WARM_QUERIES`.
+const HEALTH_CHECK_QUERIES: &[(&str, &str)] = &[
+    (
+        "paginated list",
+        "SELECT id FROM events ORDER BY ledger DESC LIMIT 20 OFFSET 0",
+    ),
+    (
+        "contract filter",
+        "SELECT id FROM events WHERE contract_id = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM' ORDER BY ledger DESC LIMIT 20",
+    ),
+    (
+        "tx hash lookup",
+        "SELECT id FROM events WHERE tx_hash = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2' ORDER BY ledger DESC",
+    ),
+    (
+        "ledger range",
+        "SELECT id FROM events WHERE ledger >= 1000000 AND ledger <= 2000000 ORDER BY ledger DESC LIMIT 20",
+    ),
+    (
+        "exact count",
+        "SELECT COUNT(*) FROM events",
+    ),
+];
+
+/// Run a full schema health check.  Emits Prometheus gauges and warning logs.
+///
+/// Checks performed:
+///   a) Unused public-schema indexes (idx_scan = 0, excluding partition child indexes).
+///   b) Missing future-month partitions for the `events` table (must have ≥ 2 ahead).
+///   c) EXPLAIN plans for the five canonical queries — warns on Seq Scan on `events`.
+pub async fn run_schema_health_check(pool: &PgPool) {
+    tracing::info!("Running schema health check (#804)");
+
+    // --- (a) Unused indexes ----------------------------------------------------
+    let unused_rows: Vec<(String,)> = match sqlx::query_as(
+        r#"
+        SELECT indexname
+        FROM pg_stat_user_indexes
+        WHERE schemaname = 'public'
+          AND COALESCE(idx_scan, 0) = 0
+          -- Exclude auto-created partition child indexes (name matches events_20YY_MM pattern)
+          AND indexname !~ '^idx_events_20[0-9]{2}_[0-9]{2}_'
+          AND indexname !~ '^events_20[0-9]{2}_[0-9]{2}_'
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "schema health: failed to query unused indexes");
+            vec![]
+        }
+    };
+
+    let unused_count = unused_rows.len() as u64;
+    crate::metrics::update_schema_unused_indexes(unused_count);
+
+    if unused_count > 0 {
+        let names: Vec<&str> = unused_rows.iter().map(|(n,)| n.as_str()).collect();
+        tracing::warn!(
+            count = unused_count,
+            indexes = ?names,
+            "schema health: unused indexes detected (idx_scan = 0); \
+             consider dropping them to reduce write overhead"
+        );
+    } else {
+        tracing::debug!("schema health: no unused indexes found");
+    }
+
+    // --- (b) Missing future partitions -----------------------------------------
+    // Determine how many months ahead we have partitions for.
+    // We expect at least 2 future months to be pre-created.
+    let required_months: Vec<String> = (1..=2_u32)
+        .map(|offset| {
+            // Compute year/month for now + offset months.
+            let now = chrono::Utc::now();
+            let future = now + chrono::Duration::days(30 * offset as i64);
+            format!("events_{}", future.format("%Y_%m"))
+        })
+        .collect();
+
+    let mut missing = 0u64;
+    for partition_name in &required_months {
+        let exists: Option<(String,)> = match sqlx::query_as(
+            "SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename = $1",
+        )
+        .bind(partition_name)
+        .fetch_optional(pool)
+        .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, partition = partition_name, "schema health: failed to check partition existence");
+                None
+            }
+        };
+
+        if exists.is_none() {
+            missing += 1;
+            tracing::warn!(
+                partition = partition_name,
+                "schema health: future partition not pre-created; \
+                 run SELECT create_future_partitions(3) to create it"
+            );
+        }
+    }
+
+    crate::metrics::update_schema_missing_future_partitions(missing);
+    if missing == 0 {
+        tracing::debug!("schema health: all required future partitions exist");
+    }
+
+    // --- (c) EXPLAIN plan checks -----------------------------------------------
+    for (label, query) in HEALTH_CHECK_QUERIES {
+        let explain_sql = format!("EXPLAIN (FORMAT JSON, ANALYZE OFF) {}", query);
+        match sqlx::query_scalar::<_, serde_json::Value>(&explain_sql)
+            .fetch_one(pool)
+            .await
+        {
+            Ok(plan) => {
+                let plan_str = plan.to_string();
+                let has_seq_scan = plan_str.contains("\"Seq Scan\"")
+                    || plan_str.contains("Seq Scan");
+                let uses_index = plan_str.contains("Index Scan")
+                    || plan_str.contains("Index Only Scan")
+                    || plan_str.contains("Bitmap Index Scan");
+
+                if has_seq_scan && !uses_index {
+                    tracing::warn!(
+                        query = label,
+                        "schema health: sequential scan on events table detected — \
+                         expected an index or partition scan. Run ANALYZE if this \
+                         follows a recent large data load."
+                    );
+                } else {
+                    tracing::debug!(query = label, "schema health: plan OK (index or partition scan)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    query = label,
+                    error = %e,
+                    "schema health: EXPLAIN failed for canonical query"
+                );
+            }
+        }
+    }
+
+    tracing::info!("Schema health check complete");
+}
+
 /// Spawn the index monitoring background task.
 ///
 /// Runs every `interval_hours` hours. Stops when `shutdown_rx` fires.
@@ -430,6 +588,8 @@ pub fn spawn(
                     collect_index_stats(&pool).await;
                     // #694: Fragmentation checks and optional auto-REINDEX
                     check_and_reindex(&pool, &thresholds).await;
+                    // #804: Schema health check (unused indexes + missing partitions + plan audit)
+                    run_schema_health_check(&pool).await;
                 }
                 _ = shutdown_rx.changed() => {
                     tracing::debug!("Index monitor shutting down");
