@@ -820,7 +820,7 @@ pub fn record_serialization_time(entity_type: &str, duration_us: u64) {
     .record(duration_us as f64);
 }
 
-// ── PostgreSQL Query Plan Caching metrics (Issue #689) ─────────────────────────
+// ── PostgreSQL Query Plan Caching metrics (Issue #689 / #802) ──────────────────
 
 /// Record query plan cache hit
 pub fn record_query_plan_cache_hit() {
@@ -840,6 +840,37 @@ pub fn record_query_plan_cached() {
 /// Record query planning time in milliseconds
 pub fn record_query_planning_time(planning_time_ms: f64) {
     m::histogram!("soroban_pulse_query_planning_time_ms").record(planning_time_ms);
+}
+
+/// Record a query plan eviction from the LRU/TTL cache. (#802)
+pub fn record_query_plan_cache_eviction() {
+    m::counter!("soroban_pulse_query_plan_cache_evictions_total").increment(1);
+}
+
+/// Update the hit-ratio gauge (0.0 – 1.0).  Refreshed on every get(). (#802)
+pub fn update_query_plan_hit_ratio(ratio: f64) {
+    // Clamp to [0,1] and guard against any NaN that slips through.
+    let safe = if ratio.is_finite() { ratio.clamp(0.0, 1.0) } else { 0.0 };
+    m::gauge!("soroban_pulse_query_plan_cache_hit_ratio").set(safe);
+}
+
+/// Update the live entry-count gauge after each insert. (#802)
+pub fn update_query_plan_cache_entry_count(count: u64) {
+    m::gauge!("soroban_pulse_query_plan_cache_entry_count").set(count as f64);
+}
+
+// ── Schema health metrics (Issue #804) ─────────────────────────────────────
+
+/// Update the count of public-schema indexes whose idx_scan is 0 since the
+/// last statistics reset, excluding newly-created partition indexes. (#804)
+pub fn update_schema_unused_indexes(count: u64) {
+    m::gauge!("soroban_pulse_schema_unused_indexes_total").set(count as f64);
+}
+
+/// Update the count of missing future month partitions for the events table.
+/// A value > 0 means partition pre-creation is lagging. (#804)
+pub fn update_schema_missing_future_partitions(count: u64) {
+    m::gauge!("soroban_pulse_schema_missing_future_partitions").set(count as f64);
 }
 
 // ── Advisory Lock metrics (Issue #686) ────────────────────────────────────────

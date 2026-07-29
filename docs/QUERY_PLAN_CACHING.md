@@ -113,18 +113,21 @@ let (pool, cache) = create_pool_with_plan_cache(
 
 1. **Cache Hit Rate**
    ```
-   soroban_pulse_query_plan_cache_hits_total
-   soroban_pulse_query_plan_cache_misses_total
+   soroban_pulse_query_plan_cache_hits_total      # counter — cumulative hits
+   soroban_pulse_query_plan_cache_misses_total    # counter — cumulative misses
+   soroban_pulse_query_plan_cache_hit_ratio       # gauge   — hits/(hits+misses), 0–1
    ```
 
 2. **Planning Time**
    ```
-   soroban_pulse_query_planning_time_ms
+   soroban_pulse_query_planning_time_ms           # histogram — per-query planning time
    ```
 
-3. **Plans Cached**
+3. **Plans Cached & Evicted** *(added in #802)*
    ```
-   soroban_pulse_query_plans_cached_total
+   soroban_pulse_query_plans_cached_total         # counter — cumulative inserts
+   soroban_pulse_query_plan_cache_evictions_total # counter — LRU/TTL evictions
+   soroban_pulse_query_plan_cache_entry_count     # gauge   — live entries right now
    ```
 
 ### Monitoring Queries
@@ -291,10 +294,11 @@ Benchmarks measure:
 ## Future Enhancements
 
 1. **Statistics-aware Caching** - Invalidate when statistics change
-2. **Warm-up Cache** - Pre-populate on startup
-3. **Distributed Caching** - Share cache across replicas
-4. **Plan Cost Tracking** - Alert on slow plans
-5. **Custom Serializers** - Optimize plan storage
+2. ~~**Warm-up Cache** - Pre-populate on startup~~ — **Implemented in #802** via `warm_cache()` called at startup, priming the five canonical query patterns
+3. ~~**Adaptive TTL** - Extend TTL for frequently used queries~~ — **Implemented in #802**: queries with ≥10 requests get 2× TTL; ≥100 requests get 4× TTL
+4. **Distributed Caching** - Share cache across replicas
+5. **Plan Cost Tracking** - Alert on slow plans
+6. **Custom Serializers** - Optimize plan storage
 
 ## References
 

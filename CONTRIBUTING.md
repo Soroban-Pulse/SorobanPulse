@@ -1,5 +1,9 @@
 # Contributing to Soroban Pulse
 
+New to the project? See [docs/onboarding.md](docs/onboarding.md) for a day-1
+setup checklist and fixes for the most common first-build issues before
+diving into the sections below.
+
 ## Running Integration Tests
 
 Integration tests require a live PostgreSQL instance. The easiest way is `make test-db`, which starts a throwaway container, runs the full suite, then tears it down:
