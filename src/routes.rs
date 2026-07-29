@@ -522,6 +522,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/contracts/search", get(handlers::get_contracts_search))
         .route("/contracts/exists", get(handlers::check_contract_exists))
         .route("/config", get(handlers::get_config))
+        .route("/rate-limit/status", get(handlers::get_rate_limit_status))
         .route("/admin/config/reload", axum::routing::post(handlers::reload_config))
         .route("/config/anonymization", axum::routing::get(handlers::get_anonymization_config))
         .route("/config/anonymization/rules", axum::routing::post(handlers::upsert_anonymization_rule))
@@ -778,6 +779,10 @@ pub fn create_router_with_tx_and_tenant_map(
         .merge(rate_limited_routes)
         .layer(axum::middleware::from_fn(
             middleware::security_headers_middleware,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::rate_limit_headers_middleware,
         ))
         .layer(axum::middleware::from_fn(middleware::head_middleware))
         .layer(axum::middleware::from_fn(middleware::request_id_middleware))

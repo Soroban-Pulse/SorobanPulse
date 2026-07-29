@@ -209,6 +209,17 @@ pub struct Config {
     pub rpc_request_timeout_secs: u64,
     pub allowed_origins: Vec<String>,
     pub rate_limit_per_minute: u32,
+    /// Per-API-key rate limit: max requests per minute (Issue #669).
+    /// When set, each API key gets its own sliding-window quota stored in the
+    /// `rate_limit_counters` table. `None` disables per-key enforcement.
+    /// Set via RATE_LIMIT_KEY_PER_MINUTE env var.
+    pub rate_limit_key_per_minute: Option<u32>,
+    /// Per-API-key rate limit: max requests per hour (Issue #669).
+    /// Set via RATE_LIMIT_KEY_PER_HOUR env var.
+    pub rate_limit_key_per_hour: Option<u32>,
+    /// Per-API-key rate limit: max requests per day (Issue #669).
+    /// Set via RATE_LIMIT_KEY_PER_DAY env var.
+    pub rate_limit_key_per_day: Option<u32>,
     pub indexer_lag_warn_threshold: u64,
     pub indexer_stall_timeout_secs: u64,
     pub db_statement_timeout_ms: u64,
@@ -462,6 +473,9 @@ impl Default for Config {
             rpc_request_timeout_secs: 30,
             allowed_origins: vec!["*".to_string()],
             rate_limit_per_minute: 60,
+            rate_limit_key_per_minute: None,
+            rate_limit_key_per_hour: None,
+            rate_limit_key_per_day: None,
             indexer_lag_warn_threshold: 100,
             indexer_stall_timeout_secs: 60,
             db_statement_timeout_ms: 5000,
@@ -1030,6 +1044,19 @@ impl Config {
         )
         .unwrap_or(60);
 
+        // Issue #669 / #666: Per-API-key rate limits (optional, sliding window).
+        let rate_limit_key_per_minute = env_or_file("RATE_LIMIT_KEY_PER_MINUTE", &file)
+            .and_then(|v| parse_int::<u32>("RATE_LIMIT_KEY_PER_MINUTE", &v, "1000", &mut errors))
+            .filter(|&n| n > 0);
+
+        let rate_limit_key_per_hour = env_or_file("RATE_LIMIT_KEY_PER_HOUR", &file)
+            .and_then(|v| parse_int::<u32>("RATE_LIMIT_KEY_PER_HOUR", &v, "10000", &mut errors))
+            .filter(|&n| n > 0);
+
+        let rate_limit_key_per_day = env_or_file("RATE_LIMIT_KEY_PER_DAY", &file)
+            .and_then(|v| parse_int::<u32>("RATE_LIMIT_KEY_PER_DAY", &v, "100000", &mut errors))
+            .filter(|&n| n > 0);
+
         let indexer_lag_warn_threshold = parse_int::<u64>(
             "INDEXER_LAG_WARN_THRESHOLD",
             &env_or_file_or("INDEXER_LAG_WARN_THRESHOLD", &file, "100"),
@@ -1290,6 +1317,9 @@ impl Config {
             rpc_request_timeout_secs,
             allowed_origins,
             rate_limit_per_minute,
+            rate_limit_key_per_minute,
+            rate_limit_key_per_hour,
+            rate_limit_key_per_day,
             indexer_lag_warn_threshold,
             indexer_stall_timeout_secs,
             db_statement_timeout_ms,
