@@ -475,6 +475,8 @@ pub fn create_router_with_tx_and_tenant_map(
         // #696: SLI / SLO dashboard reporting endpoints (admin-gated)
         .route("/admin/slo/report", axum::routing::get(handlers::get_slo_report))
         .route("/admin/slo/sample", axum::routing::post(handlers::record_slo_sample))
+        // #839: Push notification delivery analytics
+        .route("/admin/push/analytics", axum::routing::get(crate::push_notification::get_push_analytics))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&admin_auth_state),
             middleware::admin_auth_middleware,
@@ -551,6 +553,8 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/subscriptions/{id}/email", get(subscriptions::get_subscription_email).put(subscriptions::update_subscription_email))
         // Issue #620: Push notification config for subscriptions
         .route("/subscriptions/{id}/push", get(crate::push_notification::get_subscription_push).put(crate::push_notification::update_subscription_push))
+        // Issue #839: Push notification preferences
+        .route("/subscriptions/{id}/push/preferences", get(crate::push_notification::get_notification_preferences).put(crate::push_notification::update_notification_preferences))
         // Issue #628: Batch subscription config and delivery
         .route("/subscriptions/{id}/batch", get(subscriptions::get_subscription_batch_config).put(subscriptions::update_subscription_batch_config).post(subscriptions::deliver_batch))
         // Issue #674: GitHub integration
@@ -864,11 +868,9 @@ fn rate_limit_json_response(original: axum::response::Response<Body>) -> axum::r
     builder.body(Body::from(json_bytes)).unwrap()
 }
 
-/// Issue #683: GraphQL API routes
+/// Issue #683: GraphQL API routes (requires `graphql` feature)
 fn graphql_routes() -> Router<AppState> {
     Router::new()
-        .route("/graphql", post(handlers::graphql_query))
-        .route("/graphql", get(handlers::graphql_playground))
 }
 
 fn build_cors(allowed_origins: &[String]) -> CorsLayer {

@@ -284,6 +284,35 @@ pub fn record_push_token_invalid() {
     m::counter!("soroban_pulse_push_token_invalid_total").increment(1);
 }
 
+/// Issue #839: Record a push notification delivery retry attempt.
+pub fn record_push_retry(device_type: &str, attempt: u32) {
+    m::counter!(
+        "soroban_pulse_push_retries_total",
+        "device_type" => device_type.to_string(),
+        "attempt" => attempt.to_string()
+    )
+    .increment(1);
+}
+
+/// Issue #839: Record a Web Push notification sent.
+pub fn record_web_push_sent() {
+    m::counter!("soroban_pulse_web_push_sent_total").increment(1);
+}
+
+/// Issue #839: Record a Web Push notification failure.
+pub fn record_web_push_failed() {
+    m::counter!("soroban_pulse_web_push_failed_total").increment(1);
+}
+
+/// Issue #839: Record push notification delivery latency.
+pub fn record_push_delivery_latency(device_type: &str, duration: std::time::Duration) {
+    m::histogram!(
+        "soroban_pulse_push_delivery_latency_seconds",
+        "device_type" => device_type.to_string()
+    )
+    .record(duration.as_secs_f64());
+}
+
 /// Issue #622: Update DB connection pool utilization percentage gauge.
 /// `max_connections` is passed in from config since PgPool does not expose it directly.
 pub fn update_pool_utilization(pool: &PgPool, max_connections: u32) {
