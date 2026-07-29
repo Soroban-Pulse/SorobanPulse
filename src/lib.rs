@@ -52,5 +52,6 @@ pub mod push_notification;
 pub mod connection_pool;
 pub mod push_preload;
 pub mod pool_management;
+pub mod adaptive_pool;
 pub mod slo_tracker;
 pub mod statistics_management;

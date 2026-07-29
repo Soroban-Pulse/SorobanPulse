@@ -75,7 +75,16 @@ mod query_cache;
 mod query_plan_cache;
 mod push_notification;
 mod connection_pool;
+mod pool_management;
+mod adaptive_pool;
 mod slo_tracker;
+mod statistics_management;
+mod notification_admin;
+mod push_preload;
+mod financial_accuracy;
+mod webhook_template;
+mod event_aggregation;
+mod anomaly_detection;
 
 #[cfg(feature = "archive")]
 mod archiver;
