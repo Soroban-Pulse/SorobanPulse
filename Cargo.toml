@@ -86,12 +86,13 @@ jsonschema = "0.18"
 mlua = { version = "0.9", features = ["lua54", "async", "serialize"], optional = true }
 
 # Issue #683: GraphQL API layer
-async-graphql = { version = "0.12", features = ["chrono", "uuid"] }
-async-graphql-axum = "0.2"
+async-graphql = { version = "7", features = ["chrono", "uuid"], optional = true }
+async-graphql-axum = { version = "7", optional = true }
 tokio-tungstenite = "0.21"
 
 [features]
 default = []
+graphql = ["dep:async-graphql", "dep:async-graphql-axum"]
 otel = ["dep:tracing-opentelemetry", "dep:opentelemetry", "dep:opentelemetry-otlp", "dep:opentelemetry_sdk"]
 zipkin = ["dep:opentelemetry", "dep:opentelemetry-zipkin", "dep:opentelemetry_sdk"]
 encryption = ["dep:aes-gcm", "dep:rand"]
