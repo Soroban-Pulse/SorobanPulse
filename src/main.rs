@@ -69,13 +69,54 @@ mod oncall;
 mod xdr_validation;
 mod replica_monitor;
 mod feature_flags;
+#[cfg(feature = "graphql")]
 mod graphql;
 mod sse_ring_buffer;
 mod query_cache;
 mod query_plan_cache;
+mod query_optimizer;
+mod adaptive_pool;
+mod pool_management;
+mod statistics_management;
+mod notification_admin;
+mod push_preload;
+mod financial_accuracy;
+mod webhook_template;
+mod event_aggregation;
+mod anomaly_detection;
 mod push_notification;
 mod connection_pool;
+mod pool_management;
+mod adaptive_pool;
 mod slo_tracker;
+mod statistics_management;
+mod notification_admin;
+mod push_preload;
+mod financial_accuracy;
+mod webhook_template;
+mod event_aggregation;
+mod anomaly_detection;
+
+// These modules were already part of the library target (see src/lib.rs) but
+// missing here, leaving `crate::pool_management` and friends unresolved in
+// handlers.rs when compiling the `soroban-pulse` binary. `clippy::pedantic`
+// is scoped off since these files were never linted against it before.
+#[allow(clippy::pedantic)]
+mod anonymization;
+#[allow(clippy::pedantic)]
+mod event_compression;
+#[allow(clippy::pedantic)]
+mod health_check;
+#[allow(clippy::pedantic)]
+mod ledger_hashes;
+#[allow(clippy::pedantic)]
+mod networks;
+#[allow(clippy::pedantic)]
+mod pool_management;
+#[allow(clippy::pedantic)]
+mod push_preload;
+#[allow(clippy::pedantic)]
+mod statistics_management;
 
 #[cfg(feature = "archive")]
 mod archiver;
@@ -205,6 +246,16 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Migrations applied successfully");
     info!(environment = ?config.environment, "Running environment");
+
+    // Warm the query plan cache with the five canonical query patterns so
+    // the first real requests are never cold misses. (#802)
+    {
+        let plan_cache = query_plan_cache::QueryPlanCache::with_defaults();
+        match plan_cache.warm_cache(&pool).await {
+            Ok(n) => info!(warmed = n, "Query plan cache warmed at startup"),
+            Err(e) => warn!(error = %e, "Query plan cache warming failed; continuing"),
+        }
+    }
 
     // Initialize schema validator and load schemas
     let schema_validator = Arc::new(schema_validator::SchemaValidator::new(pool.clone()));

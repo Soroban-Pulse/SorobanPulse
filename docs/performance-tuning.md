@@ -446,6 +446,7 @@ See [README.md](../README.md#load-testing) for full details and thresholds.
 
 ## Related Documentation
 
+- [Database Configuration Tuning](database-configuration-tuning.md) — PostgreSQL server-level `postgresql.conf` recommendations (memory, cache sizing, parallelism) and the `pg_tuning_advisor` CLI
 - [Database Schema](schema.md) — index definitions and table structure
 - [Performance Regression Testing](performance-regression-testing.md) — automated regression detection
 - [Deployment Guide](deployment.md) — resource sizing and Kubernetes tuning
