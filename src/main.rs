@@ -60,6 +60,7 @@ mod github;
 mod discord;
 mod slack;
 mod telegram;
+mod notification_channel;
 mod integration_handlers;
 mod retry_policy;
 mod sms;

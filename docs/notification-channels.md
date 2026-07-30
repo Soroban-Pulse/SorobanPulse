@@ -202,3 +202,30 @@ clearly distinguishable from real event notifications.
 soroban_pulse_notification_test_total{channel_type="webhook", result="success"}
 soroban_pulse_notification_test_total{channel_type="webhook", result="failure"}
 ```
+
+## #809 – Unified Channel Interface
+
+To reduce the cost of adding and maintaining chat-style channels, `src/notification_channel.rs`
+defines a common `NotificationChannel` trait:
+
+```rust
+#[async_trait::async_trait]
+pub trait NotificationChannel: Send + Sync {
+    fn channel_name(&self) -> &'static str;
+
+    async fn send_event_notification(
+        &self,
+        event: &SorobanEvent,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
+}
+```
+
+`DiscordClient` and `TelegramClient` implement this trait, so callers that only need to
+deliver a plain event notification can hold a `&dyn NotificationChannel` instead of a
+concrete client type. Channel-specific behavior (thread replies, inline buttons, webhook
+setup, etc.) remains on each client's own methods — the trait only standardizes the shared
+"send an event" path.
+
+To add a new chat-style channel: implement `channel_name()` and `send_event_notification()`
+for your client type in `notification_channel.rs`, delegating to the client's own
+notification method as the Discord and Telegram implementations do.
