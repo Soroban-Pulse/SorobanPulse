@@ -1,5 +1,5 @@
 # =============================================================================
-# Root Outputs — SorobanPulse Terraform (Issue #650)
+# Root Outputs — SorobanPulse Terraform (Issue #650, #833)
 # =============================================================================
 
 # ---------------------------------------------------------------------------
@@ -69,6 +69,39 @@ output "alb_arn" {
 output "target_group_arn" {
   description = "ARN of the ALB target group."
   value       = module.alb.target_group_arn
+}
+
+# ---------------------------------------------------------------------------
+# ECS (Issue #833)
+# ---------------------------------------------------------------------------
+
+output "ecs_cluster_name" {
+  description = "Name of the ECS Fargate cluster."
+  value       = module.ecs.cluster_name
+}
+
+output "ecs_service_name" {
+  description = "Name of the ECS service running the application."
+  value       = module.ecs.service_name
+}
+
+output "ecs_task_definition_arn" {
+  description = "ARN of the current ECS task definition."
+  value       = module.ecs.task_definition_arn
+}
+
+# ---------------------------------------------------------------------------
+# Backup (Issue #833)
+# ---------------------------------------------------------------------------
+
+output "backup_bucket_id" {
+  description = "Name of the S3 bucket used for automated backups."
+  value       = module.backup.bucket_id
+}
+
+output "backup_bucket_arn" {
+  description = "ARN of the S3 backup bucket."
+  value       = module.backup.bucket_arn
 }
 
 # ---------------------------------------------------------------------------
