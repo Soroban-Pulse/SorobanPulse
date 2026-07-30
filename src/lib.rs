@@ -22,6 +22,7 @@ pub mod error;
 pub mod event_handler;
 pub mod event_hubs;
 pub mod event_replay;
+pub mod event_router;
 pub mod event_aggregation;
 pub mod anomaly_detection;
 pub mod graceful_shutdown;
