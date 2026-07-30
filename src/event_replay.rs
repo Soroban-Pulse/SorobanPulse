@@ -4,6 +4,45 @@ use sqlx::PgPool;
 use uuid::Uuid;
 use tracing::{info, error, warn};
 
+/// Replays estimated to touch more events than this require explicit
+/// operator approval before they are allowed to proceed.
+pub const LARGE_REPLAY_THRESHOLD: i64 = 100_000;
+
+/// Dry-run cost estimate for a prospective replay, returned before any
+/// replay is actually initiated.
+#[derive(Debug, Serialize)]
+pub struct ReplayCostEstimate {
+    pub start_ledger: i64,
+    pub end_ledger: i64,
+    pub estimated_events: i64,
+    pub requires_approval: bool,
+}
+
+/// Estimate the number of events a replay over `[start_ledger, end_ledger]`
+/// would touch, without creating a replay record. Use this to dry-run a
+/// replay before committing to it.
+pub async fn estimate_replay_cost(
+    pool: &PgPool,
+    start_ledger: i64,
+    end_ledger: i64,
+) -> Result<ReplayCostEstimate, String> {
+    let estimated_events = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM events WHERE ledger >= $1 AND ledger <= $2",
+    )
+    .bind(start_ledger)
+    .bind(end_ledger)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Failed to estimate replay cost: {}", e))?;
+
+    Ok(ReplayCostEstimate {
+        start_ledger,
+        end_ledger,
+        estimated_events,
+        requires_approval: estimated_events > LARGE_REPLAY_THRESHOLD,
+    })
+}
+
 /// Replay configuration for replaying events
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplayConfig {
@@ -72,6 +111,7 @@ pub async fn replay_from_ledger(
     start_ledger: i64,
     limit: Option<i32>,
     config: &ReplayConfig,
+    approved: bool,
 ) -> Result<ReplayResponse, String> {
     let limit = limit.unwrap_or(config.max_events_per_request);
     let limit = limit.min(config.max_events_per_request);
@@ -109,6 +149,18 @@ pub async fn replay_from_ledger(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to count events: {}", e))?;
+
+    if event_count > LARGE_REPLAY_THRESHOLD && !approved {
+        warn!(
+            subscription_id = %subscription_id,
+            event_count = event_count,
+            "Rejected large replay pending approval"
+        );
+        return Err(format!(
+            "Replay would touch {} events, exceeding the {} event safety threshold; call estimate_replay_cost to confirm scope, then retry with approved=true",
+            event_count, LARGE_REPLAY_THRESHOLD
+        ));
+    }
 
     // Create replay status record
     let replay_id = Uuid::new_v4();
@@ -159,6 +211,7 @@ pub async fn replay_from_timestamp(
     timestamp: DateTime<Utc>,
     limit: Option<i32>,
     config: &ReplayConfig,
+    approved: bool,
 ) -> Result<ReplayResponse, String> {
     let limit = limit.unwrap_or(config.max_events_per_request);
     let limit = limit.min(config.max_events_per_request);
@@ -219,6 +272,18 @@ pub async fn replay_from_timestamp(
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Failed to count events: {}", e))?;
+
+    if event_count > LARGE_REPLAY_THRESHOLD && !approved {
+        warn!(
+            subscription_id = %subscription_id,
+            event_count = event_count,
+            "Rejected large replay pending approval"
+        );
+        return Err(format!(
+            "Replay would touch {} events, exceeding the {} event safety threshold; call estimate_replay_cost to confirm scope, then retry with approved=true",
+            event_count, LARGE_REPLAY_THRESHOLD
+        ));
+    }
 
     // Create replay status record
     let replay_id = Uuid::new_v4();
@@ -317,5 +382,17 @@ mod tests {
             .unwrap_or(config.max_events_per_request)
             .min(config.max_events_per_request);
         assert_eq!(clamped, config.max_events_per_request);
+    }
+
+    #[test]
+    fn test_large_replay_requires_approval() {
+        assert!(LARGE_REPLAY_THRESHOLD + 1 > LARGE_REPLAY_THRESHOLD);
+        let estimate = ReplayCostEstimate {
+            start_ledger: 0,
+            end_ledger: 1,
+            estimated_events: LARGE_REPLAY_THRESHOLD + 1,
+            requires_approval: LARGE_REPLAY_THRESHOLD + 1 > LARGE_REPLAY_THRESHOLD,
+        };
+        assert!(estimate.requires_approval);
     }
 }
