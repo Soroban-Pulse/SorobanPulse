@@ -68,3 +68,6 @@ pub mod adaptive_pool;
 pub mod slo_tracker;
 pub mod statistics_management;
 pub mod zero_trust;
+pub mod cloud_provider;
+pub mod cloud_replication;
+pub mod deployment_orchestrator;
