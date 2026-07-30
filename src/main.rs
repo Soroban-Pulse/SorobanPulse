@@ -7,6 +7,7 @@
 )]
 mod audit_logging;
 mod bloom_filter;
+mod compliance_report;
 mod config;
 mod content_filter;
 mod cross_chain_correlation;
