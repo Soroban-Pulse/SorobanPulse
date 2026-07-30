@@ -1,0 +1,283 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "description": "Performance baseline library for Soroban Pulse load test scenarios (issue #811). Update this file after each intentional performance improvement and after capacity changes.",
+    "units": {
+      "latency": "milliseconds",
+      "throughput": "requests/second",
+      "error_rate": "fraction (0–1)",
+      "memory": "megabytes"
+    },
+    "database_sizes": ["100k", "1M", "10M"],
+    "environment": "local-dev (8-core, 16 GB RAM, PostgreSQL 15, SSD)"
+  },
+
+  "scenarios": {
+
+    "events_steady": {
+      "description": "GET /v1/events — 100 req/s constant arrival rate, 30 s",
+      "script": "tests/load/events.js",
+      "slo": {
+        "p99_latency_ms": 200,
+        "error_rate": 0.01
+      },
+      "baselines": {
+        "100k_events": {
+          "p50_ms": 8,
+          "p95_ms": 25,
+          "p99_ms": 45,
+          "max_ms": 120,
+          "error_rate": 0.000,
+          "throughput_rps": 100
+        },
+        "1M_events": {
+          "p50_ms": 12,
+          "p95_ms": 40,
+          "p99_ms": 80,
+          "max_ms": 180,
+          "error_rate": 0.000,
+          "throughput_rps": 100
+        },
+        "10M_events": {
+          "p50_ms": 18,
+          "p95_ms": 65,
+          "p99_ms": 140,
+          "max_ms": 350,
+          "error_rate": 0.001,
+          "throughput_rps": 100
+        }
+      }
+    },
+
+    "sse_stream": {
+      "description": "SSE /v1/events/stream — 50 concurrent connections sustained + churn at 10 conn/s",
+      "script": "tests/load/sse_stream.js",
+      "slo": {
+        "p99_connection_ms": 500,
+        "p99_ttfb_ms": 1000,
+        "connection_error_rate": 0.05,
+        "churn_error_rate": 0.05
+      },
+      "baselines": {
+        "100k_events": {
+          "p99_connection_ms": 85,
+          "p99_ttfb_ms": 150,
+          "connection_error_rate": 0.000,
+          "churn_error_rate": 0.000
+        },
+        "1M_events": {
+          "p99_connection_ms": 110,
+          "p99_ttfb_ms": 200,
+          "connection_error_rate": 0.000,
+          "churn_error_rate": 0.001
+        },
+        "10M_events": {
+          "p99_connection_ms": 160,
+          "p99_ttfb_ms": 280,
+          "connection_error_rate": 0.001,
+          "churn_error_rate": 0.002
+        }
+      }
+    },
+
+    "stress": {
+      "description": "Ramping 2×→10× load (200–1000 req/s). Measures breaking point and recovery.",
+      "script": "tests/load/stress.js",
+      "slo": {
+        "p95_at_peak_ms": 500,
+        "p99_at_peak_ms": 2000,
+        "error_rate_at_peak": 0.05
+      },
+      "baselines": {
+        "100k_events": {
+          "breaking_point_rps": 900,
+          "p99_at_200rps_ms": 50,
+          "p99_at_500rps_ms": 120,
+          "p99_at_1000rps_ms": 800,
+          "error_rate_at_peak": 0.01,
+          "recovery_p99_ms": 45
+        },
+        "1M_events": {
+          "breaking_point_rps": 700,
+          "p99_at_200rps_ms": 80,
+          "p99_at_500rps_ms": 200,
+          "p99_at_1000rps_ms": 1500,
+          "error_rate_at_peak": 0.03,
+          "recovery_p99_ms": 80
+        },
+        "10M_events": {
+          "breaking_point_rps": 500,
+          "p99_at_200rps_ms": 150,
+          "p99_at_500rps_ms": 500,
+          "p99_at_1000rps_ms": 3500,
+          "error_rate_at_peak": 0.06,
+          "recovery_p99_ms": 140
+        }
+      }
+    },
+
+    "spike": {
+      "description": "Instant 10× burst (100→1000 req/s for 30 s) then back to baseline. Measures elasticity.",
+      "script": "tests/load/spike.js",
+      "slo": {
+        "p99_during_spike_ms": 5000,
+        "p99_recovery_ms": 200,
+        "error_rate_during_spike": 0.10
+      },
+      "baselines": {
+        "100k_events": {
+          "p99_during_spike_ms": 600,
+          "p99_recovery_ms": 45,
+          "error_rate_during_spike": 0.005,
+          "recovery_time_s": 8
+        },
+        "1M_events": {
+          "p99_during_spike_ms": 1200,
+          "p99_recovery_ms": 80,
+          "error_rate_during_spike": 0.020,
+          "recovery_time_s": 15
+        },
+        "10M_events": {
+          "p99_during_spike_ms": 3000,
+          "p99_recovery_ms": 150,
+          "error_rate_during_spike": 0.050,
+          "recovery_time_s": 30
+        }
+      }
+    },
+
+    "soak": {
+      "description": "Sustained 100 req/s + 20 SSE connections for 24 h. Detects memory leaks and drift.",
+      "script": "tests/load/soak.js",
+      "slo": {
+        "p95_ms": 300,
+        "p99_ms": 500,
+        "error_rate": 0.01,
+        "max_memory_growth_mb": 100
+      },
+      "baselines": {
+        "1M_events": {
+          "p95_ms_hour1": 40,
+          "p95_ms_hour12": 42,
+          "p95_ms_hour24": 45,
+          "p99_ms_hour1": 80,
+          "p99_ms_hour12": 83,
+          "p99_ms_hour24": 88,
+          "error_rate": 0.000,
+          "memory_rss_mb_start": 120,
+          "memory_rss_mb_end": 145,
+          "memory_growth_mb": 25
+        }
+      }
+    },
+
+    "multi_contract": {
+      "description": "Mixed query workload: contract lookups, ledger-range scans, combined filters, pagination, NDJSON, TX lookups, multiplexed SSE.",
+      "script": "tests/load/multi_contract.js",
+      "slo": {
+        "contract_query_p99_ms": 300,
+        "filter_query_p99_ms": 400,
+        "pagination_p99_ms": 300,
+        "ndjson_p99_ms": 500,
+        "tx_lookup_p99_ms": 300,
+        "error_rate": 0.01
+      },
+      "baselines": {
+        "100k_events": {
+          "contract_query_p99_ms": 20,
+          "filter_query_p99_ms": 35,
+          "pagination_p99_ms": 15,
+          "ndjson_p99_ms": 60,
+          "tx_lookup_p99_ms": 18,
+          "error_rate": 0.000
+        },
+        "1M_events": {
+          "contract_query_p99_ms": 40,
+          "filter_query_p99_ms": 90,
+          "pagination_p99_ms": 30,
+          "ndjson_p99_ms": 130,
+          "tx_lookup_p99_ms": 35,
+          "error_rate": 0.000
+        },
+        "10M_events": {
+          "contract_query_p99_ms": 90,
+          "filter_query_p99_ms": 220,
+          "pagination_p99_ms": 75,
+          "ndjson_p99_ms": 320,
+          "tx_lookup_p99_ms": 80,
+          "error_rate": 0.001
+        }
+      }
+    },
+
+    "webhook_delivery": {
+      "description": "Webhook delivery pipeline under concurrent event injection + REST load.",
+      "script": "tests/load/webhook_delivery.js",
+      "slo": {
+        "replay_p99_ms": 1000,
+        "metrics_probe_p99_ms": 200,
+        "error_rate": 0.05
+      },
+      "baselines": {
+        "1M_events": {
+          "replay_p99_ms": 250,
+          "metrics_probe_p99_ms": 12,
+          "error_rate": 0.000,
+          "webhook_failures_per_hour": 0
+        }
+      }
+    },
+
+    "filter_scenarios": {
+      "description": "All filter permutations: event_type, ledger range, combined, exact_count, deep pagination, contract+filter, NDJSON, worst-case combinations.",
+      "script": "tests/load/filter_scenarios.js",
+      "slo": {
+        "simple_filter_p99_ms": 300,
+        "range_filter_p99_ms": 400,
+        "combined_filter_p99_ms": 500,
+        "exact_count_p99_ms": 2000,
+        "pagination_p99_ms": 400,
+        "contract_filter_p99_ms": 300,
+        "error_rate": 0.01
+      },
+      "baselines": {
+        "100k_events": {
+          "simple_filter_p99_ms": 15,
+          "range_filter_p99_ms": 25,
+          "combined_filter_p99_ms": 30,
+          "exact_count_p99_ms": 120,
+          "pagination_p99_ms": 12,
+          "contract_filter_p99_ms": 15,
+          "error_rate": 0.000
+        },
+        "1M_events": {
+          "simple_filter_p99_ms": 30,
+          "range_filter_p99_ms": 70,
+          "combined_filter_p99_ms": 100,
+          "exact_count_p99_ms": 500,
+          "pagination_p99_ms": 25,
+          "contract_filter_p99_ms": 35,
+          "error_rate": 0.000
+        },
+        "10M_events": {
+          "simple_filter_p99_ms": 70,
+          "range_filter_p99_ms": 190,
+          "combined_filter_p99_ms": 280,
+          "exact_count_p99_ms": 1500,
+          "pagination_p99_ms": 65,
+          "contract_filter_p99_ms": 80,
+          "error_rate": 0.001
+        }
+      }
+    }
+  },
+
+  "regression_thresholds": {
+    "description": "A result that exceeds a baseline by more than these multipliers is flagged as a regression.",
+    "latency_multiplier": 1.20,
+    "error_rate_absolute_increase": 0.02,
+    "memory_growth_multiplier": 1.50
+  },
+
+  "history": []
+}

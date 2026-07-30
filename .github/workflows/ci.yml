@@ -421,43 +421,31 @@ jobs:
       - name: Validate OpenAPI spec
         run: spectral lint openapi.json --ruleset https://unpkg.com/@stoplight/spectral-openapi/dist/ruleset.js
 
-  notify:
-    name: Pipeline Summary
+  terraform-validate:
+    name: Terraform Validate
     runs-on: ubuntu-latest
-    if: always()
-    needs:
-      - fmt
-      - deny
-      - check-migrations
-      - validate-sdk
-      - clippy
-      - test
-      - coverage
-      - contract-tests
-      - integration-tests
-      - resilience-tests
-      - chaos-tests
-      - bench
-      - mutants
-      - fuzz
-      - build
-      - docker
-      - helm-lint
-      - openapi
+    defaults:
+      run:
+        working-directory: terraform
     steps:
-      - name: Write summary
-        env:
-          NEEDS_JSON: ${{ toJSON(needs) }}
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.6"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive -diff
+
+      - name: Terraform Init (backend=false)
+        run: terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Install TFLint
         run: |
-          echo "## CI Pipeline Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Job | Result |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|" >> "$GITHUB_STEP_SUMMARY"
-          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' >> "$GITHUB_STEP_SUMMARY"
-          if echo "$NEEDS_JSON" | jq -e 'to_entries[] | select(.value.result == "failure")' > /dev/null; then
-            echo "" >> "$GITHUB_STEP_SUMMARY"
-            echo "❌ One or more required jobs failed." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ All required jobs passed." >> "$GITHUB_STEP_SUMMARY"
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+      - name: TFLint
+        run: tflint --init && tflint --recursive

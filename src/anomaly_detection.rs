@@ -439,3 +439,535 @@ mod tests {
         assert_eq!(calculate_percentile(&values, 0.75), 4.0); // Q3
     }
 }
+
+// === Seasonal baselines
+
+/// Per-bucket seasonal baseline (hour-of-day or day-of-week).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SeasonalBaseline {
+    pub bucket: u32,
+    pub mean: f64,
+    pub std_dev: f64,
+    pub sample_count: usize,
+}
+
+/// Seasonal bucketing granularity.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SeasonalPeriod {
+    #[serde(rename = "hour_of_day")]
+    HourOfDay,
+    #[serde(rename = "day_of_week")]
+    DayOfWeek,
+}
+
+impl SeasonalPeriod {
+    pub fn bucket_of(&self, ts: DateTime<Utc>) -> u32 {
+        use chrono::{Datelike, Timelike};
+        match self {
+            SeasonalPeriod::HourOfDay => ts.hour(),
+            SeasonalPeriod::DayOfWeek => ts.weekday().num_days_from_monday(),
+        }
+    }
+
+    pub fn bucket_count(&self) -> usize {
+        match self {
+            SeasonalPeriod::HourOfDay => 24,
+            SeasonalPeriod::DayOfWeek => 7,
+        }
+    }
+}
+
+/// Learn per-bucket baselines so recurring daily/weekly shape is not flagged as anomalous.
+pub fn learn_seasonal_baselines(
+    samples: &[(DateTime<Utc>, f64)],
+    period: SeasonalPeriod,
+) -> Vec<SeasonalBaseline> {
+    let mut buckets: Vec<Vec<f64>> = vec![Vec::new(); period.bucket_count()];
+    for (ts, value) in samples {
+        buckets[period.bucket_of(*ts) as usize].push(*value);
+    }
+
+    buckets
+        .into_iter()
+        .enumerate()
+        .filter(|(_, values)| !values.is_empty())
+        .map(|(bucket, values)| {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+            SeasonalBaseline {
+                bucket: bucket as u32,
+                mean,
+                std_dev: variance.sqrt(),
+                sample_count: values.len(),
+            }
+        })
+        .collect()
+}
+
+/// Z-score of a value against its seasonal bucket rather than the global baseline.
+pub fn detect_seasonal_anomaly(
+    baselines: &[SeasonalBaseline],
+    period: SeasonalPeriod,
+    ts: DateTime<Utc>,
+    value: f64,
+    threshold: f64,
+) -> Option<f64> {
+    let bucket = period.bucket_of(ts);
+    let baseline = baselines.iter().find(|b| b.bucket == bucket)?;
+    if baseline.std_dev == 0.0 {
+        return None;
+    }
+    let score = (value - baseline.mean).abs() / baseline.std_dev;
+    if score > threshold {
+        Some(score)
+    } else {
+        None
+    }
+}
+
+// === Time-series forecasting
+
+/// Holt double exponential smoothing state (level + trend).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HoltForecaster {
+    pub alpha: f64,
+    pub beta: f64,
+    pub level: f64,
+    pub trend: f64,
+    /// Smoothed absolute forecast error, used to build prediction intervals.
+    pub mean_abs_error: f64,
+    pub observations: usize,
+}
+
+impl HoltForecaster {
+    /// `alpha`/`beta` are clamped because values outside (0, 1] make the recursion diverge.
+    pub fn new(alpha: f64, beta: f64, initial_value: f64) -> Self {
+        Self {
+            alpha: alpha.clamp(0.01, 1.0),
+            beta: beta.clamp(0.0, 1.0),
+            level: initial_value,
+            trend: 0.0,
+            mean_abs_error: 0.0,
+            observations: 1,
+        }
+    }
+
+    /// Fit from a series, returning None when there is nothing to seed the level with.
+    pub fn fit(values: &[f64], alpha: f64, beta: f64) -> Option<Self> {
+        let first = *values.first()?;
+        let mut f = HoltForecaster::new(alpha, beta, first);
+        for value in &values[1..] {
+            f.observe(*value);
+        }
+        Some(f)
+    }
+
+    /// Forecast `steps` ahead from the current level and trend.
+    pub fn forecast(&self, steps: usize) -> f64 {
+        self.level + self.trend * steps as f64
+    }
+
+    /// Prediction interval around the one-step forecast, scaled by smoothed error.
+    pub fn prediction_interval(&self, steps: usize, k: f64) -> (f64, f64) {
+        let point = self.forecast(steps);
+        let margin = k * self.mean_abs_error.max(f64::EPSILON) * 1.25;
+        (point - margin, point + margin)
+    }
+
+    /// Feed the next observation, updating level, trend and smoothed error.
+    pub fn observe(&mut self, value: f64) -> f64 {
+        let predicted = self.forecast(1);
+        let error = value - predicted;
+
+        let prev_level = self.level;
+        self.level = self.alpha * value + (1.0 - self.alpha) * (self.level + self.trend);
+        self.trend = self.beta * (self.level - prev_level) + (1.0 - self.beta) * self.trend;
+
+        let n = self.observations as f64;
+        self.mean_abs_error = (self.mean_abs_error * n + error.abs()) / (n + 1.0);
+        self.observations += 1;
+
+        error
+    }
+
+    /// True when the observation falls outside the prediction interval.
+    pub fn is_anomalous(&self, value: f64, k: f64) -> bool {
+        if self.observations < 3 {
+            return false;
+        }
+        let (lower, upper) = self.prediction_interval(1, k);
+        value < lower || value > upper
+    }
+}
+
+/// A detected change in the slope of a series.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrendBreak {
+    pub index: usize,
+    pub slope_before: f64,
+    pub slope_after: f64,
+    pub magnitude: f64,
+}
+
+/// Detect trend breaks by comparing the linear slope of adjacent windows.
+pub fn detect_trend_breaks(values: &[f64], window: usize, min_magnitude: f64) -> Vec<TrendBreak> {
+    if window < 2 || values.len() < window * 2 {
+        return Vec::new();
+    }
+
+    let mut breaks = Vec::new();
+    for index in window..=(values.len() - window) {
+        let slope_before = linear_slope(&values[index - window..index]);
+        let slope_after = linear_slope(&values[index..index + window]);
+        let magnitude = (slope_after - slope_before).abs();
+        if magnitude >= min_magnitude {
+            breaks.push(TrendBreak {
+                index,
+                slope_before,
+                slope_after,
+                magnitude,
+            });
+        }
+    }
+    breaks
+}
+
+/// Least-squares slope of a series against its index.
+pub fn linear_slope(values: &[f64]) -> f64 {
+    let n = values.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mean_x = (n - 1) as f64 / 2.0;
+    let mean_y = values.iter().sum::<f64>() / n as f64;
+    let mut numerator = 0.0;
+    let mut denominator = 0.0;
+    for (i, y) in values.iter().enumerate() {
+        let dx = i as f64 - mean_x;
+        numerator += dx * (y - mean_y);
+        denominator += dx * dx;
+    }
+    if denominator == 0.0 {
+        0.0
+    } else {
+        numerator / denominator
+    }
+}
+
+// === Correlation and root cause
+
+/// Pearson correlation between two equal-length series.
+pub fn pearson_correlation(a: &[f64], b: &[f64]) -> Option<f64> {
+    if a.len() != b.len() || a.len() < 2 {
+        return None;
+    }
+    let n = a.len() as f64;
+    let mean_a = a.iter().sum::<f64>() / n;
+    let mean_b = b.iter().sum::<f64>() / n;
+
+    let mut cov = 0.0;
+    let mut var_a = 0.0;
+    let mut var_b = 0.0;
+    for i in 0..a.len() {
+        let da = a[i] - mean_a;
+        let db = b[i] - mean_b;
+        cov += da * db;
+        var_a += da * da;
+        var_b += db * db;
+    }
+
+    if var_a == 0.0 || var_b == 0.0 {
+        return None;
+    }
+    Some(cov / (var_a.sqrt() * var_b.sqrt()))
+}
+
+/// A correlated metric pair, optionally directed by lead time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricCorrelation {
+    pub source_metric: String,
+    pub target_metric: String,
+    pub coefficient: f64,
+    /// Samples the source leads the target by; 0 means simultaneous.
+    pub lag: usize,
+}
+
+/// Correlate one metric against candidates, testing lags up to `max_lag`.
+///
+/// The best positive lag is reported as a candidate causal edge: a metric that
+/// moves first is more likely to be the root cause than one that moves with it.
+pub fn correlate_metrics(
+    source: (&str, &[f64]),
+    candidates: &[(String, Vec<f64>)],
+    max_lag: usize,
+    min_coefficient: f64,
+) -> Vec<MetricCorrelation> {
+    let (source_metric, source_values) = source;
+    let mut results = Vec::new();
+
+    for (target_metric, target_values) in candidates {
+        let mut best: Option<(f64, usize)> = None;
+        for lag in 0..=max_lag {
+            if source_values.len() <= lag || target_values.len() <= lag {
+                break;
+            }
+            let len = (source_values.len() - lag).min(target_values.len() - lag);
+            if len < 2 {
+                break;
+            }
+            let a = &source_values[..len];
+            let b = &target_values[lag..lag + len];
+            if let Some(coefficient) = pearson_correlation(a, b) {
+                if best.map_or(true, |(c, _)| coefficient.abs() > c.abs()) {
+                    best = Some((coefficient, lag));
+                }
+            }
+        }
+
+        if let Some((coefficient, lag)) = best {
+            if coefficient.abs() >= min_coefficient {
+                results.push(MetricCorrelation {
+                    source_metric: source_metric.to_string(),
+                    target_metric: target_metric.clone(),
+                    coefficient,
+                    lag,
+                });
+            }
+        }
+    }
+
+    results.sort_by(|a, b| {
+        b.coefficient
+            .abs()
+            .partial_cmp(&a.coefficient.abs())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    results
+}
+
+/// Node in a causal graph built from correlated, lagged metrics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CausalEdge {
+    pub cause: String,
+    pub effect: String,
+    pub confidence: f64,
+}
+
+/// Build causal edges from correlations: only lagged pairs are treated as directional.
+pub fn build_causal_graph(correlations: &[MetricCorrelation]) -> Vec<CausalEdge> {
+    correlations
+        .iter()
+        .filter(|c| c.lag > 0)
+        .map(|c| CausalEdge {
+            cause: c.source_metric.clone(),
+            effect: c.target_metric.clone(),
+            confidence: c.coefficient.abs(),
+        })
+        .collect()
+}
+
+/// Root cause summary for an anomaly, linking the strongest upstream metric.
+#[derive(Debug, Clone, Serialize)]
+pub struct RootCauseHypothesis {
+    pub anomalous_metric: String,
+    pub likely_cause: Option<String>,
+    pub confidence: f64,
+    pub supporting_edges: Vec<CausalEdge>,
+}
+
+/// Pick the highest-confidence cause pointing at the anomalous metric.
+pub fn infer_root_cause(anomalous_metric: &str, edges: &[CausalEdge]) -> RootCauseHypothesis {
+    let supporting: Vec<CausalEdge> = edges
+        .iter()
+        .filter(|e| e.effect == anomalous_metric)
+        .cloned()
+        .collect();
+
+    let best = supporting
+        .iter()
+        .max_by(|a, b| {
+            a.confidence
+                .partial_cmp(&b.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .cloned();
+
+    RootCauseHypothesis {
+        anomalous_metric: anomalous_metric.to_string(),
+        likely_cause: best.as_ref().map(|e| e.cause.clone()),
+        confidence: best.as_ref().map_or(0.0, |e| e.confidence),
+        supporting_edges: supporting,
+    }
+}
+
+// === Alert tuning
+
+/// Operator feedback on a fired alert.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AlertFeedback {
+    #[serde(rename = "true_positive")]
+    TruePositive,
+    #[serde(rename = "false_positive")]
+    FalsePositive,
+    /// A real anomaly that never fired an alert.
+    #[serde(rename = "missed")]
+    Missed,
+}
+
+/// Rolling alert accuracy statistics used to auto-tune thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertTuner {
+    pub metric_name: String,
+    pub threshold: f64,
+    pub min_threshold: f64,
+    pub max_threshold: f64,
+    /// Target share of alerts that are false positives (issue target: < 0.05).
+    pub target_false_positive_rate: f64,
+    history: VecDeque<AlertFeedback>,
+    window: usize,
+}
+
+impl AlertTuner {
+    pub fn new(metric_name: impl Into<String>, threshold: f64) -> Self {
+        Self {
+            metric_name: metric_name.into(),
+            threshold,
+            min_threshold: 1.5,
+            max_threshold: 8.0,
+            target_false_positive_rate: 0.05,
+            history: VecDeque::new(),
+            window: 100,
+        }
+    }
+
+    /// Record feedback, evicting the oldest entry once the window is full.
+    pub fn record_feedback(&mut self, feedback: AlertFeedback) {
+        if self.history.len() == self.window {
+            self.history.pop_front();
+        }
+        self.history.push_back(feedback);
+    }
+
+    pub fn sample_count(&self) -> usize {
+        self.history.len()
+    }
+
+    fn count(&self, kind: AlertFeedback) -> usize {
+        self.history.iter().filter(|f| **f == kind).count()
+    }
+
+    /// Share of fired alerts that were false positives.
+    pub fn false_positive_rate(&self) -> f64 {
+        let fired = self.count(AlertFeedback::TruePositive) + self.count(AlertFeedback::FalsePositive);
+        if fired == 0 {
+            return 0.0;
+        }
+        self.count(AlertFeedback::FalsePositive) as f64 / fired as f64
+    }
+
+    /// Share of all real anomalies that were correctly alerted on.
+    pub fn accuracy(&self) -> f64 {
+        let total = self.history.len();
+        if total == 0 {
+            return 0.0;
+        }
+        self.count(AlertFeedback::TruePositive) as f64 / total as f64
+    }
+
+    /// Raise the threshold when noisy, lower it when anomalies are being missed.
+    ///
+    /// Returns the updated threshold. Tuning is skipped below 10 samples so a
+    /// couple of early mistakes cannot swing the threshold to a bound.
+    pub fn tune(&mut self) -> f64 {
+        if self.history.len() < 10 {
+            return self.threshold;
+        }
+
+        let fpr = self.false_positive_rate();
+        let missed = self.count(AlertFeedback::Missed) as f64 / self.history.len() as f64;
+
+        if fpr > self.target_false_positive_rate {
+            self.threshold *= 1.0 + (fpr - self.target_false_positive_rate).min(0.5);
+        } else if missed > 0.05 {
+            self.threshold *= 1.0 - missed.min(0.25);
+        }
+
+        self.threshold = self.threshold.clamp(self.min_threshold, self.max_threshold);
+        self.threshold
+    }
+}
+
+/// Persist operator feedback so thresholds can be re-tuned from stored history.
+pub async fn record_alert_feedback(
+    pool: &PgPool,
+    alert_id: Uuid,
+    feedback: AlertFeedback,
+    notes: Option<&str>,
+) -> Result<(), String> {
+    let label = match feedback {
+        AlertFeedback::TruePositive => "true_positive",
+        AlertFeedback::FalsePositive => "false_positive",
+        AlertFeedback::Missed => "missed",
+    };
+
+    sqlx::query(
+        "INSERT INTO anomaly_alert_feedback (id, alert_id, feedback, notes, created_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(alert_id)
+    .bind(label)
+    .bind(notes)
+    .bind(Utc::now())
+    .execute(pool)
+    .await
+    .map_err(|e| {
+        error!(alert_id = %alert_id, error = %e, "Failed to record alert feedback");
+        format!("Failed to record alert feedback: {}", e)
+    })?;
+
+    Ok(())
+}
+
+/// Load stored feedback for a metric and return a tuned threshold.
+pub async fn tune_threshold_from_history(
+    pool: &PgPool,
+    subscription_id: Uuid,
+    metric_name: &str,
+    current_threshold: f64,
+) -> Result<f64, String> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT f.feedback FROM anomaly_alert_feedback f
+         JOIN anomaly_alerts a ON a.id = f.alert_id
+         WHERE a.subscription_id = $1 AND a.metric_name = $2
+         ORDER BY f.created_at DESC
+         LIMIT 100",
+    )
+    .bind(subscription_id)
+    .bind(metric_name)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load alert feedback: {}", e))?;
+
+    let mut tuner = AlertTuner::new(metric_name, current_threshold);
+    for row in rows.into_iter().rev() {
+        match row.as_str() {
+            "true_positive" => tuner.record_feedback(AlertFeedback::TruePositive),
+            "false_positive" => tuner.record_feedback(AlertFeedback::FalsePositive),
+            "missed" => tuner.record_feedback(AlertFeedback::Missed),
+            other => warn!(feedback = %other, "Unknown alert feedback label, ignoring"),
+        }
+    }
+
+    let tuned = tuner.tune();
+    info!(
+        subscription_id = %subscription_id,
+        metric_name = %metric_name,
+        previous = current_threshold,
+        tuned = tuned,
+        false_positive_rate = tuner.false_positive_rate(),
+        "Auto-tuned anomaly threshold"
+    );
+    Ok(tuned)
+}

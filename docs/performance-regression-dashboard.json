@@ -1,0 +1,668 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
+    { "type": "datasource", "id": "prometheus", "name": "Prometheus", "version": "1.0.0" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "stat",       "name": "Stat",        "version": "" },
+    { "type": "panel", "id": "table",      "name": "Table",       "version": "" },
+    { "type": "panel", "id": "bargauge",   "name": "Bar gauge",   "version": "" },
+    { "type": "panel", "id": "text",       "name": "Text",        "version": "" }
+  ],
+  "annotations": { "list": [] },
+  "description": "Soroban Pulse — performance regression dashboard. Visualises k6 load-test trends, SLO breach history, and baseline comparisons (issue #811).",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "schemaVersion": 37,
+  "style": "dark",
+  "tags": ["soroban-pulse", "performance", "load-testing", "regression"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "type": "datasource",
+        "label": "Prometheus"
+      },
+      {
+        "current": { "selected": false, "text": "1M", "value": "1M" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "DB Size",
+        "name": "db_size",
+        "options": [
+          { "selected": false, "text": "100k", "value": "100k" },
+          { "selected": true,  "text": "1M",   "value": "1M"   },
+          { "selected": false, "text": "10M",  "value": "10M"  }
+        ],
+        "query": "100k,1M,10M",
+        "type": "custom"
+      },
+      {
+        "current": { "selected": false, "text": "All", "value": "$__all" },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Scenario",
+        "name": "scenario",
+        "options": [
+          { "selected": true,  "text": "All",              "value": "$__all"           },
+          { "selected": false, "text": "events_steady",    "value": "events_steady"    },
+          { "selected": false, "text": "stress",           "value": "stress"           },
+          { "selected": false, "text": "spike",            "value": "spike"            },
+          { "selected": false, "text": "soak",             "value": "soak"             },
+          { "selected": false, "text": "multi_contract",   "value": "multi_contract"   },
+          { "selected": false, "text": "filter_scenarios", "value": "filter_scenarios" },
+          { "selected": false, "text": "webhook_delivery", "value": "webhook_delivery" }
+        ],
+        "query": "events_steady,stress,spike,soak,multi_contract,filter_scenarios,webhook_delivery",
+        "type": "custom"
+      }
+    ]
+  },
+  "time": { "from": "now-30d", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Soroban Pulse — Performance Regression",
+  "uid": "soroban-perf-regression",
+  "version": 1,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "title": "📊 SLO Status",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 150 },
+              { "color": "red",    "value": 200 }
+            ]
+          },
+          "unit": "ms",
+          "mappings": []
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "Events p99 Latency",
+      "description": "Current p99 latency for GET /v1/events at 100 req/s. SLO: < 200 ms.",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum(rate(soroban_pulse_http_request_duration_seconds_bucket{route=~\"/v1/events\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p99 latency",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 0.005 },
+              { "color": "red",    "value": 0.01 }
+            ]
+          },
+          "unit": "percentunit",
+          "mappings": []
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "API Error Rate",
+      "description": "Fraction of 5xx responses. SLO: < 1%.",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(soroban_pulse_http_request_duration_seconds_count{status=~\"5..\"}[5m])) / sum(rate(soroban_pulse_http_request_duration_seconds_count[5m]))",
+          "legendFormat": "error rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 300 },
+              { "color": "red",    "value": 500 }
+            ]
+          },
+          "unit": "ms",
+          "mappings": []
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "id": 4,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "SSE Connection p99",
+      "description": "p99 time to establish an SSE connection. SLO: < 500 ms.",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum(rate(soroban_pulse_http_request_duration_seconds_bucket{route=~\"/v1/events/stream.*\"}[5m])) by (le)) * 1000",
+          "legendFormat": "SSE p99",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "red",    "value": 50 }
+            ]
+          },
+          "unit": "short",
+          "mappings": []
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 1 },
+      "id": 5,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "Active SSE Connections",
+      "description": "Current number of open SSE connections.",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "soroban_pulse_sse_active_connections",
+          "legendFormat": "SSE connections",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red",    "value": 5 }
+            ]
+          },
+          "unit": "short",
+          "mappings": []
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
+      "id": 6,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "Webhook Failures",
+      "description": "Total webhook delivery failures (all retries exhausted).",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "increase(soroban_pulse_webhook_failures_total[1h])",
+          "legendFormat": "failures/hr",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 50 },
+              { "color": "red",    "value": 100 }
+            ]
+          },
+          "unit": "short",
+          "mappings": []
+        }
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
+      "id": 7,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto" },
+      "title": "Indexer Lag (ledgers)",
+      "description": "Gap between latest ledger and currently indexed ledger.",
+      "type": "stat",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "soroban_pulse_indexer_lag_ledgers",
+          "legendFormat": "lag",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 10,
+      "title": "📈 Latency Trends",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "ms",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 150 },
+              { "color": "red",    "value": 200 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "SLO (200ms)" },
+            "properties": [
+              { "id": "color",               "value": { "fixedColor": "red", "mode": "fixed" } },
+              { "id": "custom.lineStyle",    "value": { "dash": [10, 10], "fill": "dash" } },
+              { "id": "custom.lineWidth",    "value": 1 },
+              { "id": "custom.fillOpacity",  "value": 0 }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 11,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Events API — p50 / p95 / p99 Latency",
+      "description": "Request latency percentiles for GET /v1/events. Red dashed line = 200 ms SLO.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.50, sum(rate(soroban_pulse_http_request_duration_seconds_bucket{route=~\"/v1/events\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p50", "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.95, sum(rate(soroban_pulse_http_request_duration_seconds_bucket{route=~\"/v1/events\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p95", "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum(rate(soroban_pulse_http_request_duration_seconds_bucket{route=~\"/v1/events\"}[5m])) by (le)) * 1000",
+          "legendFormat": "p99", "refId": "C"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "vector(200)",
+          "legendFormat": "SLO (200ms)", "refId": "D"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "ms"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 12,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Latency by Route — p99",
+      "description": "p99 latency broken out by route. Helps identify which endpoint degrades first under load.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "histogram_quantile(0.99, sum(rate(soroban_pulse_http_request_duration_seconds_bucket[5m])) by (le, route)) * 1000",
+          "legendFormat": "{{route}}", "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "reqps"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 13,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Request Throughput",
+      "description": "Requests per second handled by the API, broken down by route.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(soroban_pulse_http_request_duration_seconds_count[1m])) by (route)",
+          "legendFormat": "{{route}}", "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 0.005 },
+              { "color": "red",    "value": 0.01 }
+            ]
+          }
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 14,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Error Rate by Route",
+      "description": "Fraction of 5xx responses per route. SLO: < 1%.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "sum(rate(soroban_pulse_http_request_duration_seconds_count{status=~\"5..\"}[5m])) by (route) / sum(rate(soroban_pulse_http_request_duration_seconds_count[5m])) by (route)",
+          "legendFormat": "{{route}}", "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "vector(0.01)",
+          "legendFormat": "SLO (1%)", "refId": "B"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "id": 20,
+      "title": "🔍 Regression Detection",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": null },
+              { "color": "yellow", "value": 0.8  },
+              { "color": "red",    "value": 1.0  }
+            ]
+          },
+          "unit": "short",
+          "min": 0,
+          "max": 2
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "id": 21,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "showUnfilled": true,
+        "text": {}
+      },
+      "title": "p99 Latency vs Baseline Ratio",
+      "description": "Ratio of current p99 latency to the documented baseline. Green < 0.8×, yellow 0.8–1.0×, red ≥ 1.0× (at SLO boundary). Values > 1.2 indicate a regression.",
+      "type": "bargauge",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "(histogram_quantile(0.99, sum(rate(soroban_pulse_http_request_duration_seconds_bucket{route=~\"/v1/events\"}[5m])) by (le)) * 1000) / 80",
+          "legendFormat": "events_steady / 80ms baseline", "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "(histogram_quantile(0.99, sum(rate(soroban_pulse_http_request_duration_seconds_bucket{route=~\"/v1/events/stream.*\"}[5m])) by (le)) * 1000) / 110",
+          "legendFormat": "sse_stream / 110ms baseline", "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "(histogram_quantile(0.99, sum(rate(soroban_pulse_http_request_duration_seconds_bucket[5m])) by (le)) * 1000) / 200",
+          "legendFormat": "all routes / 200ms SLO", "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 15 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "id": 22,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "DB Connection Pool Utilisation",
+      "description": "Pool size vs max. Sustained utilisation > 80% risks connection exhaustion under load.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "soroban_pulse_db_pool_size",
+          "legendFormat": "open connections", "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "soroban_pulse_db_pool_idle",
+          "legendFormat": "idle connections", "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "soroban_pulse_db_pool_max",
+          "legendFormat": "pool max", "refId": "C"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "bytes"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 31 },
+      "id": 23,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean", "max"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Process Memory (RSS) — Soak Trend",
+      "description": "RSS memory over time. A steady upward trend during soak tests indicates a memory leak. Baseline start ~120 MB; growth > 100 MB warrants investigation.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "soroban_pulse_process_memory_bytes",
+          "legendFormat": "RSS memory", "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 31 },
+      "id": 24,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Rate Limit Rejections",
+      "description": "Requests rejected with 429. Spikes here during load tests indicate the rate limiter is saturated before the SLO threshold is reached.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "rate(soroban_pulse_rate_limit_rejected_total[1m])",
+          "legendFormat": "rejected req/s", "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "id": 30,
+      "title": "🔔 Webhook & Indexer Health",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "id": 31,
+      "options": { "legend": { "calcs": ["lastNotNull", "sum"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Webhook Failures Over Time",
+      "description": "Webhook delivery failures (all retries exhausted). Any non-zero value during a webhook load test indicates delivery degradation.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "rate(soroban_pulse_webhook_failures_total[5m])",
+          "legendFormat": "failures/s", "refId": "A"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "id": 32,
+      "options": { "legend": { "calcs": ["lastNotNull", "mean"], "displayMode": "table", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "title": "Indexer Lag & RPC Errors",
+      "description": "Indexer ledger lag and RPC error rate. High lag during load tests can indicate the indexer is starved for DB connections.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "soroban_pulse_indexer_lag_ledgers",
+          "legendFormat": "lag (ledgers)", "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "rate(soroban_pulse_rpc_errors_total[5m])",
+          "legendFormat": "RPC errors/s", "refId": "B"
+        }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "unit": "short"
+        }
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 48 },
+      "id": 33,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "right" }, "tooltip": { "mode": "multi" } },
+      "title": "Events Indexed Rate",
+      "description": "Rate of new events being indexed (events/s). Drops during load tests signal DB contention starving the indexer.",
+      "type": "timeseries",
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${datasource}" },
+          "expr": "rate(soroban_pulse_events_indexed_total[1m])",
+          "legendFormat": "events/s indexed", "refId": "A"
+        }
+      ]
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 56 },
+      "id": 40,
+      "title": "📋 Load Test Run Log",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 57 },
+      "id": 41,
+      "options": {
+        "content": "## How to use this dashboard\n\n1. **Run a load test** using one of the k6 scripts in `tests/load/`.\n2. **Archive the result** with `node tests/load/lib/results.js archive <scenario> <result.json> [db_size]`.\n3. **Check for regressions** with `node tests/load/regression_check.js <scenario> <result.json>` or `node tests/load/lib/baseline.js compare <scenario> <result.json>`.\n4. **View trends** with `node tests/load/lib/results.js trend <scenario> --last 10`.\n5. **Promote a new baseline** after an intentional improvement: `node tests/load/lib/baseline.js promote <scenario> <result.json> [db_size]`.\n\n### Regression thresholds (from `baselines.json`)\n\n| Metric type | Threshold |\n|---|---|\n| Latency (p50/p95/p99) | > 20% above baseline |\n| Error rate | > 2 percentage points above baseline |\n| Memory growth (soak) | > 50% above baseline |\n\nSee [docs/load-testing-runbook.md](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/load-testing-runbook.md) for the full runbook.",
+        "mode": "markdown"
+      },
+      "title": "Usage Guide",
+      "type": "text"
+    }
+  ]
+}

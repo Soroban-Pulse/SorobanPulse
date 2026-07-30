@@ -7,6 +7,7 @@
 )]
 mod audit_logging;
 mod bloom_filter;
+mod compliance_report;
 mod config;
 mod content_filter;
 mod cross_chain_correlation;
@@ -59,6 +60,7 @@ mod github;
 mod discord;
 mod slack;
 mod telegram;
+mod notification_channel;
 mod integration_handlers;
 mod retry_policy;
 mod sms;
@@ -120,6 +122,10 @@ mod statistics_management;
 
 #[cfg(feature = "archive")]
 mod archiver;
+
+mod cloud_provider;
+mod cloud_replication;
+mod deployment_orchestrator;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
