@@ -1,0 +1,30 @@
+name: Container Image Retention
+
+# Keeps the ghcr.io package registry tidy: untagged image versions (superseded
+# builds with no branch/sha/semver tag pointing at them) accumulate on every
+# push to main and are otherwise never cleaned up.
+on:
+  schedule:
+    - cron: "0 3 * * 0" # weekly, Sunday 03:00 UTC
+  workflow_dispatch:
+
+permissions:
+  packages: write
+
+jobs:
+  prune-untagged:
+    name: Prune Untagged Image Versions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compute package name
+        id: pkg
+        run: |
+          repo="${GITHUB_REPOSITORY##*/}"
+          echo "name=${repo,,}" >> "$GITHUB_OUTPUT"
+      - name: Delete untagged versions
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ steps.pkg.outputs.name }}
+          package-type: container
+          min-versions-to-keep: 20
+          delete-only-untagged-versions: true

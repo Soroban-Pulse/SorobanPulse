@@ -22,11 +22,15 @@ RUN cargo build --release
 # debian:bookworm-slim — digest pinned 2025-07-14. Update via Dependabot or manually with:
 # docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
 FROM debian:bookworm-slim@sha256:8af0e5095f9964007f5ebd11191dfe52dcb51bf3afa2c07f055fc5451b78ba0e
-RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 soroban && useradd --uid 10001 --gid soroban --no-create-home --shell /usr/sbin/nologin soroban
 
 WORKDIR /app
-COPY --from=builder /app/target/release/soroban-pulse .
-COPY --from=builder /app/migrations ./migrations
+COPY --from=builder --chown=soroban:soroban /app/target/release/soroban-pulse .
+COPY --from=builder --chown=soroban:soroban /app/migrations ./migrations
 
+USER soroban:soroban
 EXPOSE 3000
+HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=5 \
+  CMD curl -f http://localhost:3000/healthz/ready || exit 1
 CMD ["./soroban-pulse"]
