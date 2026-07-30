@@ -142,6 +142,10 @@ path = "src/bin/gen_subscription_scaffold.rs"
 name = "pg_tuning_advisor"
 path = "src/bin/pg_tuning_advisor.rs"
 
+[[bin]]
+name = "schema_cli"
+path = "src/bin/schema_cli.rs"
+
 [[bench]]
 name = "pagination"
 harness = false
