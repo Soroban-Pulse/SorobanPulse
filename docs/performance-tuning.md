@@ -11,6 +11,7 @@ Guidance on configuring Soroban Pulse for optimal throughput and latency.
 - [Rate Limiting Configuration](#rate-limiting-configuration)
 - [Indexer Performance Tuning](#indexer-performance-tuning)
 - [Benchmark Interpretation](#benchmark-interpretation)
+- [Load Testing Runbook](#load-testing-runbook)
 
 ---
 
@@ -454,3 +455,195 @@ See [README.md](../README.md#load-testing) for full details and thresholds.
 - [Capacity Planning](capacity-planning.md) — forecasting and scaling
 - [Runbook: DB Pool Exhaustion](runbooks/db-pool-exhaustion.md)
 - [Runbook: Indexer Lag](runbooks/indexer-lag.md)
+
+---
+
+## Load Testing Runbook
+
+This section describes all k6 load test scenarios, how to run them locally, how to interpret results, and how the CI regression gate works.
+
+### Prerequisites
+
+```bash
+# Install k6 (https://k6.io/docs/get-started/installation/)
+# macOS
+brew install k6
+
+# Ubuntu / Debian
+sudo gpg --no-default-keyring \
+  --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+  --keyserver hkp://keyserver.ubuntu.com:80 \
+  --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+  | sudo tee /etc/apt/sources.list.d/k6.list
+sudo apt-get update && sudo apt-get install k6
+
+# Node.js ≥ 18 (for regression_check.js)
+node --version
+```
+
+### Scenario overview
+
+| Script | Purpose | Default duration | CI trigger |
+|---|---|---|---|
+| `tests/load/events.js` | Steady-state 100 req/s baseline | 30 s | Every PR + push |
+| `tests/load/sse_stream.js` | SSE connections — sustained + churn | ~1 m | Every PR + push |
+| `tests/load/stress.js` | Ramp 2×→10× (200→1 000 req/s) | ~18 m | Push to main |
+| `tests/load/spike.js` | Instant 10× burst + recovery | ~3.5 m | Push to main |
+| `tests/load/soak.js` | 24-hour sustained load | 24 h (overridable) | Weekly schedule |
+| `tests/load/multi_contract.js` | Mixed real-world query patterns | ~9 m | Every PR + push |
+| `tests/load/webhook_delivery.js` | Webhook pipeline under load | 5 m | Push to main |
+
+### Running scenarios locally
+
+```bash
+# 1. Start a local Soroban Pulse instance
+cargo run
+
+# 2. Run any individual scenario
+k6 run tests/load/events.js
+k6 run tests/load/sse_stream.js
+k6 run tests/load/stress.js
+k6 run tests/load/spike.js
+k6 run tests/load/multi_contract.js
+k6 run tests/load/webhook_delivery.js
+
+# 3. Soak test with shortened duration for local validation
+k6 run -e SOAK_DURATION=30m tests/load/soak.js
+
+# Override the base URL or inject an API key
+k6 run -e BASE_URL=http://staging.example.com -e API_KEY=mykey tests/load/stress.js
+
+# Save JSON summary for regression check
+mkdir -p tests/load/results
+k6 run --out json=tests/load/results/stress_raw.json tests/load/stress.js
+```
+
+### Regression detection
+
+After any run that produces a JSON summary, compare against the baseline library:
+
+```bash
+# node tests/load/regression_check.js <scenario> <summary.json> [baselines.json] [db_size]
+node tests/load/regression_check.js events_steady \
+  tests/load/results/events_steady_raw.json \
+  tests/load/baselines.json \
+  1M
+```
+
+Exit codes:
+- `0` — all checks pass
+- `1` — one or more regressions detected (CI gate fails)
+- `2` — bad arguments or missing files
+
+**Regression thresholds** (configured in `tests/load/baselines.json`):
+
+| Dimension | Threshold |
+|---|---|
+| Latency (any percentile) | > 20 % above baseline |
+| Error rate | > 2 percentage points above baseline |
+| Memory growth (soak) | > 50 % above baseline |
+
+### Baseline library (`tests/load/baselines.json`)
+
+Baselines are stored per scenario and per database size (`100k`, `1M`, `10M` events).
+
+**When to update baselines:**
+- After a deliberate performance improvement (lower latency expected).
+- After a capacity change (larger machine, more DB connections).
+- Never after an unintentional regression — fix the code instead.
+
+**How to update:**
+
+```bash
+# 1. Run the scenario and confirm the new numbers are intentional
+k6 run --out json=tests/load/results/events_raw.json tests/load/events.js
+
+# 2. Edit tests/load/baselines.json, update the relevant p50/p95/p99 values
+#    under scenarios.<name>.baselines.<db_size>
+
+# 3. Commit with a message explaining why the baseline changed
+git add tests/load/baselines.json
+git commit -m "perf(load): update events_steady baseline after index optimisation"
+```
+
+### Interpreting results
+
+#### Stress test
+
+Look for the **breaking point** — the request rate at which p99 latency exceeds 1 000 ms or the error rate exceeds 5 %. The recovery section (final 2 min) should show p99 returning to within 20 % of the pre-stress baseline. A slow recovery indicates connection pool exhaustion or memory pressure.
+
+#### Spike test
+
+The spike scenario has three distinct phases in the output:
+1. **Pre-spike baseline** (`baseline` executor) — should match `events_steady` numbers.
+2. **Spike** — p99 may reach several seconds; error rate may spike briefly. The SLO allows up to 10 % errors and 5 s p99 during the burst.
+3. **Recovery** (`recovery` executor) — p99 must return below 200 ms within the recovery window. A slow recovery suggests the connection pool is not releasing fast enough; increase `DB_MAX_CONNECTIONS` or tune `DB_IDLE_TIMEOUT_SECS`.
+
+#### Soak test
+
+Compare `p95_ms_hour1` vs `p95_ms_hour12` vs `p95_ms_hour24` from the summary. More than a 10 % increase over 24 hours indicates latency drift, likely caused by:
+- Gradual memory growth (check `soroban_pulse_process_memory_bytes` in Prometheus)
+- Table bloat (check `pg_stat_user_tables.n_dead_tup`)
+- Index fragmentation (check `docs/index-maintenance.md`)
+
+#### Multi-contract query test
+
+The per-query-type p99 values (`mc_contract_latency_ms`, `mc_filter_latency_ms`, etc.) make it easy to isolate which query type regressed. A high `mc_filter_latency_ms` with low `mc_contract_latency_ms` suggests a missing or unused composite index on `(event_type, ledger, id)`.
+
+### CI/CD integration
+
+The workflow `.github/workflows/load-tests.yml` runs:
+
+| Job | Triggers |
+|---|---|
+| `load-events-steady` | Every PR and push to main |
+| `load-multi-contract` | Every PR and push to main |
+| `load-stress` | Push to main + weekly schedule + manual |
+| `load-spike` | Push to main + weekly schedule + manual |
+| `load-soak` | Weekly schedule + manual (with `SOAK_DURATION` override) |
+| `load-test-summary` | PR comment with key metrics from all completed jobs |
+
+To run all scenarios manually:
+
+```
+GitHub → Actions → Load Tests → Run workflow
+```
+
+The `db_size` input selects which baseline row to compare against (default `1M`). The `soak_duration` input lets you run a shortened soak (e.g. `30m`) for quick validation.
+
+### Webhook delivery setup
+
+The `webhook_delivery.js` scenario drives the admin replay endpoint and observes `soroban_pulse_webhook_failures_total` via `/metrics`. For end-to-end delivery latency measurement, point a stub receiver at `WEBHOOK_URL` before starting the service:
+
+```bash
+# Option 1: WireMock stub
+docker run -p 8080:8080 wiremock/wiremock --global-response-templating
+curl -X POST http://localhost:8080/__admin/mappings \
+  -d '{"request":{"method":"POST","url":"/webhook"},"response":{"status":200}}'
+
+# Option 2: webhook.site — copy the unique URL and set it as WEBHOOK_URL
+export WEBHOOK_URL="https://webhook.site/<your-uuid>"
+
+# Start service with webhook enabled
+WEBHOOK_URL=$WEBHOOK_URL WEBHOOK_SECRET=test-secret cargo run
+
+# Run the test
+k6 run -e ADMIN_API_KEY=your-admin-key \
+       -e WEBHOOK_RECEIVER=http://localhost:8080/webhook \
+       tests/load/webhook_delivery.js
+```
+
+### Performance budgets
+
+| Scenario | p99 budget | Error budget |
+|---|---|---|
+| Steady-state (100 req/s) | 200 ms | 1 % |
+| Stress peak (1 000 req/s) | 2 000 ms | 5 % |
+| Spike burst | 5 000 ms | 10 % |
+| Recovery (post-spike) | 200 ms | 1 % |
+| Soak (24 h) | 500 ms | 1 % |
+| Multi-contract queries | 400 ms | 1 % |
+| Webhook delivery | 1 000 ms | 5 % |
+
+If any CI job reports a regression, the workflow exits with a non-zero code and blocks the merge. Investigate using the artifact JSON and the Grafana dashboard (`docs/grafana-dashboard.json`) before updating baselines.
