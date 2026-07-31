@@ -13731,6 +13731,33 @@ pub async fn reload_config(
         }
         updated_settings.push(format!("rate_limit_per_minute: {}", rate_limit));
     }
+
+    // Issue #669 / #666: per-key rate limit hot-reload
+    if let Some(v) = req.rate_limit_key_per_minute {
+        updated_settings.push(format!("rate_limit_key_per_minute: {}", v));
+        // 0 means "disable" — set the env var so the next config load picks it up
+        if v == 0 {
+            std::env::remove_var("RATE_LIMIT_KEY_PER_MINUTE");
+        } else {
+            std::env::set_var("RATE_LIMIT_KEY_PER_MINUTE", v.to_string());
+        }
+    }
+    if let Some(v) = req.rate_limit_key_per_hour {
+        updated_settings.push(format!("rate_limit_key_per_hour: {}", v));
+        if v == 0 {
+            std::env::remove_var("RATE_LIMIT_KEY_PER_HOUR");
+        } else {
+            std::env::set_var("RATE_LIMIT_KEY_PER_HOUR", v.to_string());
+        }
+    }
+    if let Some(v) = req.rate_limit_key_per_day {
+        updated_settings.push(format!("rate_limit_key_per_day: {}", v));
+        if v == 0 {
+            std::env::remove_var("RATE_LIMIT_KEY_PER_DAY");
+        } else {
+            std::env::set_var("RATE_LIMIT_KEY_PER_DAY", v.to_string());
+        }
+    }
     
     if let Some(ref log_level) = req.log_level {
         // Validate log level is one of: trace, debug, info, warn, error
@@ -13787,6 +13814,21 @@ pub struct ConfigReloadRequest {
     /// New rate limit per minute per IP
     #[serde(default)]
     pub rate_limit_per_minute: Option<u32>,
+
+    /// Per-API-key rate limit: max requests per minute (Issue #669).
+    /// Set to 0 to disable.
+    #[serde(default)]
+    pub rate_limit_key_per_minute: Option<u32>,
+
+    /// Per-API-key rate limit: max requests per hour (Issue #669).
+    /// Set to 0 to disable.
+    #[serde(default)]
+    pub rate_limit_key_per_hour: Option<u32>,
+
+    /// Per-API-key rate limit: max requests per day (Issue #669).
+    /// Set to 0 to disable.
+    #[serde(default)]
+    pub rate_limit_key_per_day: Option<u32>,
     
     /// New SSE keepalive interval in seconds (1-60)
     #[serde(default)]
@@ -15019,4 +15061,56 @@ pub async fn rollback_adaptive_pool_config(
         "config_version": rolled_back.config_version,
         "config_variant": rolled_back.config_variant,
     })))
+}
+
+// ── Issue #669: Per-API-Key Rate Limit Status Endpoint ──────────────────────
+
+/// Get rate limit status for the authenticated API key.
+///
+/// Returns the current rate limit usage and remaining quota for the minute,
+/// hour, and day sliding windows (when per-key limits are configured).
+///
+/// This endpoint does **not** increment the rate limit counter (read-only status check).
+///
+/// Requires authentication (API_KEY or X-Api-Key header).
+#[utoipa::path(
+    get,
+    path = "/v1/rate-limit/status",
+    tag = "system",
+    responses(
+        (status = 200, description = "Rate limit status for the authenticated API key"),
+        (status = 401, description = "Unauthorized — API key required"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_rate_limit_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, AppError> {
+    // Extract API key from headers (same logic as middleware::extract_api_key)
+    let api_key = headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .or_else(|| headers.get("X-Api-Key").and_then(|h| h.to_str().ok()))
+        .ok_or_else(|| AppError::Forbidden("API key required for rate limit status".to_string()))?;
+
+    // Build RateLimitConfig from Config fields
+    let rate_limit_config = crate::rate_limiter::RateLimitConfig::new(
+        state.config.rate_limit_key_per_minute,
+        state.config.rate_limit_key_per_hour,
+        state.config.rate_limit_key_per_day,
+    );
+
+    // Get status (no counter increment)
+    let status = crate::rate_limiter::get_rate_limit_status(
+        &state.pool,
+        api_key,
+        &rate_limit_config,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Failed to check rate limit status: {}", e)))?;
+
+    Ok(Json(serde_json::to_value(&status).unwrap()))
 }

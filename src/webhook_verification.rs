@@ -178,6 +178,66 @@ pub fn verify_signature(
     }
 }
 
+/// Verify a webhook signature supporting **key rotation** (Issue #667).
+///
+/// During a key rotation window both the old secret and the new secret are
+/// valid.  This function tries the `primary_secret` first, and if that fails
+/// it tries each `fallback_secrets` in order.  A request is considered
+/// authentic if **any** of the provided secrets produces a matching digest.
+///
+/// ## Key Rotation Procedure
+///
+/// 1. **Generate a new secret** — use a cryptographically random 32-byte value
+///    (e.g. `openssl rand -hex 32`).
+/// 2. **Set the new secret** on the Soroban Pulse side via `WEBHOOK_SECRET`.
+///    Keep the old secret in `WEBHOOK_SECRET_OLD` (or pass it as a fallback
+///    here).
+/// 3. **Update your receiver** to call `verify_signature_with_rotation` with
+///    both secrets so it accepts deliveries signed by either key during the
+///    transition window.
+/// 4. **Remove the old secret** after all in-flight deliveries (up to the
+///    configured retry horizon) have been processed.
+///
+/// ## Example
+///
+/// ```rust
+/// // During rotation — accept both old and new secret
+/// let result = verify_signature_with_rotation(
+///     header_value,
+///     body,
+///     &["new_secret_here"],
+///     &["old_secret_here"],
+/// );
+///
+/// // After rotation complete — only new secret needed
+/// let result = verify_signature_with_rotation(
+///     header_value,
+///     body,
+///     &["new_secret_here"],
+///     &[],
+/// );
+/// ```
+pub fn verify_signature_with_rotation(
+    header_value: &str,
+    body: &[u8],
+    primary_secrets: &[&str],
+    fallback_secrets: &[&str],
+) -> Result<(), &'static str> {
+    // Try primary secrets first
+    for secret in primary_secrets {
+        if verify_signature(header_value, secret, body).is_ok() {
+            return Ok(());
+        }
+    }
+    // Try fallback secrets (old keys still valid during rotation window)
+    for secret in fallback_secrets {
+        if verify_signature(header_value, secret, body).is_ok() {
+            return Ok(());
+        }
+    }
+    Err("Signature verification failed: no matching key found")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +293,52 @@ mod tests {
 
         // Unsupported algorithm
         assert!(verify_signature("md5=somehash", secret, body).is_err());
+    }
+
+    // ── Key Rotation Tests (Issue #667) ─────────────────────────────────────
+
+    #[test]
+    fn test_rotation_primary_secret_accepted() {
+        let primary = "new_secret";
+        let body = br#"{"event":"transfer"}"#;
+        let sig = crate::webhook::sign_payload(primary, body);
+        let header = format!("sha256={}", sig);
+
+        assert!(verify_signature_with_rotation(&header, body, &[primary], &[]).is_ok());
+    }
+
+    #[test]
+    fn test_rotation_fallback_secret_accepted_during_transition() {
+        let old_secret = "old_secret";
+        let new_secret = "new_secret";
+        let body = br#"{"event":"transfer"}"#;
+
+        // Request signed with the old key
+        let sig = crate::webhook::sign_payload(old_secret, body);
+        let header = format!("sha256={}", sig);
+
+        // Should be accepted when old secret is provided as fallback
+        assert!(verify_signature_with_rotation(&header, body, &[new_secret], &[old_secret]).is_ok());
+    }
+
+    #[test]
+    fn test_rotation_unknown_key_rejected() {
+        let secret = "correct_secret";
+        let body = br#"{"event":"transfer"}"#;
+        let sig = crate::webhook::sign_payload(secret, body);
+        let header = format!("sha256={}", sig);
+
+        // Neither primary nor fallback matches
+        assert!(verify_signature_with_rotation(&header, body, &["wrong1"], &["wrong2"]).is_err());
+    }
+
+    #[test]
+    fn test_rotation_empty_secrets_rejected() {
+        let secret = "correct_secret";
+        let body = br#"{"event":"transfer"}"#;
+        let sig = crate::webhook::sign_payload(secret, body);
+        let header = format!("sha256={}", sig);
+
+        assert!(verify_signature_with_rotation(&header, body, &[], &[]).is_err());
     }
 }
