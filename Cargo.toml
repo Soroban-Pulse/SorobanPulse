@@ -127,7 +127,7 @@ features = ["snap"]
 version = "53"
 
 [dependencies.opentelemetry-zipkin]
-version = "0.19"
+version = "0.32"
 optional = true
 
 [[bin]]
