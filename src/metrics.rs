@@ -977,6 +977,23 @@ pub fn record_batch_config_updated() {
     m::counter!("soroban_pulse_batch_config_updates_total").increment(1);
 }
 
+// ── Issue #884: Subscription Pause/Resume ────────────────────────────────
+
+/// Record subscription pause event.
+pub fn record_subscription_paused() {
+    m::counter!("soroban_pulse_subscriptions_paused_total").increment(1);
+}
+
+/// Record subscription resume event.
+pub fn record_subscription_resumed() {
+    m::counter!("soroban_pulse_subscriptions_resumed_total").increment(1);
+}
+
+/// Record auto-resume of paused subscriptions.
+pub fn record_subscription_auto_resumed(count: u64) {
+    m::counter!("soroban_pulse_subscriptions_auto_resumed_total").increment(count);
+}
+
 // ── Issue #882: Anomaly Detection Alerting ────────────────────────────────
 
 /// Record anomaly detection configuration creation.
