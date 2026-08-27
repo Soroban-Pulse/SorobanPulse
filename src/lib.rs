@@ -36,6 +36,7 @@ pub mod lua_transform;
 pub mod metrics;
 pub mod middleware;
 pub mod models;
+pub mod multi_tenancy;
 pub mod normalizer;
 pub mod observability;
 pub mod notification_dedup;
