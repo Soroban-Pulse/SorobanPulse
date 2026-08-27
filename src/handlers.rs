@@ -15114,3 +15114,217 @@ pub async fn get_rate_limit_status(
 
     Ok(Json(serde_json::to_value(&status).unwrap()))
 }
+
+// ── Issue #882: Anomaly Detection Alerting ───────────────────────────────────
+
+/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-config
+/// Create or update anomaly detection configuration for a subscription.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/subscriptions/{subscription_id}/anomaly-config",
+    tag = "admin",
+    params(
+        ("subscription_id" = Uuid, Path, description = "Subscription ID"),
+    ),
+    request_body = Option<crate::anomaly_detection::CreateAnomalyDetectionRequest>,
+    responses(
+        (status = 201, description = "Anomaly detection configuration created"),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Subscription not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn create_anomaly_config(
+    State(state): State<AppState>,
+    Path(subscription_id): Path<Uuid>,
+    Json(req): Json<crate::anomaly_detection::CreateAnomalyDetectionRequest>,
+) -> Result<(StatusCode, Json<Value>), AppError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id = $1)"
+    )
+    .bind(subscription_id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    if !exists {
+        return Err(AppError::NotFound);
+    }
+
+    let training_window_days = req.training_window_days.unwrap_or(30);
+    if training_window_days < 7 || training_window_days > 365 {
+        return Err(AppError::Validation(
+            "training_window_days must be between 7 and 365".into()
+        ));
+    }
+
+    let baseline = crate::anomaly_detection::calculate_baseline(
+        &state.pool,
+        subscription_id,
+        &req.metric_name,
+        training_window_days,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e))?;
+
+    tracing::info!(
+        subscription_id = %subscription_id,
+        metric_name = %req.metric_name,
+        "Anomaly detection configuration created"
+    );
+
+    crate::metrics::record_anomaly_detection_configured(1);
+
+    Ok((StatusCode::CREATED, Json(json!({
+        "baseline_id": baseline.id,
+        "subscription_id": baseline.subscription_id,
+        "metric_name": baseline.metric_name,
+        "mean": baseline.mean,
+        "std_dev": baseline.std_dev,
+        "sample_count": baseline.sample_count,
+        "training_window_days": baseline.training_window_days,
+    }))))
+}
+
+/// GET /v1/admin/subscriptions/{subscription_id}/anomaly-alerts
+/// Retrieve anomaly alerts for a subscription.
+#[utoipa::path(
+    get,
+    path = "/v1/admin/subscriptions/{subscription_id}/anomaly-alerts",
+    tag = "admin",
+    params(
+        ("subscription_id" = Uuid, Path, description = "Subscription ID"),
+        ("limit" = Option<i64>, Query, description = "Max results (default 100)"),
+        ("severity" = Option<String>, Query, description = "Filter by severity: low, medium, high, critical"),
+    ),
+    responses(
+        (status = 200, description = "List of anomaly alerts"),
+        (status = 404, description = "Subscription not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_anomaly_alerts(
+    State(state): State<AppState>,
+    Path(subscription_id): Path<Uuid>,
+    Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id = $1)"
+    )
+    .bind(subscription_id)
+    .fetch_one(&state.pool)
+    .await?;
+
+    if !exists {
+        return Err(AppError::NotFound);
+    }
+
+    let limit = params.get("limit")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(100)
+        .min(1000);
+
+    let severity_filter = params.get("severity").map(|s| s.as_str());
+
+    let alerts = if let Some(sev) = severity_filter {
+        sqlx::query_as::<_, crate::anomaly_detection::AnomalyAlert>(
+            "SELECT id, subscription_id, event_id, metric_name, metric_value, '(0,0)' as expected_range,
+                    detection_method, anomaly_score, severity, alerting_enabled, acknowledged, acknowledged_at, created_at
+             FROM anomaly_alerts
+             WHERE subscription_id = $1 AND severity = $2
+             ORDER BY created_at DESC
+             LIMIT $3"
+        )
+        .bind(subscription_id)
+        .bind(sev)
+        .bind(limit)
+        .fetch_all(&state.pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, crate::anomaly_detection::AnomalyAlert>(
+            "SELECT id, subscription_id, event_id, metric_name, metric_value, '(0,0)' as expected_range,
+                    detection_method, anomaly_score, severity, alerting_enabled, acknowledged, acknowledged_at, created_at
+             FROM anomaly_alerts
+             WHERE subscription_id = $1
+             ORDER BY created_at DESC
+             LIMIT $2"
+        )
+        .bind(subscription_id)
+        .bind(limit)
+        .fetch_all(&state.pool)
+        .await?
+    };
+
+    crate::metrics::record_anomaly_alerts_queried(alerts.len() as u64);
+
+    Ok(Json(json!({
+        "subscription_id": subscription_id,
+        "count": alerts.len(),
+        "alerts": alerts,
+    })))
+}
+
+/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge
+/// Acknowledge an anomaly alert.
+#[utoipa::path(
+    post,
+    path = "/v1/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge",
+    tag = "admin",
+    params(
+        ("subscription_id" = Uuid, Path, description = "Subscription ID"),
+        ("alert_id" = Uuid, Path, description = "Alert ID"),
+    ),
+    request_body = Option<crate::anomaly_detection::AcknowledgeAnomalyRequest>,
+    responses(
+        (status = 200, description = "Alert acknowledged"),
+        (status = 404, description = "Alert not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    security(("api_key" = []))
+)]
+pub async fn acknowledge_anomaly_alert(
+    State(state): State<AppState>,
+    Path((subscription_id, alert_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<Option<crate::anomaly_detection::AcknowledgeAnomalyRequest>>,
+) -> Result<Json<Value>, AppError> {
+    let rows = sqlx::query(
+        "UPDATE anomaly_alerts
+         SET acknowledged = true, acknowledged_at = NOW()
+         WHERE id = $1 AND subscription_id = $2"
+    )
+    .bind(alert_id)
+    .bind(subscription_id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    if rows == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    let notes = req.and_then(|r| r.notes);
+    if let Some(note) = notes.as_ref() {
+        let _ = sqlx::query(
+            "INSERT INTO anomaly_alert_feedback (id, alert_id, feedback, notes, created_at)
+             VALUES ($1, $2, $3, $4, $5)"
+        )
+        .bind(Uuid::new_v4())
+        .bind(alert_id)
+        .bind("acknowledged")
+        .bind(note)
+        .bind(chrono::Utc::now())
+        .execute(&state.pool)
+        .await;
+    }
+
+    tracing::info!(alert_id = %alert_id, "Anomaly alert acknowledged");
+    crate::metrics::record_anomaly_alert_acknowledged();
+
+    Ok(Json(json!({
+        "alert_id": alert_id,
+        "acknowledged": true,
+        "notes": notes,
+    })))
+}
+}
