@@ -1142,6 +1142,42 @@ pub fn update_trace_injection_latency_ms(latency_ms: f64) {
     m::gauge!("soroban_pulse_trace_injection_latency_ms").set(latency_ms);
 }
 
+/// Record SLI latency percentile calculation (Issue #896)
+pub fn record_sli_latency_percentile(percentile: &str, value_seconds: f64) {
+    m::gauge!(
+        "soroban_pulse_sli_latency_percentile",
+        "percentile" => percentile.to_string()
+    )
+    .set(value_seconds);
+}
+
+/// Record error rate metric (Issue #896)
+pub fn record_error_rate(endpoint: &str, rate: f64) {
+    m::gauge!(
+        "soroban_pulse_sli_error_rate",
+        "endpoint" => endpoint.to_string()
+    )
+    .set(rate);
+}
+
+/// Record availability metric (Issue #896)
+pub fn record_availability(endpoint: &str, availability: f64) {
+    m::gauge!(
+        "soroban_pulse_sli_availability",
+        "endpoint" => endpoint.to_string()
+    )
+    .set(availability);
+}
+
+/// Record SLO budget burndown (Issue #896)
+pub fn update_slo_budget_burndown(slo: &str, consumed: f64) {
+    m::gauge!(
+        "soroban_pulse_slo_budget_burndown",
+        "slo" => slo.to_string()
+    )
+    .set(consumed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
