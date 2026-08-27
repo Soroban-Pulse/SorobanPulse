@@ -76,6 +76,7 @@ mod graphql;
 #[cfg(feature = "graphql")]
 mod graphql_subscriptions;
 mod event_dedup_replicas;
+mod bulk_export;
 mod sse_ring_buffer;
 mod query_cache;
 mod query_plan_cache;
