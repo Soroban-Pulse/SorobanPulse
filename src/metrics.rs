@@ -1119,6 +1119,29 @@ pub fn record_backup_row_count_verified() {
     m::counter!("soroban_pulse_backup_row_count_verified_total").increment(1);
 }
 
+/// Record distributed trace span created (Issue #895)
+pub fn record_trace_span_created(span_name: &str) {
+    m::counter!(
+        "soroban_pulse_trace_spans_created_total",
+        "span_name" => span_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Record trace sampling decision (Issue #895)
+pub fn record_trace_sampled(sampled: bool) {
+    m::counter!(
+        "soroban_pulse_trace_samples_total",
+        "sampled" => if sampled { "true" } else { "false" }
+    )
+    .increment(1);
+}
+
+/// Update trace injection latency (Issue #895)
+pub fn update_trace_injection_latency_ms(latency_ms: f64) {
+    m::gauge!("soroban_pulse_trace_injection_latency_ms").set(latency_ms);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
