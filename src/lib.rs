@@ -57,6 +57,7 @@ pub mod subscriptions;
 pub mod webhook;
 pub mod webhook_template;
 pub mod webhook_verification;
+pub mod webhook_circuit_breaker;
 pub mod xdr_validation;
 pub mod financial_accuracy;
 pub mod sse_ring_buffer;

@@ -110,6 +110,8 @@ pub struct AppState {
     pub adaptive_pool: Arc<crate::adaptive_pool::AdaptiveTunerState>,
     /// Issue #817: Alias so handlers can use `state.db` (same as `state.pool`).
     pub db: sqlx::PgPool,
+    /// Issue #879: Circuit breaker manager for webhook endpoints.
+    pub circuit_breaker_manager: crate::webhook_circuit_breaker::CircuitBreakerManager,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -398,6 +400,10 @@ pub fn create_router_with_tx_and_tenant_map(
         config.db_min_connections,
     );
 
+    let circuit_breaker_manager = crate::webhook_circuit_breaker::CircuitBreakerManager::new(
+        crate::webhook_circuit_breaker::CircuitBreakerConfig::default()
+    );
+
     let app_state = AppState {
         db: pool.clone(),
         pool,
@@ -426,6 +432,7 @@ pub fn create_router_with_tx_and_tenant_map(
         anonymization_config: None,
         pool_stats,
         adaptive_pool,
+        circuit_breaker_manager,
     };
 
     // Spawn cache invalidation task: subscribe to the broadcast channel and
@@ -477,6 +484,10 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/slo/sample", axum::routing::post(handlers::record_slo_sample))
         // #839: Push notification delivery analytics
         .route("/admin/push/analytics", axum::routing::get(crate::push_notification::get_push_analytics))
+        // #879: Webhook circuit breaker admin endpoints
+        .route("/admin/webhook/circuit-breaker", axum::routing::get(handlers::get_circuit_breaker_stats))
+        .route("/admin/webhook/circuit-breaker/:endpoint", axum::routing::get(handlers::get_endpoint_circuit_breaker_stats))
+        .route("/admin/webhook/circuit-breaker/:endpoint/reset", axum::routing::post(handlers::reset_circuit_breaker))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&admin_auth_state),
             middleware::admin_auth_middleware,

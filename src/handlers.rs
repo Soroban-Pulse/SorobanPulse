@@ -15114,3 +15114,38 @@ pub async fn get_rate_limit_status(
 
     Ok(Json(serde_json::to_value(&status).unwrap()))
 }
+
+// ── Issue #879: Webhook Circuit Breaker Admin Endpoints ─────────────────────
+
+/// GET /v1/admin/webhook/circuit-breaker
+/// Get circuit breaker stats for all webhook endpoints
+pub async fn get_circuit_breaker_stats(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>> {
+    let stats = state.circuit_breaker_manager.get_all_stats().await;
+    Json(stats)
+}
+
+/// GET /v1/admin/webhook/circuit-breaker/{endpoint}
+/// Get circuit breaker stats for a specific endpoint
+pub async fn get_endpoint_circuit_breaker_stats(
+    State(state): State<AppState>,
+    Path(endpoint): Path<String>,
+) -> Result<Json<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>, AppError> {
+    let stats = state.circuit_breaker_manager.get_stats(&endpoint).await
+        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    Ok(Json(stats))
+}
+
+/// POST /v1/admin/webhook/circuit-breaker/{endpoint}/reset
+/// Manually reset a circuit breaker for a specific endpoint
+pub async fn reset_circuit_breaker(
+    State(state): State<AppState>,
+    Path(endpoint): Path<String>,
+) -> Json<serde_json::Value> {
+    state.circuit_breaker_manager.reset(&endpoint).await;
+    Json(json!({
+        "status": "reset",
+        "endpoint": endpoint,
+    }))
+}
