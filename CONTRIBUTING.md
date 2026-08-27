@@ -229,6 +229,55 @@ perf(db): add GIN index on event_data JSONB column
 Improves topic filtering query performance by 10x.
 ```
 
+## Contribution Workflow
+
+The preferred contribution path is: open or find an issue, confirm the intended scope, create a branch from the latest `main`, make the smallest complete change, add regression coverage or documentation, run the local checks, and open a pull request. If the change affects API behavior, database schema, deployment, security, or architecture, explain the impact in the issue and link the relevant design or runbook documentation.
+
+### Choosing the right change
+
+| Change | Expected additions |
+|---|---|
+| Bug fix | A focused test that fails before the fix and passes after it |
+| API or event change | Updated API examples, compatibility notes, and affected integration tests |
+| Database change | Forward and rollback migration where applicable, migration check, and query/test coverage |
+| Operational change | Updated deployment or runbook documentation and a safe rollback procedure |
+| Architecture change | An [ADR](docs/adr/README.md) linked from the pull request |
+| Documentation-only change | A reproducible example checked against the current commands and configuration |
+
+### Example: branch, checks, and pull request
+
+```bash
+git switch main
+git pull --ff-only origin main
+git switch -c fix/describe-the-change
+
+# Make the change, then run the narrowest useful checks first.
+make fmt
+cargo test --lib
+make lint
+make test
+
+git diff --check
+git push --set-upstream origin fix/describe-the-change
+```
+
+Use a descriptive Conventional Commit such as `fix(indexer): handle empty event pages`. In the pull request, summarize the behavior before and after the change, list the checks that ran, call out migrations or operational effects, and link the issue with `Closes #<number>` when the pull request completes it.
+
+### Example: adding a migration
+
+```bash
+# Choose a unique UTC timestamp and descriptive snake_case name.
+touch migrations/20260827090000_add_event_retention_policy.sql
+make check-migrations
+# Add the matching down migration when the project convention requires it.
+```
+
+Never put credentials in examples. Use placeholders such as `postgres://<user>:<password>@localhost/<dbname>`, and confirm that generated logs and test fixtures contain no tokens, API keys, or personal data.
+
+### Review-ready checklist
+
+Before requesting review, verify that the change is scoped to the issue, tests cover the changed behavior, documentation matches the implementation, public interfaces remain backward compatible or are explicitly versioned, migrations are ordered uniquely, and `git diff --check` is clean. Describe any unavailable local dependency or skipped integration test rather than implying it passed.
+
 ## Pull Requests
 
 - Keep PRs focused — one logical change per PR.
