@@ -16,6 +16,7 @@ pub mod data_integrity;
 pub mod db;
 pub mod db_config_advisor;
 pub mod dedup;
+pub mod event_dedup_replicas;
 pub mod distributed_tracing;
 pub mod email;
 pub mod encryption;

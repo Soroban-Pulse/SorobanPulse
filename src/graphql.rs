@@ -44,7 +44,7 @@ impl From<SorobanEvent> for Event {
 }
 
 /// GraphQL input filter for querying events
-#[derive(Debug, InputObject, Clone)]
+#[derive(Debug, InputObject, Clone, Default)]
 pub struct EventFilter {
     /// Filter by contract ID
     pub contract_id: Option<String>,
@@ -233,6 +233,7 @@ pub struct Subscription;
 #[Subscription]
 impl Subscription {
     /// Subscribe to new events matching optional filters
+    /// Supports filtering by contract_id, event_type, tx_hash, and ledger range
     async fn events(
         &self,
         ctx: &Context<'_>,
@@ -269,6 +270,17 @@ impl Subscription {
                     }
                     if let Some(ref tx_hash) = f.tx_hash {
                         if event.tx_hash != *tx_hash {
+                            return std::future::ready(None);
+                        }
+                    }
+                    // Ledger range filtering
+                    if let Some(ledger_min) = f.ledger_min {
+                        if (event.ledger as u64) < ledger_min {
+                            return std::future::ready(None);
+                        }
+                    }
+                    if let Some(ledger_max) = f.ledger_max {
+                        if (event.ledger as u64) > ledger_max {
                             return std::future::ready(None);
                         }
                     }
