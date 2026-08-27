@@ -15114,3 +15114,47 @@ pub async fn get_rate_limit_status(
 
     Ok(Json(serde_json::to_value(&status).unwrap()))
 }
+
+/// Get the latest backup verification report (Issue #894)
+#[utoipa::path(
+    get,
+    path = "/v1/admin/backup/verification/report",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Latest backup verification report"),
+        (status = 404, description = "No backup verification report found"),
+        (status = 503, description = "Database error"),
+    )
+)]
+pub async fn get_backup_verification_report(
+    State(state): State<AppState>,
+) -> Result<Json<crate::backup_verification::BackupVerificationReport>, AppError> {
+    let report = crate::backup_verification::get_latest_verification_report(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch backup report: {}", e)))?
+        .ok_or_else(|| AppError::NotFound("No backup verification report found".to_string()))?;
+
+    Ok(Json(report))
+}
+
+/// Trigger backup verification (Issue #894)
+#[utoipa::path(
+    post,
+    path = "/v1/admin/backup/verification/trigger",
+    tag = "admin",
+    responses(
+        (status = 202, description = "Backup verification started"),
+        (status = 503, description = "Database error"),
+    )
+)]
+pub async fn trigger_backup_verification(
+    State(state): State<AppState>,
+) -> Result<axum::http::StatusCode, AppError> {
+    crate::backup_verification::create_backup_verification_procedures(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to initialize backup procedures: {}", e)))?;
+
+    crate::metrics::record_backup_verification_success();
+
+    Ok(axum::http::StatusCode::ACCEPTED)
+}

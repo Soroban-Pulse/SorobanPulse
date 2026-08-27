@@ -475,6 +475,9 @@ pub fn create_router_with_tx_and_tenant_map(
         // #696: SLI / SLO dashboard reporting endpoints (admin-gated)
         .route("/admin/slo/report", axum::routing::get(handlers::get_slo_report))
         .route("/admin/slo/sample", axum::routing::post(handlers::record_slo_sample))
+        // #894: Backup verification
+        .route("/admin/backup/verification/report", axum::routing::get(handlers::get_backup_verification_report))
+        .route("/admin/backup/verification/trigger", axum::routing::post(handlers::trigger_backup_verification))
         // #839: Push notification delivery analytics
         .route("/admin/push/analytics", axum::routing::get(crate::push_notification::get_push_analytics))
         .route_layer(axum::middleware::from_fn_with_state(

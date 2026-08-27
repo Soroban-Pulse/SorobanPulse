@@ -1079,6 +1079,46 @@ pub fn update_memory_vms_bytes(bytes: u64) {
     m::gauge!("soroban_pulse_process_memory_vms_bytes").set(bytes as f64);
 }
 
+/// Record a successful backup verification (Issue #894)
+pub fn record_backup_verification_success() {
+    m::counter!("soroban_pulse_backup_verification_success_total").increment(1);
+}
+
+/// Record a failed backup verification (Issue #894)
+pub fn record_backup_verification_failure() {
+    m::counter!("soroban_pulse_backup_verification_failure_total").increment(1);
+}
+
+/// Update backup size metrics (Issue #894)
+pub fn update_backup_size_bytes(bytes: u64) {
+    m::gauge!("soroban_pulse_backup_size_bytes").set(bytes as f64);
+}
+
+/// Update backup duration metrics in seconds (Issue #894)
+pub fn update_backup_duration_seconds(duration: f64) {
+    m::gauge!("soroban_pulse_backup_duration_seconds").set(duration);
+}
+
+/// Update restore duration metrics in seconds (Issue #894)
+pub fn update_restore_duration_seconds(duration: f64) {
+    m::gauge!("soroban_pulse_restore_duration_seconds").set(duration);
+}
+
+/// Record backup integrity verification (Issue #894)
+pub fn record_backup_integrity_verified() {
+    m::counter!("soroban_pulse_backup_integrity_verified_total").increment(1);
+}
+
+/// Record backup encryption verification (Issue #894)
+pub fn record_backup_encryption_verified() {
+    m::counter!("soroban_pulse_backup_encryption_verified_total").increment(1);
+}
+
+/// Record backup row count verification (Issue #894)
+pub fn record_backup_row_count_verified() {
+    m::counter!("soroban_pulse_backup_row_count_verified_total").increment(1);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
