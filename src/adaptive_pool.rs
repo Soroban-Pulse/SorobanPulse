@@ -219,6 +219,70 @@ impl UtilizationWindow {
     fn is_full(&self) -> bool {
         self.samples.len() >= self.capacity
     }
+
+    fn standard_deviation(&self) -> f64 {
+        if self.samples.len() < 2 {
+            return 0.0;
+        }
+        let avg = self.average();
+        let variance = self.samples
+            .iter()
+            .map(|s| (s - avg).powi(2))
+            .sum::<f64>() / (self.samples.len() - 1) as f64;
+        variance.sqrt()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Predictive load analysis
+// ---------------------------------------------------------------------------
+
+/// Prediction model using exponential smoothing for connection demand forecasting
+#[derive(Debug, Clone)]
+struct DemandPredictor {
+    /// Exponential smoothing factor (0.1-0.3 typical, higher = more responsive)
+    alpha: f64,
+    /// Last observed utilization
+    last_observation: f64,
+    /// Exponentially smoothed level
+    level: f64,
+    /// Exponentially smoothed trend
+    trend: f64,
+    /// Trend smoothing factor
+    beta: f64,
+}
+
+impl DemandPredictor {
+    fn new() -> Self {
+        Self {
+            alpha: 0.2,
+            last_observation: 0.0,
+            level: 0.0,
+            trend: 0.0,
+            beta: 0.1,
+        }
+    }
+
+    /// Update the predictor with a new observation and return predicted next utilization
+    fn update(&mut self, observation: f64) -> f64 {
+        self.last_observation = observation;
+
+        // Update level
+        let new_level = self.alpha * observation + (1.0 - self.alpha) * (self.level + self.trend);
+        let new_trend =
+            self.beta * (new_level - self.level) + (1.0 - self.beta) * self.trend;
+
+        self.level = new_level;
+        self.trend = new_trend;
+
+        // Predict next value
+        self.level + self.trend
+    }
+
+    /// Get the current prediction for 1 step ahead
+    fn predict(&self) -> f64 {
+        (self.level + self.trend).min(1.0).max(0.0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +306,10 @@ pub struct TuningSnapshot {
     pub config_version: u32,
     /// Unix timestamp (seconds) of this snapshot.
     pub timestamp_secs: u64,
+    /// Predicted next utilization (ML-based forecast)
+    pub predicted_utilization: f64,
+    /// Standard deviation of recent utilization samples
+    pub utilization_std_dev: f64,
 }
 
 /// Shared adaptive tuner state, accessible from HTTP handlers.
@@ -349,6 +417,7 @@ pub fn spawn_adaptive_monitor(
         let mut last_health_check = Instant::now();
         let mut recommended_min = current_min;
         let mut recommended_max = current_max;
+        let mut demand_predictor = DemandPredictor::new();
 
         loop {
             // Reload config if it has changed.
@@ -459,6 +528,8 @@ pub fn spawn_adaptive_monitor(
             }
 
             // --- Publish snapshot ------------------------------------------------
+            let predicted_util = demand_predictor.update(utilization);
+            let std_dev = window.standard_deviation();
             let snapshot = TuningSnapshot {
                 recommended_min,
                 recommended_max,
@@ -467,6 +538,8 @@ pub fn spawn_adaptive_monitor(
                 scale_down_advised: scale_down,
                 config_version: config.config_version,
                 timestamp_secs: since_epoch.as_secs(),
+                predicted_utilization: predicted_util,
+                utilization_std_dev: std_dev,
             };
             state_clone.store_snapshot(snapshot);
 
