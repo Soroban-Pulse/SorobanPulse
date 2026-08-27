@@ -77,6 +77,8 @@ mod sse_ring_buffer;
 mod query_cache;
 mod query_plan_cache;
 mod query_optimizer;
+mod partition_manager;
+mod query_builder;
 mod adaptive_pool;
 mod pool_management;
 mod statistics_management;

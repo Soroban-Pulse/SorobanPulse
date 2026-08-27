@@ -210,6 +210,186 @@ pub async fn pgstattuple_bloat(
     row.map(|(pct,)| pct)
 }
 
+/// Generate a comprehensive index analysis report with recommendations.
+pub async fn generate_index_analysis_report(
+    pool: &PgPool,
+) -> Result<IndexAnalysisReport, sqlx::Error> {
+    let stats = collect_index_stats_detailed(pool).await?;
+    let frags = query_index_fragmentation(pool).await?;
+
+    let mut unused = Vec::new();
+    let mut healthy = Vec::new();
+    let mut bloated = Vec::new();
+
+    let mut total_size: i64 = 0;
+    let mut bloated_size: i64 = 0;
+    let mut largest: Option<(String, i64)> = None;
+
+    for stat in &stats {
+        let frag = frags.iter().find(|f| f.index_name == stat.index && f.table_name == stat.table);
+        let bloat = frag.and_then(|f| f.bloat_ratio);
+        let size = frag.map(|f| f.index_size_bytes).unwrap_or(0);
+
+        total_size += size;
+        if bloat.unwrap_or(0.0) > 0.2 {
+            bloated_size += size;
+        }
+
+        if let Some((_, s)) = &largest {
+            if &size > s {
+                largest = Some((stat.index.clone(), size));
+            }
+        } else if size > 0 {
+            largest = Some((stat.index.clone(), size));
+        }
+
+        let health_score = calculate_index_health_score(stat.scan_count, bloat, size);
+
+        let metric = IndexHealthMetric {
+            table_name: stat.table.clone(),
+            index_name: stat.index.clone(),
+            scan_count: stat.scan_count,
+            bloat_ratio: bloat,
+            size_bytes: size,
+            health_score,
+        };
+
+        if stat.scan_count == 0 {
+            unused.push(metric);
+        } else if bloat.unwrap_or(0.0) > 0.3 {
+            bloated.push(metric);
+        } else {
+            healthy.push(metric);
+        }
+    }
+
+    let recommendations = generate_recommendations(&unused, &bloated, &stats);
+
+    let report = IndexAnalysisReport {
+        analyzed_at: chrono::Utc::now().to_rfc3339(),
+        total_indexes: stats.len(),
+        unused_indexes: unused,
+        duplicate_indexes: detect_duplicate_indexes(&stats),
+        bloated_indexes: bloated,
+        healthy_indexes: healthy,
+        size_stats: IndexSizeStats {
+            total_index_size_bytes: total_size,
+            avg_index_size_bytes: if stats.is_empty() { 0 } else { total_size / stats.len() as i64 },
+            largest_index: largest,
+            bloated_index_size_bytes: bloated_size,
+        },
+        recommendations,
+    };
+
+    Ok(report)
+}
+
+/// Collect detailed index statistics.
+async fn collect_index_stats_detailed(pool: &PgPool) -> Result<Vec<IndexScanStats>, sqlx::Error> {
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT tablename, indexname, COALESCE(idx_scan, 0)::bigint
+         FROM pg_stat_user_indexes
+         WHERE schemaname = 'public'
+         ORDER BY idx_scan DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(table, index, scan_count)| IndexScanStats {
+            table,
+            index,
+            scan_count,
+        })
+        .collect())
+}
+
+/// Calculate a health score for an index (0.0 to 1.0).
+fn calculate_index_health_score(scan_count: i64, bloat: Option<f64>, size: i64) -> f64 {
+    let mut score = 1.0;
+
+    if scan_count == 0 {
+        return 0.0;
+    }
+
+    if let Some(b) = bloat {
+        if b > 0.5 {
+            score -= 0.5;
+        } else if b > 0.2 {
+            score -= 0.3;
+        } else if b > 0.1 {
+            score -= 0.1;
+        }
+    }
+
+    let usage_factor = (scan_count as f64).ln() / 10.0;
+    score = score * (0.5 + usage_factor.min(0.5));
+
+    score.max(0.0).min(1.0)
+}
+
+/// Detect indexes with duplicate or overlapping usage patterns.
+fn detect_duplicate_indexes(stats: &[IndexScanStats]) -> Vec<(String, String, i64)> {
+    let mut duplicates = Vec::new();
+
+    for (i, stat1) in stats.iter().enumerate() {
+        for stat2 in stats.iter().skip(i + 1) {
+            if stat1.table == stat2.table && stat1.scan_count == stat2.scan_count && stat1.scan_count > 0 {
+                if stat1.index != stat2.index {
+                    duplicates.push((
+                        stat1.index.clone(),
+                        stat2.index.clone(),
+                        stat1.scan_count,
+                    ));
+                }
+            }
+        }
+    }
+
+    duplicates
+}
+
+/// Generate optimization recommendations based on analysis.
+fn generate_recommendations(
+    unused: &[IndexHealthMetric],
+    bloated: &[IndexHealthMetric],
+    all_stats: &[IndexScanStats],
+) -> Vec<IndexRecommendation> {
+    let mut recommendations = Vec::new();
+
+    for idx in unused {
+        recommendations.push(IndexRecommendation {
+            index_name: idx.index_name.clone(),
+            table_name: idx.table_name.clone(),
+            recommendation_type: "DROP".to_string(),
+            description: format!(
+                "Index '{}' has never been scanned. Consider dropping it to reduce write overhead.",
+                idx.index_name
+            ),
+            potential_savings_bytes: idx.size_bytes,
+            priority: "HIGH".to_string(),
+        });
+    }
+
+    for idx in bloated {
+        recommendations.push(IndexRecommendation {
+            index_name: idx.index_name.clone(),
+            table_name: idx.table_name.clone(),
+            recommendation_type: "REINDEX".to_string(),
+            description: format!(
+                "Index '{}' has high bloat ratio ({:.1}%). Run REINDEX to reclaim space.",
+                idx.index_name,
+                idx.bloat_ratio.unwrap_or(0.0) * 100.0
+            ),
+            potential_savings_bytes: (idx.size_bytes as f64 * idx.bloat_ratio.unwrap_or(0.0)) as i64,
+            priority: "MEDIUM".to_string(),
+        });
+    }
+
+    recommendations
+}
+
 /// Emit Prometheus gauges for each index's fragmentation.
 pub fn emit_fragmentation_metrics(infos: &[IndexFragmentationInfo]) {
     let fragmented_count = infos
@@ -245,8 +425,60 @@ pub fn emit_fragmentation_metrics(infos: &[IndexFragmentationInfo]) {
 }
 
 // ---------------------------------------------------------------------------
-// #694: Auto-REINDEX scheduling
+// #890: Index usage analysis and recommendations
 // ---------------------------------------------------------------------------
+
+/// Comprehensive index analysis report.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexAnalysisReport {
+    /// Timestamp when this analysis was run.
+    pub analyzed_at: String,
+    /// Total number of indexes analyzed.
+    pub total_indexes: usize,
+    /// Indexes with zero scan count (candidates for removal).
+    pub unused_indexes: Vec<IndexHealthMetric>,
+    /// Indexes with duplicate usage patterns (candidates for consolidation).
+    pub duplicate_indexes: Vec<(String, String, i64)>,
+    /// Indexes that are bloated and should be reindexed.
+    pub bloated_indexes: Vec<IndexHealthMetric>,
+    /// Indexes actively used and healthy.
+    pub healthy_indexes: Vec<IndexHealthMetric>,
+    /// Size statistics.
+    pub size_stats: IndexSizeStats,
+    /// Optimization recommendations.
+    pub recommendations: Vec<IndexRecommendation>,
+}
+
+/// Individual index health metric.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexHealthMetric {
+    pub table_name: String,
+    pub index_name: String,
+    pub scan_count: i64,
+    pub bloat_ratio: Option<f64>,
+    pub size_bytes: i64,
+    pub health_score: f64,
+}
+
+/// Index size statistics.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexSizeStats {
+    pub total_index_size_bytes: i64,
+    pub avg_index_size_bytes: i64,
+    pub largest_index: Option<(String, i64)>,
+    pub bloated_index_size_bytes: i64,
+}
+
+/// Recommendation for index optimization.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IndexRecommendation {
+    pub index_name: String,
+    pub table_name: String,
+    pub recommendation_type: String,
+    pub description: String,
+    pub potential_savings_bytes: i64,
+    pub priority: String,
+}
 
 /// Threshold configuration for automatic REINDEX.
 #[derive(Clone, Debug)]
