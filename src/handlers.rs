@@ -15158,3 +15158,103 @@ pub async fn trigger_backup_verification(
 
     Ok(axum::http::StatusCode::ACCEPTED)
 }
+
+/// Create a silence rule for suppressing alerts (Issue #897)
+#[utoipa::path(
+    post,
+    path = "/v1/admin/alerts/silences",
+    tag = "admin",
+    responses(
+        (status = 201, description = "Silence rule created"),
+        (status = 400, description = "Invalid request"),
+        (status = 503, description = "Database error"),
+    )
+)]
+pub async fn create_alert_silence(
+    State(state): State<AppState>,
+    Json(payload): Json<serde_json::Value>,
+) -> Result<(axum::http::StatusCode, Json<crate::alert_manager::AlertSilence>), AppError> {
+    let alert_name = payload
+        .get("alert_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::Validation("missing 'alert_name' field".to_string()))?;
+
+    let duration_minutes = payload
+        .get("duration_minutes")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| AppError::Validation("missing 'duration_minutes' field".to_string()))?;
+
+    let created_by = payload
+        .get("created_by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("admin");
+
+    let comment = payload
+        .get("comment")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Silence rule created via admin API");
+
+    crate::alert_manager::create_alert_tables(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to initialize alert tables: {}", e)))?;
+
+    let silence = crate::alert_manager::create_silence(&state.pool, alert_name, duration_minutes, created_by, comment)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to create silence: {}", e)))?;
+
+    Ok((axum::http::StatusCode::CREATED, Json(silence)))
+}
+
+/// Get active alert silences (Issue #897)
+#[utoipa::path(
+    get,
+    path = "/v1/admin/alerts/silences",
+    tag = "admin",
+    responses(
+        (status = 200, description = "List of active silences"),
+        (status = 503, description = "Database error"),
+    )
+)]
+pub async fn get_alert_silences(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<crate::alert_manager::AlertSilence>>, AppError> {
+    crate::alert_manager::create_alert_tables(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to initialize alert tables: {}", e)))?;
+
+    let silences = crate::alert_manager::get_active_silences(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch silences: {}", e)))?;
+
+    Ok(Json(silences))
+}
+
+/// Delete an alert silence (Issue #897)
+#[utoipa::path(
+    delete,
+    path = "/v1/admin/alerts/silences/{silence_id}",
+    tag = "admin",
+    responses(
+        (status = 204, description = "Silence deleted"),
+        (status = 404, description = "Silence not found"),
+        (status = 503, description = "Database error"),
+    )
+)]
+pub async fn delete_alert_silence(
+    State(state): State<AppState>,
+    axum::extract::Path(silence_id): axum::extract::Path<String>,
+) -> Result<axum::http::StatusCode, AppError> {
+    crate::alert_manager::create_alert_tables(&state.pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to initialize alert tables: {}", e)))?;
+
+    let deleted = crate::alert_manager::delete_silence(&state.pool, &silence_id)
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to delete silence: {}", e)))?;
+
+    if deleted {
+        Ok(axum::http::StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound("Silence not found".to_string()))
+    }
+}

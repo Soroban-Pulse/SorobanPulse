@@ -1178,6 +1178,48 @@ pub fn update_slo_budget_burndown(slo: &str, consumed: f64) {
     .set(consumed);
 }
 
+/// Record alert fired (Issue #897)
+pub fn record_alert_fired(alert_name: &str, severity: &str) {
+    m::counter!(
+        "soroban_pulse_alerts_fired_total",
+        "alert_name" => alert_name.to_string(),
+        "severity" => severity.to_string()
+    )
+    .increment(1);
+}
+
+/// Record alert resolved (Issue #897)
+pub fn record_alert_resolved(alert_name: &str) {
+    m::counter!(
+        "soroban_pulse_alerts_resolved_total",
+        "alert_name" => alert_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Record alert silenced (Issue #897)
+pub fn record_alert_silenced(alert_name: &str, duration_minutes: u64) {
+    m::counter!(
+        "soroban_pulse_alerts_silenced_total",
+        "alert_name" => alert_name.to_string()
+    )
+    .increment(1);
+    m::gauge!(
+        "soroban_pulse_alert_silence_duration_minutes",
+        "alert_name" => alert_name.to_string()
+    )
+    .set(duration_minutes as f64);
+}
+
+/// Update active alert count (Issue #897)
+pub fn update_active_alerts_count(component: &str, count: u64) {
+    m::gauge!(
+        "soroban_pulse_active_alerts",
+        "component" => component.to_string()
+    )
+    .set(count as f64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

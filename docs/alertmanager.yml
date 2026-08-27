@@ -144,6 +144,31 @@ receivers:
           status: "{{ .Status }}"
           alerts: "{{ range .Alerts }}- {{ .Annotations.summary }}\n{{ end }}"
 
+  - name: "opsgenie-critical"
+    opsgenie_configs:
+      - api_key: "${OPSGENIE_API_KEY}"
+        api_url: "https://api.opsgenie.com/v2/alerts"
+        message: '{{ .GroupLabels.alertname }}'
+        description: "{{ .GroupLabels.alertname }}: {{ (index .Alerts 0).Annotations.summary }}"
+        responders:
+          - type: team
+            name: "SorobanPulse On-Call"
+        source: "soroban-pulse"
+        priority: "P1"
+        tags:
+          - "soroban-pulse"
+          - "{{ (index .Alerts 0).Labels.component }}"
+          - "{{ (index .Alerts 0).Labels.severity }}"
+
+  - name: "victorops-critical"
+    victorops_configs:
+      - api_key: "${VICTOROPS_API_KEY}"
+        api_url: "https://alert.victorops.com/integrations/0OMF575/summary"
+        state: "{{ if eq .Status \"firing\" }}CRITICAL{{ else }}RECOVERY{{ end }}"
+        message: '{{ .GroupLabels.alertname }}: {{ (index .Alerts 0).Annotations.summary }}'
+        entity_display_name: "soroban-pulse-{{ (index .Alerts 0).Labels.component }}"
+        monitoring_tool: "Prometheus"
+
 inhibit_rules:
   - source_match:
       severity: critical
