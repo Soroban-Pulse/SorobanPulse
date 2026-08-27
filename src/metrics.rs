@@ -977,6 +977,28 @@ pub fn record_batch_config_updated() {
     m::counter!("soroban_pulse_batch_config_updates_total").increment(1);
 }
 
+// ── Issue #885: Conditional Request Handling ────────────────────────────
+
+/// Record a 304 Not Modified response (bandwidth saved).
+pub fn record_conditional_get_304() {
+    m::counter!("soroban_pulse_conditional_get_304_total").increment(1);
+}
+
+/// Record bandwidth savings from conditional GETs.
+pub fn record_conditional_get_bandwidth_saved(bytes: u64) {
+    m::counter!("soroban_pulse_conditional_get_bandwidth_saved_bytes_total").increment(bytes);
+}
+
+/// Record ETag cache hit.
+pub fn record_etag_cache_hit() {
+    m::counter!("soroban_pulse_etag_cache_hits_total").increment(1);
+}
+
+/// Record ETag cache miss.
+pub fn record_etag_cache_miss() {
+    m::counter!("soroban_pulse_etag_cache_misses_total").increment(1);
+}
+
 // ── Issue #884: Subscription Pause/Resume ────────────────────────────────
 
 /// Record subscription pause event.
