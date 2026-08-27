@@ -46,6 +46,8 @@ See [docs/schema.md](docs/schema.md) for a detailed description of the database 
 ## Documentation
 
 - [Developer onboarding guide](docs/onboarding.md) — start here if you're new: a day-1 checklist and fixes for the most common first-build issues.
+- [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
+- [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
 - [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, common patterns, and anti-patterns.
 - [Contract event schemas](docs/contract-event-schemas.md) documents Stellar contract event patterns, XDR encoding, event data types, examples, and validation rules.
 - [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.

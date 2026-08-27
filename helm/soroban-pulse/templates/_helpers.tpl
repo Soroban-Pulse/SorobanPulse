@@ -37,3 +37,14 @@ Selector labels
 app.kubernetes.io/name: {{ include "soroban-pulse.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
+
+{{/*
+Create or reference the workload ServiceAccount.
+*/}}
+{{- define "soroban-pulse.serviceAccountName" -}}
+{{- if .Values.serviceAccount.create }}
+{{- default (include "soroban-pulse.fullname" .) .Values.serviceAccount.name }}
+{{- else }}
+{{- default "default" .Values.serviceAccount.name }}
+{{- end }}
+{{- end }}
