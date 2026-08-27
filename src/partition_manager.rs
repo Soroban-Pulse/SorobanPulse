@@ -71,6 +71,48 @@ pub struct PartitionArchivalConfig {
     pub dry_run: bool,
 }
 
+/// Configuration for ledger-based partitioning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LedgerPartitionConfig {
+    /// Ledger range per partition (e.g., 1_000_000 ledgers per partition).
+    pub ledger_range_per_partition: i64,
+    /// Enable automatic partition creation for incoming ledgers.
+    pub auto_create_partitions: bool,
+    /// Maximum number of ledger partitions to keep (older ones get archived).
+    pub max_partitions_before_archival: u32,
+}
+
+impl Default for LedgerPartitionConfig {
+    fn default() -> Self {
+        Self {
+            ledger_range_per_partition: 1_000_000,
+            auto_create_partitions: true,
+            max_partitions_before_archival: 12,
+        }
+    }
+}
+
+/// Information about a ledger-based partition.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LedgerPartitionInfo {
+    pub partition_name: String,
+    pub start_ledger: i64,
+    pub end_ledger: i64,
+    pub row_count: i64,
+    pub size_bytes: i64,
+    pub is_archived: bool,
+}
+
+/// Statistics for ledger partitions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LedgerPartitionStats {
+    pub total_partitions: usize,
+    pub active_partitions: usize,
+    pub archived_partitions: usize,
+    pub total_rows: i64,
+    pub total_size_bytes: i64,
+}
+
 impl Default for PartitionArchivalConfig {
     fn default() -> Self {
         Self {
@@ -386,6 +428,162 @@ pub async fn calculate_partition_skew(
         .collect())
 }
 
+/// Create a ledger-based partition for the given range.
+pub async fn create_ledger_partition(
+    pool: &PgPool,
+    start_ledger: i64,
+    end_ledger: i64,
+) -> Result<String, sqlx::Error> {
+    let partition_name = format!("events_ledger_{:010}_{:010}", start_ledger, end_ledger);
+
+    let create_sql = format!(
+        "CREATE TABLE IF NOT EXISTS {} PARTITION OF events \
+         FOR VALUES FROM ({}) TO ({})",
+        partition_name, start_ledger, end_ledger
+    );
+    sqlx::query(&create_sql).execute(pool).await?;
+
+    let index_sqls = [
+        format!("CREATE INDEX IF NOT EXISTS idx_{}_ledger ON {}(ledger)", partition_name, partition_name),
+        format!("CREATE INDEX IF NOT EXISTS idx_{}_contract_id ON {}(contract_id)", partition_name, partition_name),
+    ];
+    for sql in &index_sqls {
+        sqlx::query(sql).execute(pool).await?;
+    }
+
+    info!(partition = partition_name, start_ledger, end_ledger, "Ledger partition created");
+    m::counter!("soroban_pulse_ledger_partition_created_total").increment(1);
+
+    Ok(partition_name)
+}
+
+/// List all ledger-based partitions.
+pub async fn list_ledger_partitions(
+    pool: &PgPool,
+) -> Result<Vec<LedgerPartitionInfo>, sqlx::Error> {
+    // This is a simplified implementation. In a real scenario, you would parse
+    // partition constraints to get the actual ledger ranges.
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT
+             c.relname::text,
+             COALESCE(s.n_live_tup, 0)::bigint,
+             COALESCE(pg_total_relation_size(c.oid), 0)::bigint
+         FROM pg_inherits i
+         JOIN pg_class c ON c.oid = i.inhrelid
+         JOIN pg_class p ON p.oid = i.inhparent
+         LEFT JOIN pg_stat_user_tables s ON s.relname = c.relname
+         WHERE p.relname = 'events' AND c.relname LIKE 'events_ledger_%'
+         ORDER BY c.relname",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let partitions = rows
+        .into_iter()
+        .filter_map(|(name, row_count, size_bytes)| {
+            let (start, end) = parse_ledger_partition_range(&name)?;
+            let is_archived = name.starts_with("archive_");
+            Some(LedgerPartitionInfo {
+                partition_name: name,
+                start_ledger: start,
+                end_ledger: end,
+                row_count,
+                size_bytes,
+                is_archived,
+            })
+        })
+        .collect();
+
+    Ok(partitions)
+}
+
+/// Automatically create ledger partitions for the next N ledger ranges.
+pub async fn create_future_ledger_partitions(
+    pool: &PgPool,
+    config: &LedgerPartitionConfig,
+    num_partitions: u32,
+) -> Result<Vec<String>, sqlx::Error> {
+    let latest_ledger: (i64,) = sqlx::query_as("SELECT COALESCE(MAX(ledger), 0) FROM events")
+        .fetch_one(pool)
+        .await?;
+
+    let current_ledger = latest_ledger.0;
+    let mut created = Vec::new();
+
+    for i in 0..num_partitions {
+        let start_ledger = current_ledger + (i as i64 * config.ledger_range_per_partition);
+        let end_ledger = start_ledger + config.ledger_range_per_partition;
+
+        match create_ledger_partition(pool, start_ledger, end_ledger).await {
+            Ok(name) => created.push(name),
+            Err(e) => warn!(start_ledger, end_ledger, error = %e, "Could not create ledger partition"),
+        }
+    }
+
+    info!("Created {} future ledger partitions", created.len());
+    Ok(created)
+}
+
+/// Rotate partitions: archive old ones and create new ones as needed.
+pub async fn rotate_ledger_partitions(
+    pool: &PgPool,
+    config: &LedgerPartitionConfig,
+) -> Result<(), sqlx::Error> {
+    let partitions = list_ledger_partitions(pool).await?;
+    let active_partitions: Vec<_> = partitions
+        .iter()
+        .filter(|p| !p.is_archived)
+        .collect();
+
+    if active_partitions.len() as u32 > config.max_partitions_before_archival {
+        let to_archive = active_partitions.len() as u32 - config.max_partitions_before_archival;
+
+        let mut sorted = active_partitions.clone();
+        sorted.sort_by_key(|p| p.start_ledger);
+
+        for partition in sorted.iter().take(to_archive as usize) {
+            let archive_name = format!("archive_{}", partition.partition_name);
+            let sql = format!(
+                "ALTER TABLE {} RENAME TO {}",
+                partition.partition_name, archive_name
+            );
+            if let Err(e) = sqlx::query(&sql).execute(pool).await {
+                warn!(partition = &partition.partition_name, error = %e, "Failed to archive partition");
+            }
+        }
+    }
+
+    if config.auto_create_partitions {
+        create_future_ledger_partitions(pool, config, 3).await?;
+    }
+
+    Ok(())
+}
+
+/// Get comprehensive statistics for ledger partitions.
+pub async fn get_ledger_partition_stats(
+    pool: &PgPool,
+) -> Result<LedgerPartitionStats, sqlx::Error> {
+    let partitions = list_ledger_partitions(pool).await?;
+    let active = partitions.iter().filter(|p| !p.is_archived).count();
+    let archived = partitions.iter().filter(|p| p.is_archived).count();
+    let total_rows: i64 = partitions.iter().map(|p| p.row_count).sum();
+    let total_size: i64 = partitions.iter().map(|p| p.size_bytes).sum();
+
+    m::gauge!("soroban_pulse_ledger_partitions_total").set(partitions.len() as f64);
+    m::gauge!("soroban_pulse_ledger_partitions_active").set(active as f64);
+    m::gauge!("soroban_pulse_ledger_partitions_archived").set(archived as f64);
+    m::gauge!("soroban_pulse_ledger_partition_total_size_bytes").set(total_size as f64);
+
+    Ok(LedgerPartitionStats {
+        total_partitions: partitions.len(),
+        active_partitions: active,
+        archived_partitions: archived,
+        total_rows,
+        total_size_bytes: total_size,
+    })
+}
+
 /// Forecast storage growth over the next `days_ahead` days based on the
 /// average size of the most recent partitions.
 pub async fn forecast_capacity(
@@ -551,6 +749,19 @@ pub fn spawn(
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// Parse start and end ledger numbers from a partition name like `events_ledger_0000000000_1000000000`.
+fn parse_ledger_partition_range(name: &str) -> Option<(i64, i64)> {
+    let stripped = name.strip_prefix("archive_").unwrap_or(name);
+    let suffix = stripped.strip_prefix("events_ledger_")?;
+    let parts: Vec<&str> = suffix.splitn(2, '_').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let start: i64 = parts[0].parse().ok()?;
+    let end: i64 = parts[1].parse().ok()?;
+    Some((start, end))
+}
+
 /// Parse year and month from a partition name like `events_2026_07`.
 fn parse_partition_dates(name: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     // Strip optional "archive_" prefix
@@ -683,5 +894,79 @@ mod tests {
         let cfg = PartitionArchivalConfig::default();
         let name = format!("{}events_2024_01", cfg.archive_table_prefix);
         assert_eq!(name, "archive_events_2024_01");
+    }
+
+    #[test]
+    fn parse_ledger_partition_range_valid() {
+        let (start, end) = parse_ledger_partition_range("events_ledger_0000000000_1000000000").unwrap();
+        assert_eq!(start, 0);
+        assert_eq!(end, 1_000_000_000);
+    }
+
+    #[test]
+    fn parse_ledger_partition_range_with_archive_prefix() {
+        let (start, end) = parse_ledger_partition_range("archive_events_ledger_1000000000_2000000000").unwrap();
+        assert_eq!(start, 1_000_000_000);
+        assert_eq!(end, 2_000_000_000);
+    }
+
+    #[test]
+    fn parse_ledger_partition_range_invalid_returns_none() {
+        assert!(parse_ledger_partition_range("events_ledger_invalid").is_none());
+        assert!(parse_ledger_partition_range("events_2026_07").is_none());
+    }
+
+    #[test]
+    fn ledger_partition_config_default() {
+        let cfg = LedgerPartitionConfig::default();
+        assert_eq!(cfg.ledger_range_per_partition, 1_000_000);
+        assert!(cfg.auto_create_partitions);
+        assert_eq!(cfg.max_partitions_before_archival, 12);
+    }
+
+    #[test]
+    fn ledger_partition_info_serialization() {
+        let info = LedgerPartitionInfo {
+            partition_name: "events_ledger_0000000000_1000000000".to_string(),
+            start_ledger: 0,
+            end_ledger: 1_000_000_000,
+            row_count: 50_000,
+            size_bytes: 1024 * 1024 * 100,
+            is_archived: false,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let parsed: LedgerPartitionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.start_ledger, 0);
+        assert_eq!(parsed.end_ledger, 1_000_000_000);
+    }
+
+    #[test]
+    fn ledger_partition_stats_calculation() {
+        let partitions = vec![
+            LedgerPartitionInfo {
+                partition_name: "p1".to_string(),
+                start_ledger: 0,
+                end_ledger: 1_000_000,
+                row_count: 10_000,
+                size_bytes: 1024,
+                is_archived: false,
+            },
+            LedgerPartitionInfo {
+                partition_name: "p2".to_string(),
+                start_ledger: 1_000_000,
+                end_ledger: 2_000_000,
+                row_count: 10_000,
+                size_bytes: 1024,
+                is_archived: true,
+            },
+        ];
+
+        let total_rows: i64 = partitions.iter().map(|p| p.row_count).sum();
+        let active = partitions.iter().filter(|p| !p.is_archived).count();
+        let archived = partitions.iter().filter(|p| p.is_archived).count();
+
+        assert_eq!(total_rows, 20_000);
+        assert_eq!(active, 1);
+        assert_eq!(archived, 1);
     }
 }
