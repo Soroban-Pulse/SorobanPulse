@@ -1,3 +1,5 @@
+//! See docs/adr/0004-event-compression.md for the design rationale.
+
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde_json::Value;
 use sqlx::PgPool;

@@ -8,6 +8,11 @@ notes.
 > reverse proxy or load balancer.  See [docs/deployment.md](deployment.md) for
 > nginx, Caddy, and AWS ALB termination options.
 
+> **Provisioning your own VM/network layer instead?** This guide covers
+> managed/serverless platforms only.  For full VM/infrastructure-level
+> runbooks (EC2/RDS/ALB, Compute Engine/Cloud SQL, Azure VMs/App Gateway,
+> self-hosted) see [docs/deployment-runbooks/README.md](deployment-runbooks/README.md).
+
 ---
 
 ## Table of Contents
