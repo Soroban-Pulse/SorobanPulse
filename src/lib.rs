@@ -73,3 +73,5 @@ pub mod zero_trust;
 pub mod cloud_provider;
 pub mod cloud_replication;
 pub mod deployment_orchestrator;
+pub mod saas_platform;
+pub mod ml_integration;

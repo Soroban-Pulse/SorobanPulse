@@ -448,6 +448,34 @@ pub struct Config {
     pub kafka_batch_size: usize,
     /// Kafka producer linger time in milliseconds (default: 100ms).
     pub kafka_linger_ms: u64,
+
+    // Issue #841: SaaS Platform & Multi-Tenant Hosting
+    /// Enable SaaS platform features including tenant management and billing integration
+    pub saas_enabled: bool,
+    /// Billing system integration (stripe, paddle, etc.)
+    pub billing_provider: Option<String>,
+    /// Billing system API key
+    pub billing_api_key: Option<String>,
+    /// Default trial period in days for new tenants
+    pub default_trial_days: i32,
+    /// Public base URL for tenant onboarding (e.g., https://pulse.example.com)
+    pub saas_public_base_url: Option<String>,
+
+    // Issue #842: AI/ML Integration & Intelligence Features
+    /// Enable ML-based anomaly detection
+    pub ml_anomaly_detection_enabled: bool,
+    /// Enable pattern recognition
+    pub ml_pattern_recognition_enabled: bool,
+    /// Enable intelligent event filtering
+    pub ml_intelligent_filtering_enabled: bool,
+    /// ML model training interval in hours
+    pub ml_model_training_interval_hours: u64,
+    /// Minimum samples required for ML model training
+    pub ml_min_training_samples: i64,
+    /// ML model confidence threshold (0.0 to 1.0)
+    pub ml_confidence_threshold: f64,
+    /// Enable automatic model retraining
+    pub ml_auto_retrain: bool,
 }
 
 impl Default for Config {
@@ -605,6 +633,18 @@ impl Default for Config {
             kafka_topic: None,
             kafka_batch_size: 16384,
             kafka_linger_ms: 100,
+            saas_enabled: false,
+            billing_provider: None,
+            billing_api_key: None,
+            default_trial_days: 14,
+            saas_public_base_url: None,
+            ml_anomaly_detection_enabled: false,
+            ml_pattern_recognition_enabled: false,
+            ml_intelligent_filtering_enabled: false,
+            ml_model_training_interval_hours: 24,
+            ml_min_training_samples: 100,
+            ml_confidence_threshold: 0.8,
+            ml_auto_retrain: true,
         }
     }
 }
@@ -1648,6 +1688,38 @@ impl Config {
             kafka_linger_ms: env_or_file("KAFKA_LINGER_MS", &file)
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100),
+            // Issue #841: SaaS Platform
+            saas_enabled: env_or_file("SAAS_ENABLED", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
+                .unwrap_or(false),
+            billing_provider: env_or_file("BILLING_PROVIDER", &file),
+            billing_api_key: env_or_file("BILLING_API_KEY", &file),
+            default_trial_days: env_or_file("DEFAULT_TRIAL_DAYS", &file)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(14),
+            saas_public_base_url: env_or_file("SAAS_PUBLIC_BASE_URL", &file),
+            // Issue #842: ML Integration
+            ml_anomaly_detection_enabled: env_or_file("ML_ANOMALY_DETECTION_ENABLED", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
+                .unwrap_or(false),
+            ml_pattern_recognition_enabled: env_or_file("ML_PATTERN_RECOGNITION_ENABLED", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
+                .unwrap_or(false),
+            ml_intelligent_filtering_enabled: env_or_file("ML_INTELLIGENT_FILTERING_ENABLED", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
+                .unwrap_or(false),
+            ml_model_training_interval_hours: env_or_file("ML_MODEL_TRAINING_INTERVAL_HOURS", &file)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(24),
+            ml_min_training_samples: env_or_file("ML_MIN_TRAINING_SAMPLES", &file)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(100),
+            ml_confidence_threshold: env_or_file("ML_CONFIDENCE_THRESHOLD", &file)
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.8),
+            ml_auto_retrain: env_or_file("ML_AUTO_RETRAIN", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
+                .unwrap_or(true),
         }
     }
 }
