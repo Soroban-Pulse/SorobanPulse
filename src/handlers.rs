@@ -15114,3 +15114,131 @@ pub async fn get_rate_limit_status(
 
     Ok(Json(serde_json::to_value(&status).unwrap()))
 }
+
+// ── Issue #879: Webhook Circuit Breaker Admin Endpoints ─────────────────────
+
+/// GET /v1/admin/webhook/circuit-breaker
+/// Get circuit breaker stats for all webhook endpoints
+pub async fn get_circuit_breaker_stats(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>> {
+    let stats = state.circuit_breaker_manager.get_all_stats().await;
+    Json(stats)
+}
+
+/// GET /v1/admin/webhook/circuit-breaker/{endpoint}
+/// Get circuit breaker stats for a specific endpoint
+pub async fn get_endpoint_circuit_breaker_stats(
+    State(state): State<AppState>,
+    Path(endpoint): Path<String>,
+) -> Result<Json<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>, AppError> {
+    let stats = state.circuit_breaker_manager.get_stats(&endpoint).await
+        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    Ok(Json(stats))
+}
+
+/// POST /v1/admin/webhook/circuit-breaker/{endpoint}/reset
+/// Manually reset a circuit breaker for a specific endpoint
+pub async fn reset_circuit_breaker(
+    State(state): State<AppState>,
+    Path(endpoint): Path<String>,
+) -> Json<serde_json::Value> {
+    state.circuit_breaker_manager.reset(&endpoint).await;
+    Json(json!({
+        "status": "reset",
+        "endpoint": endpoint,
+    }))
+}
+
+// ── Issue #881: Bulk Event Export Endpoints ────────────────────────────────
+
+/// POST /v1/admin/events/export
+/// Start a new bulk event export with specified format and compression
+pub async fn start_event_export(
+    State(state): State<AppState>,
+    Json(request): Json<crate::bulk_export::ExportRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let job_id = state.bulk_export_manager.start_export(&state.pool, request).await
+        .map_err(|e| AppError::Internal(e))?;
+
+    Ok(Json(json!({
+        "job_id": job_id,
+        "status": "pending",
+    })))
+}
+
+/// GET /v1/admin/events/export/{job_id}
+/// Get status of an export job
+pub async fn get_export_job_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<crate::bulk_export::ExportJob>, AppError> {
+    let job = state.bulk_export_manager.get_job_status(&job_id).await
+        .map_err(|e| AppError::NotFound(e))?;
+
+    Ok(Json(job))
+}
+
+/// GET /v1/admin/events/export
+/// List all export jobs
+pub async fn list_export_jobs(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::bulk_export::ExportJob>> {
+    let jobs = state.bulk_export_manager.get_all_jobs().await;
+    Json(jobs)
+}
+
+/// GET /v1/admin/events/export/{job_id}/download
+/// Download the exported file (with streaming)
+pub async fn download_export_file(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let job = state.bulk_export_manager.get_job_status(&job_id).await
+        .map_err(|e| AppError::NotFound(e))?;
+
+    if job.status != crate::bulk_export::ExportStatus::Completed {
+        return Err(AppError::BadRequest(
+            format!("Export job {} is not completed", job_id)
+        ));
+    }
+
+    let file_path = job.file_path.ok_or_else(|| {
+        AppError::Internal("Export file path not found".to_string())
+    })?;
+
+    if !file_path.exists() {
+        return Err(AppError::NotFound("Export file not found".to_string()));
+    }
+
+    let file = tokio::fs::File::open(file_path).await
+        .map_err(|e| AppError::Internal(format!("Failed to open export file: {}", e)))?;
+
+    let stream = tokio::io::BufReader::new(file);
+    let body = axum::body::Body::from_stream(
+        tokio_util::io::ReaderStream::new(stream)
+    );
+
+    Ok((
+        axum::http::StatusCode::OK,
+        axum::response::AppendHeaders([(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"export-{}.dat\"", job_id)
+        )]),
+        body,
+    ))
+}
+
+/// POST /v1/admin/events/export/cleanup
+/// Clean up expired export files
+pub async fn cleanup_export_files(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let removed = state.bulk_export_manager.cleanup_expired().await
+        .map_err(|e| AppError::Internal(e))?;
+
+    Ok(Json(json!({
+        "status": "cleaned",
+        "removed_jobs": removed,
+    })))
+}
