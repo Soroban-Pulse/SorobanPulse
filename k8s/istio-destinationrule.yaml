@@ -1,0 +1,79 @@
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: soroban-pulse-dr
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  host: soroban-pulse-service
+  
+  # Traffic policy for all subsets
+  trafficPolicy:
+    # Connection pool settings
+    connectionPool:
+      tcp:
+        maxConnections: 1000
+        connectTimeout: 10s
+        tcpKeepalive:
+          time: 7200s
+          interval: 75s
+      http:
+        http1MaxPendingRequests: 1024
+        http2MaxRequests: 1024
+        maxRequestsPerConnection: 10
+        maxRetries: 3
+        idleTimeout: 3600s
+        h2UpgradePolicy: UPGRADE
+    
+    # Load balancing
+    loadBalancer:
+      consistentHash:
+        httpHeaderName: x-user-id  # Session affinity
+      # Alternative: simple: ROUND_ROBIN
+    
+    # Outlier detection for circuit breaking
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+      minHealthPercent: 40
+      splitExternalLocalOriginErrors: true
+    
+    # TLS settings for secure communication
+    tls:
+      mode: ISTIO_MUTUAL  # mTLS between services
+      sni: soroban-pulse-service.default.svc.cluster.local
+  
+  # Subsets for canary deployments and versioning
+  subsets:
+  - name: v1
+    labels:
+      version: v1
+    trafficPolicy:
+      loadBalancer:
+        simple: ROUND_ROBIN
+  
+  - name: v2
+    labels:
+      version: v2
+    trafficPolicy:
+      loadBalancer:
+        simple: LEAST_REQUEST
+  
+  - name: canary
+    labels:
+      track: canary
+    trafficPolicy:
+      # More aggressive circuit breaking for canary
+      outlierDetection:
+        consecutive5xxErrors: 3
+        interval: 15s
+        baseEjectionTime: 60s
+  
+  - name: stable
+    labels:
+      track: stable

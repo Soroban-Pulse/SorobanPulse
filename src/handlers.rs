@@ -15115,216 +15115,130 @@ pub async fn get_rate_limit_status(
     Ok(Json(serde_json::to_value(&status).unwrap()))
 }
 
-// ── Issue #882: Anomaly Detection Alerting ───────────────────────────────────
+// ── Issue #879: Webhook Circuit Breaker Admin Endpoints ─────────────────────
 
-/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-config
-/// Create or update anomaly detection configuration for a subscription.
-#[utoipa::path(
-    post,
-    path = "/v1/admin/subscriptions/{subscription_id}/anomaly-config",
-    tag = "admin",
-    params(
-        ("subscription_id" = Uuid, Path, description = "Subscription ID"),
-    ),
-    request_body = Option<crate::anomaly_detection::CreateAnomalyDetectionRequest>,
-    responses(
-        (status = 201, description = "Anomaly detection configuration created"),
-        (status = 400, description = "Invalid request"),
-        (status = 404, description = "Subscription not found"),
-        (status = 500, description = "Internal server error"),
-    ),
-    security(("api_key" = []))
-)]
-pub async fn create_anomaly_config(
+/// GET /v1/admin/webhook/circuit-breaker
+/// Get circuit breaker stats for all webhook endpoints
+pub async fn get_circuit_breaker_stats(
     State(state): State<AppState>,
-    Path(subscription_id): Path<Uuid>,
-    Json(req): Json<crate::anomaly_detection::CreateAnomalyDetectionRequest>,
-) -> Result<(StatusCode, Json<Value>), AppError> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id = $1)"
-    )
-    .bind(subscription_id)
-    .fetch_one(&state.pool)
-    .await?;
+) -> Json<Vec<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>> {
+    let stats = state.circuit_breaker_manager.get_all_stats().await;
+    Json(stats)
+}
 
-    if !exists {
-        return Err(AppError::NotFound);
-    }
+/// GET /v1/admin/webhook/circuit-breaker/{endpoint}
+/// Get circuit breaker stats for a specific endpoint
+pub async fn get_endpoint_circuit_breaker_stats(
+    State(state): State<AppState>,
+    Path(endpoint): Path<String>,
+) -> Result<Json<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>, AppError> {
+    let stats = state.circuit_breaker_manager.get_stats(&endpoint).await
+        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    Ok(Json(stats))
+}
 
-    let training_window_days = req.training_window_days.unwrap_or(30);
-    if training_window_days < 7 || training_window_days > 365 {
-        return Err(AppError::Validation(
-            "training_window_days must be between 7 and 365".into()
+/// POST /v1/admin/webhook/circuit-breaker/{endpoint}/reset
+/// Manually reset a circuit breaker for a specific endpoint
+pub async fn reset_circuit_breaker(
+    State(state): State<AppState>,
+    Path(endpoint): Path<String>,
+) -> Json<serde_json::Value> {
+    state.circuit_breaker_manager.reset(&endpoint).await;
+    Json(json!({
+        "status": "reset",
+        "endpoint": endpoint,
+    }))
+}
+
+// ── Issue #881: Bulk Event Export Endpoints ────────────────────────────────
+
+/// POST /v1/admin/events/export
+/// Start a new bulk event export with specified format and compression
+pub async fn start_event_export(
+    State(state): State<AppState>,
+    Json(request): Json<crate::bulk_export::ExportRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let job_id = state.bulk_export_manager.start_export(&state.pool, request).await
+        .map_err(|e| AppError::Internal(e))?;
+
+    Ok(Json(json!({
+        "job_id": job_id,
+        "status": "pending",
+    })))
+}
+
+/// GET /v1/admin/events/export/{job_id}
+/// Get status of an export job
+pub async fn get_export_job_status(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<crate::bulk_export::ExportJob>, AppError> {
+    let job = state.bulk_export_manager.get_job_status(&job_id).await
+        .map_err(|e| AppError::NotFound(e))?;
+
+    Ok(Json(job))
+}
+
+/// GET /v1/admin/events/export
+/// List all export jobs
+pub async fn list_export_jobs(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::bulk_export::ExportJob>> {
+    let jobs = state.bulk_export_manager.get_all_jobs().await;
+    Json(jobs)
+}
+
+/// GET /v1/admin/events/export/{job_id}/download
+/// Download the exported file (with streaming)
+pub async fn download_export_file(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let job = state.bulk_export_manager.get_job_status(&job_id).await
+        .map_err(|e| AppError::NotFound(e))?;
+
+    if job.status != crate::bulk_export::ExportStatus::Completed {
+        return Err(AppError::BadRequest(
+            format!("Export job {} is not completed", job_id)
         ));
     }
 
-    let baseline = crate::anomaly_detection::calculate_baseline(
-        &state.pool,
-        subscription_id,
-        &req.metric_name,
-        training_window_days,
-    )
-    .await
-    .map_err(|e| AppError::Internal(e))?;
+    let file_path = job.file_path.ok_or_else(|| {
+        AppError::Internal("Export file path not found".to_string())
+    })?;
 
-    tracing::info!(
-        subscription_id = %subscription_id,
-        metric_name = %req.metric_name,
-        "Anomaly detection configuration created"
+    if !file_path.exists() {
+        return Err(AppError::NotFound("Export file not found".to_string()));
+    }
+
+    let file = tokio::fs::File::open(file_path).await
+        .map_err(|e| AppError::Internal(format!("Failed to open export file: {}", e)))?;
+
+    let stream = tokio::io::BufReader::new(file);
+    let body = axum::body::Body::from_stream(
+        tokio_util::io::ReaderStream::new(stream)
     );
 
-    crate::metrics::record_anomaly_detection_configured(1);
-
-    Ok((StatusCode::CREATED, Json(json!({
-        "baseline_id": baseline.id,
-        "subscription_id": baseline.subscription_id,
-        "metric_name": baseline.metric_name,
-        "mean": baseline.mean,
-        "std_dev": baseline.std_dev,
-        "sample_count": baseline.sample_count,
-        "training_window_days": baseline.training_window_days,
-    }))))
+    Ok((
+        axum::http::StatusCode::OK,
+        axum::response::AppendHeaders([(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"export-{}.dat\"", job_id)
+        )]),
+        body,
+    ))
 }
 
-/// GET /v1/admin/subscriptions/{subscription_id}/anomaly-alerts
-/// Retrieve anomaly alerts for a subscription.
-#[utoipa::path(
-    get,
-    path = "/v1/admin/subscriptions/{subscription_id}/anomaly-alerts",
-    tag = "admin",
-    params(
-        ("subscription_id" = Uuid, Path, description = "Subscription ID"),
-        ("limit" = Option<i64>, Query, description = "Max results (default 100)"),
-        ("severity" = Option<String>, Query, description = "Filter by severity: low, medium, high, critical"),
-    ),
-    responses(
-        (status = 200, description = "List of anomaly alerts"),
-        (status = 404, description = "Subscription not found"),
-        (status = 500, description = "Internal server error"),
-    ),
-    security(("api_key" = []))
-)]
-pub async fn get_anomaly_alerts(
+/// POST /v1/admin/events/export/cleanup
+/// Clean up expired export files
+pub async fn cleanup_export_files(
     State(state): State<AppState>,
-    Path(subscription_id): Path<Uuid>,
-    Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-) -> Result<Json<Value>, AppError> {
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM subscriptions WHERE id = $1)"
-    )
-    .bind(subscription_id)
-    .fetch_one(&state.pool)
-    .await?;
-
-    if !exists {
-        return Err(AppError::NotFound);
-    }
-
-    let limit = params.get("limit")
-        .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or(100)
-        .min(1000);
-
-    let severity_filter = params.get("severity").map(|s| s.as_str());
-
-    let alerts = if let Some(sev) = severity_filter {
-        sqlx::query_as::<_, crate::anomaly_detection::AnomalyAlert>(
-            "SELECT id, subscription_id, event_id, metric_name, metric_value, '(0,0)' as expected_range,
-                    detection_method, anomaly_score, severity, alerting_enabled, acknowledged, acknowledged_at, created_at
-             FROM anomaly_alerts
-             WHERE subscription_id = $1 AND severity = $2
-             ORDER BY created_at DESC
-             LIMIT $3"
-        )
-        .bind(subscription_id)
-        .bind(sev)
-        .bind(limit)
-        .fetch_all(&state.pool)
-        .await?
-    } else {
-        sqlx::query_as::<_, crate::anomaly_detection::AnomalyAlert>(
-            "SELECT id, subscription_id, event_id, metric_name, metric_value, '(0,0)' as expected_range,
-                    detection_method, anomaly_score, severity, alerting_enabled, acknowledged, acknowledged_at, created_at
-             FROM anomaly_alerts
-             WHERE subscription_id = $1
-             ORDER BY created_at DESC
-             LIMIT $2"
-        )
-        .bind(subscription_id)
-        .bind(limit)
-        .fetch_all(&state.pool)
-        .await?
-    };
-
-    crate::metrics::record_anomaly_alerts_queried(alerts.len() as u64);
+) -> Result<Json<serde_json::Value>, AppError> {
+    let removed = state.bulk_export_manager.cleanup_expired().await
+        .map_err(|e| AppError::Internal(e))?;
 
     Ok(Json(json!({
-        "subscription_id": subscription_id,
-        "count": alerts.len(),
-        "alerts": alerts,
+        "status": "cleaned",
+        "removed_jobs": removed,
     })))
-}
-
-/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge
-/// Acknowledge an anomaly alert.
-#[utoipa::path(
-    post,
-    path = "/v1/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge",
-    tag = "admin",
-    params(
-        ("subscription_id" = Uuid, Path, description = "Subscription ID"),
-        ("alert_id" = Uuid, Path, description = "Alert ID"),
-    ),
-    request_body = Option<crate::anomaly_detection::AcknowledgeAnomalyRequest>,
-    responses(
-        (status = 200, description = "Alert acknowledged"),
-        (status = 404, description = "Alert not found"),
-        (status = 500, description = "Internal server error"),
-    ),
-    security(("api_key" = []))
-)]
-pub async fn acknowledge_anomaly_alert(
-    State(state): State<AppState>,
-    Path((subscription_id, alert_id)): Path<(Uuid, Uuid)>,
-    Json(req): Json<Option<crate::anomaly_detection::AcknowledgeAnomalyRequest>>,
-) -> Result<Json<Value>, AppError> {
-    let rows = sqlx::query(
-        "UPDATE anomaly_alerts
-         SET acknowledged = true, acknowledged_at = NOW()
-         WHERE id = $1 AND subscription_id = $2"
-    )
-    .bind(alert_id)
-    .bind(subscription_id)
-    .execute(&state.pool)
-    .await?
-    .rows_affected();
-
-    if rows == 0 {
-        return Err(AppError::NotFound);
-    }
-
-    let notes = req.and_then(|r| r.notes);
-    if let Some(note) = notes.as_ref() {
-        let _ = sqlx::query(
-            "INSERT INTO anomaly_alert_feedback (id, alert_id, feedback, notes, created_at)
-             VALUES ($1, $2, $3, $4, $5)"
-        )
-        .bind(Uuid::new_v4())
-        .bind(alert_id)
-        .bind("acknowledged")
-        .bind(note)
-        .bind(chrono::Utc::now())
-        .execute(&state.pool)
-        .await;
-    }
-
-    tracing::info!(alert_id = %alert_id, "Anomaly alert acknowledged");
-    crate::metrics::record_anomaly_alert_acknowledged();
-
-    Ok(Json(json!({
-        "alert_id": alert_id,
-        "acknowledged": true,
-        "notes": notes,
-    })))
-}
 }

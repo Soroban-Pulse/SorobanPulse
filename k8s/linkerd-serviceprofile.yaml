@@ -1,0 +1,95 @@
+---
+apiVersion: linkerd.io/v1alpha2
+kind: ServiceProfile
+metadata:
+  name: soroban-pulse-service.default.svc.cluster.local
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  # Route definitions for better observability and traffic management
+  routes:
+  # Health check endpoints
+  - name: health
+    condition:
+      method: GET
+      pathRegex: /health
+    timeout: 5s
+    isRetryable: false
+  
+  - name: readiness
+    condition:
+      method: GET
+      pathRegex: /ready
+    timeout: 5s
+    isRetryable: false
+  
+  # API v1 routes with retries
+  - name: get_ledger
+    condition:
+      method: GET
+      pathRegex: /api/v1/ledgers/.*
+    timeout: 10s
+    isRetryable: true
+    responseClasses:
+    - condition:
+        status:
+          min: 500
+          max: 599
+      isFailure: true
+  
+  - name: get_transaction
+    condition:
+      method: GET
+      pathRegex: /api/v1/transactions/.*
+    timeout: 10s
+    isRetryable: true
+  
+  - name: list_events
+    condition:
+      method: GET
+      pathRegex: /api/v1/events
+    timeout: 30s
+    isRetryable: true
+  
+  - name: stream_events
+    condition:
+      method: GET
+      pathRegex: /api/v1/events/stream
+    timeout: 0s  # No timeout for SSE
+    isRetryable: false
+  
+  - name: graphql
+    condition:
+      method: POST
+      pathRegex: /graphql
+    timeout: 60s
+    isRetryable: false  # Don't retry mutations
+  
+  - name: webhook_create
+    condition:
+      method: POST
+      pathRegex: /api/v1/webhooks
+    timeout: 15s
+    isRetryable: false
+  
+  - name: api_write_operations
+    condition:
+      method: POST|PUT|DELETE
+      pathRegex: /api/v1/.*
+    timeout: 30s
+    isRetryable: false
+  
+  # WebSocket connections
+  - name: websocket
+    condition:
+      pathRegex: /ws.*
+    timeout: 0s
+    isRetryable: false
+  
+  # Default retry budget
+  retryBudget:
+    retryRatio: 0.2  # Allow 20% retries
+    minRetriesPerSecond: 10
+    ttl: 10s

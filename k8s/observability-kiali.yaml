@@ -1,0 +1,266 @@
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kiali
+  namespace: observability
+  labels:
+    app: kiali
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kiali
+  labels:
+    app: kiali
+rules:
+- apiGroups: [""]
+  resources:
+  - configmaps
+  - endpoints
+  - namespaces
+  - nodes
+  - pods
+  - pods/log
+  - replicationcontrollers
+  - services
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["extensions", "apps"]
+  resources:
+  - deployments
+  - replicasets
+  - statefulsets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["autoscaling"]
+  resources:
+  - horizontalpodautoscalers
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["batch"]
+  resources:
+  - cronjobs
+  - jobs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups: ["networking.istio.io"]
+  resources:
+  - destinationrules
+  - gateways
+  - serviceentries
+  - virtualservices
+  - workloadentries
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+  - patch
+- apiGroups: ["security.istio.io"]
+  resources:
+  - authorizationpolicies
+  - peerauthentications
+  - requestauthentications
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - delete
+  - patch
+- apiGroups: ["policy.linkerd.io"]
+  resources:
+  - httproutes
+  - servers
+  - serverauthorizations
+  verbs:
+  - get
+  - list
+  - watch
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kiali
+  labels:
+    app: kiali
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kiali
+subjects:
+- kind: ServiceAccount
+  name: kiali
+  namespace: observability
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kiali
+  namespace: observability
+  labels:
+    app: kiali
+data:
+  config.yaml: |
+    auth:
+      strategy: anonymous
+    deployment:
+      accessible_namespaces:
+      - "**"
+    external_services:
+      custom_dashboards:
+        enabled: true
+      istio:
+        component_status:
+          enabled: true
+          components:
+          - app_label: istiod
+            is_core: true
+            namespace: istio-system
+          - app_label: istio-ingressgateway
+            is_core: true
+            namespace: istio-system
+      prometheus:
+        url: http://prometheus.monitoring.svc.cluster.local:9090
+      tracing:
+        enabled: true
+        in_cluster_url: http://jaeger-query.observability.svc.cluster.local:16686
+        use_grpc: true
+        url: https://jaeger.soroban-pulse.example.com
+      grafana:
+        enabled: true
+        in_cluster_url: http://grafana.monitoring.svc.cluster.local:3000
+        url: https://grafana.soroban-pulse.example.com
+    server:
+      web_root: /kiali
+      port: 20001
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiali
+  namespace: observability
+  labels:
+    app: kiali
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kiali
+  template:
+    metadata:
+      labels:
+        app: kiali
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      serviceAccountName: kiali
+      containers:
+      - name: kiali
+        image: quay.io/kiali/kiali:v1.77
+        imagePullPolicy: IfNotPresent
+        command:
+        - /opt/kiali/kiali
+        - -config
+        - /kiali-configuration/config.yaml
+        ports:
+        - name: api-port
+          containerPort: 20001
+        - name: http-metrics
+          containerPort: 9090
+        env:
+        - name: ACTIVE_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: kiali-configuration
+          mountPath: /kiali-configuration
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        readinessProbe:
+          httpGet:
+            path: /kiali/healthz
+            port: api-port
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 30
+        livenessProbe:
+          httpGet:
+            path: /kiali/healthz
+            port: api-port
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 30
+      volumes:
+      - name: kiali-configuration
+        configMap:
+          name: kiali
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kiali
+  namespace: observability
+  labels:
+    app: kiali
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    protocol: TCP
+    port: 20001
+    targetPort: api-port
+  - name: http-metrics
+    protocol: TCP
+    port: 9090
+  selector:
+    app: kiali
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kiali-ingress
+  namespace: observability
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  tls:
+  - hosts:
+    - kiali.soroban-pulse.example.com
+    secretName: kiali-tls
+  rules:
+  - host: kiali.soroban-pulse.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: kiali
+            port:
+              number: 20001
