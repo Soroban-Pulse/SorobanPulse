@@ -1,0 +1,68 @@
+---
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: soroban-pulse-mtls
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  selector:
+    matchLabels:
+      app: soroban-pulse
+  mtls:
+    mode: STRICT  # Enforce mTLS for all traffic
+  portLevelMtls:
+    8080:
+      mode: STRICT
+    50051:  # gRPC port
+      mode: STRICT
+
+---
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: soroban-pulse-authz
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  selector:
+    matchLabels:
+      app: soroban-pulse
+  action: ALLOW
+  rules:
+  # Allow health checks from anywhere
+  - to:
+    - operation:
+        paths:
+        - /health
+        - /ready
+        - /metrics
+  
+  # Allow API access with valid JWT
+  - to:
+    - operation:
+        paths:
+        - /api/*
+        - /graphql
+    when:
+    - key: request.auth.claims[iss]
+      values:
+      - "https://auth.soroban-pulse.example.com"
+  
+  # Allow internal service-to-service communication
+  - from:
+    - source:
+        principals:
+        - "cluster.local/ns/default/sa/soroban-pulse"
+        - "cluster.local/ns/monitoring/sa/prometheus"
+    to:
+    - operation:
+        methods:
+        - GET
+        - POST
+        - PUT
+        - DELETE

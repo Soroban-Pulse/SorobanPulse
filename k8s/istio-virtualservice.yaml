@@ -1,0 +1,111 @@
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: soroban-pulse-vs
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  hosts:
+  - "soroban-pulse.example.com"
+  - "api.soroban-pulse.example.com"
+  gateways:
+  - soroban-pulse-gateway
+  - mesh  # Allow internal mesh traffic
+  http:
+  # API v1 routing
+  - match:
+    - uri:
+        prefix: /api/v1/
+    route:
+    - destination:
+        host: soroban-pulse-service
+        port:
+          number: 8080
+        subset: v1
+      weight: 100
+    retries:
+      attempts: 3
+      perTryTimeout: 2s
+      retryOn: 5xx,reset,connect-failure,refused-stream
+    timeout: 30s
+    corsPolicy:
+      allowOrigins:
+      - regex: ".*"
+      allowMethods:
+      - GET
+      - POST
+      - PUT
+      - DELETE
+      - OPTIONS
+      allowHeaders:
+      - authorization
+      - content-type
+      - x-request-id
+      maxAge: "24h"
+  
+  # GraphQL endpoint with longer timeout
+  - match:
+    - uri:
+        prefix: /graphql
+    route:
+    - destination:
+        host: soroban-pulse-service
+        port:
+          number: 8080
+    timeout: 60s
+    retries:
+      attempts: 2
+      perTryTimeout: 30s
+  
+  # SSE (Server-Sent Events) with no timeout
+  - match:
+    - uri:
+        prefix: /api/v1/events/stream
+    route:
+    - destination:
+        host: soroban-pulse-service
+        port:
+          number: 8080
+    timeout: 0s  # No timeout for streaming
+  
+  # Health checks - direct routing without retries
+  - match:
+    - uri:
+        exact: /health
+    - uri:
+        exact: /ready
+    route:
+    - destination:
+        host: soroban-pulse-service
+        port:
+          number: 8080
+    timeout: 5s
+  
+  # WebSocket support
+  - match:
+    - uri:
+        prefix: /ws
+    route:
+    - destination:
+        host: soroban-pulse-service
+        port:
+          number: 8080
+    timeout: 0s
+    websocketUpgrade: true
+
+  # Fault injection for chaos testing (disabled by default)
+  # - match:
+  #   - uri:
+  #       prefix: /api/v1/test
+  #   fault:
+  #     delay:
+  #       percentage:
+  #         value: 10
+  #       fixedDelay: 5s
+  #     abort:
+  #       percentage:
+  #         value: 5
+  #       httpStatus: 503

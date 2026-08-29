@@ -15115,146 +15115,130 @@ pub async fn get_rate_limit_status(
     Ok(Json(serde_json::to_value(&status).unwrap()))
 }
 
-/// Get the latest backup verification report (Issue #894)
-#[utoipa::path(
-    get,
-    path = "/v1/admin/backup/verification/report",
-    tag = "admin",
-    responses(
-        (status = 200, description = "Latest backup verification report"),
-        (status = 404, description = "No backup verification report found"),
-        (status = 503, description = "Database error"),
-    )
-)]
-pub async fn get_backup_verification_report(
-    State(state): State<AppState>,
-) -> Result<Json<crate::backup_verification::BackupVerificationReport>, AppError> {
-    let report = crate::backup_verification::get_latest_verification_report(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch backup report: {}", e)))?
-        .ok_or_else(|| AppError::NotFound("No backup verification report found".to_string()))?;
+// ── Issue #879: Webhook Circuit Breaker Admin Endpoints ─────────────────────
 
-    Ok(Json(report))
+/// GET /v1/admin/webhook/circuit-breaker
+/// Get circuit breaker stats for all webhook endpoints
+pub async fn get_circuit_breaker_stats(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>> {
+    let stats = state.circuit_breaker_manager.get_all_stats().await;
+    Json(stats)
 }
 
-/// Trigger backup verification (Issue #894)
-#[utoipa::path(
-    post,
-    path = "/v1/admin/backup/verification/trigger",
-    tag = "admin",
-    responses(
-        (status = 202, description = "Backup verification started"),
-        (status = 503, description = "Database error"),
-    )
-)]
-pub async fn trigger_backup_verification(
+/// GET /v1/admin/webhook/circuit-breaker/{endpoint}
+/// Get circuit breaker stats for a specific endpoint
+pub async fn get_endpoint_circuit_breaker_stats(
     State(state): State<AppState>,
-) -> Result<axum::http::StatusCode, AppError> {
-    crate::backup_verification::create_backup_verification_procedures(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to initialize backup procedures: {}", e)))?;
-
-    crate::metrics::record_backup_verification_success();
-
-    Ok(axum::http::StatusCode::ACCEPTED)
+    Path(endpoint): Path<String>,
+) -> Result<Json<crate::webhook_circuit_breaker::EndpointCircuitBreakerStats>, AppError> {
+    let stats = state.circuit_breaker_manager.get_stats(&endpoint).await
+        .ok_or_else(|| AppError::NotFound("Endpoint not found".to_string()))?;
+    Ok(Json(stats))
 }
 
-/// Create a silence rule for suppressing alerts (Issue #897)
-#[utoipa::path(
-    post,
-    path = "/v1/admin/alerts/silences",
-    tag = "admin",
-    responses(
-        (status = 201, description = "Silence rule created"),
-        (status = 400, description = "Invalid request"),
-        (status = 503, description = "Database error"),
-    )
-)]
-pub async fn create_alert_silence(
+/// POST /v1/admin/webhook/circuit-breaker/{endpoint}/reset
+/// Manually reset a circuit breaker for a specific endpoint
+pub async fn reset_circuit_breaker(
     State(state): State<AppState>,
-    Json(payload): Json<serde_json::Value>,
-) -> Result<(axum::http::StatusCode, Json<crate::alert_manager::AlertSilence>), AppError> {
-    let alert_name = payload
-        .get("alert_name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| AppError::Validation("missing 'alert_name' field".to_string()))?;
-
-    let duration_minutes = payload
-        .get("duration_minutes")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| AppError::Validation("missing 'duration_minutes' field".to_string()))?;
-
-    let created_by = payload
-        .get("created_by")
-        .and_then(|v| v.as_str())
-        .unwrap_or("admin");
-
-    let comment = payload
-        .get("comment")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Silence rule created via admin API");
-
-    crate::alert_manager::create_alert_tables(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to initialize alert tables: {}", e)))?;
-
-    let silence = crate::alert_manager::create_silence(&state.pool, alert_name, duration_minutes, created_by, comment)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to create silence: {}", e)))?;
-
-    Ok((axum::http::StatusCode::CREATED, Json(silence)))
+    Path(endpoint): Path<String>,
+) -> Json<serde_json::Value> {
+    state.circuit_breaker_manager.reset(&endpoint).await;
+    Json(json!({
+        "status": "reset",
+        "endpoint": endpoint,
+    }))
 }
 
-/// Get active alert silences (Issue #897)
-#[utoipa::path(
-    get,
-    path = "/v1/admin/alerts/silences",
-    tag = "admin",
-    responses(
-        (status = 200, description = "List of active silences"),
-        (status = 503, description = "Database error"),
-    )
-)]
-pub async fn get_alert_silences(
+// ── Issue #881: Bulk Event Export Endpoints ────────────────────────────────
+
+/// POST /v1/admin/events/export
+/// Start a new bulk event export with specified format and compression
+pub async fn start_event_export(
     State(state): State<AppState>,
-) -> Result<Json<Vec<crate::alert_manager::AlertSilence>>, AppError> {
-    crate::alert_manager::create_alert_tables(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to initialize alert tables: {}", e)))?;
+    Json(request): Json<crate::bulk_export::ExportRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let job_id = state.bulk_export_manager.start_export(&state.pool, request).await
+        .map_err(|e| AppError::Internal(e))?;
 
-    let silences = crate::alert_manager::get_active_silences(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch silences: {}", e)))?;
-
-    Ok(Json(silences))
+    Ok(Json(json!({
+        "job_id": job_id,
+        "status": "pending",
+    })))
 }
 
-/// Delete an alert silence (Issue #897)
-#[utoipa::path(
-    delete,
-    path = "/v1/admin/alerts/silences/{silence_id}",
-    tag = "admin",
-    responses(
-        (status = 204, description = "Silence deleted"),
-        (status = 404, description = "Silence not found"),
-        (status = 503, description = "Database error"),
-    )
-)]
-pub async fn delete_alert_silence(
+/// GET /v1/admin/events/export/{job_id}
+/// Get status of an export job
+pub async fn get_export_job_status(
     State(state): State<AppState>,
-    axum::extract::Path(silence_id): axum::extract::Path<String>,
-) -> Result<axum::http::StatusCode, AppError> {
-    crate::alert_manager::create_alert_tables(&state.pool)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to initialize alert tables: {}", e)))?;
+    Path(job_id): Path<String>,
+) -> Result<Json<crate::bulk_export::ExportJob>, AppError> {
+    let job = state.bulk_export_manager.get_job_status(&job_id).await
+        .map_err(|e| AppError::NotFound(e))?;
 
-    let deleted = crate::alert_manager::delete_silence(&state.pool, &silence_id)
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to delete silence: {}", e)))?;
+    Ok(Json(job))
+}
 
-    if deleted {
-        Ok(axum::http::StatusCode::NO_CONTENT)
-    } else {
-        Err(AppError::NotFound("Silence not found".to_string()))
+/// GET /v1/admin/events/export
+/// List all export jobs
+pub async fn list_export_jobs(
+    State(state): State<AppState>,
+) -> Json<Vec<crate::bulk_export::ExportJob>> {
+    let jobs = state.bulk_export_manager.get_all_jobs().await;
+    Json(jobs)
+}
+
+/// GET /v1/admin/events/export/{job_id}/download
+/// Download the exported file (with streaming)
+pub async fn download_export_file(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<impl axum::response::IntoResponse, AppError> {
+    let job = state.bulk_export_manager.get_job_status(&job_id).await
+        .map_err(|e| AppError::NotFound(e))?;
+
+    if job.status != crate::bulk_export::ExportStatus::Completed {
+        return Err(AppError::BadRequest(
+            format!("Export job {} is not completed", job_id)
+        ));
     }
+
+    let file_path = job.file_path.ok_or_else(|| {
+        AppError::Internal("Export file path not found".to_string())
+    })?;
+
+    if !file_path.exists() {
+        return Err(AppError::NotFound("Export file not found".to_string()));
+    }
+
+    let file = tokio::fs::File::open(file_path).await
+        .map_err(|e| AppError::Internal(format!("Failed to open export file: {}", e)))?;
+
+    let stream = tokio::io::BufReader::new(file);
+    let body = axum::body::Body::from_stream(
+        tokio_util::io::ReaderStream::new(stream)
+    );
+
+    Ok((
+        axum::http::StatusCode::OK,
+        axum::response::AppendHeaders([(
+            axum::http::header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"export-{}.dat\"", job_id)
+        )]),
+        body,
+    ))
+}
+
+/// POST /v1/admin/events/export/cleanup
+/// Clean up expired export files
+pub async fn cleanup_export_files(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let removed = state.bulk_export_manager.cleanup_expired().await
+        .map_err(|e| AppError::Internal(e))?;
+
+    Ok(Json(json!({
+        "status": "cleaned",
+        "removed_jobs": removed,
+    })))
 }

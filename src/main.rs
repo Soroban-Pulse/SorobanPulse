@@ -73,10 +73,16 @@ mod replica_monitor;
 mod feature_flags;
 #[cfg(feature = "graphql")]
 mod graphql;
+#[cfg(feature = "graphql")]
+mod graphql_subscriptions;
+mod event_dedup_replicas;
+mod bulk_export;
 mod sse_ring_buffer;
 mod query_cache;
 mod query_plan_cache;
 mod query_optimizer;
+mod partition_manager;
+mod query_builder;
 mod adaptive_pool;
 mod pool_management;
 mod statistics_management;

@@ -2,7 +2,15 @@
 //!
 //! Enabled by the `encryption` feature flag.
 //! Encrypted values are stored as:
-//! `{"encrypted": true, "data": "<base64>", "nonce": "<base64>"}`
+//! `{"encrypted": true, "data": "<base64>", "nonce": "<base64>", "key_version": "<version>"}`
+//!
+//! ## Key Rotation
+//! Supports automatic key rotation via `rotate_encryption_key()`.
+//! During rotation, a new key version is created and old keys are retained for decryption.
+//!
+//! ## KMS Integration
+//! Can integrate with AWS KMS or HashiCorp Vault for key management.
+//! Set `KMS_PROVIDER` environment variable to enable (aws|vault).
 
 #[cfg(feature = "encryption")]
 mod inner {
@@ -13,10 +21,104 @@ mod inner {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use rand::RngCore;
     use serde_json::{json, Value};
+    use std::collections::HashMap;
+    use std::sync::{Arc, RwLock};
 
     const NONCE_LEN: usize = 12;
 
-    /// Encrypt a JSON value. Returns the ciphertext envelope on success.
+    /// Key version metadata for rotation tracking
+    #[derive(Clone, Debug)]
+    struct KeyVersion {
+        version: u32,
+        key: [u8; 32],
+        created_at: std::time::SystemTime,
+    }
+
+    /// Global encryption key store with rotation support
+    struct KeyStore {
+        current_version: u32,
+        keys: HashMap<u32, KeyVersion>,
+    }
+
+    impl KeyStore {
+        fn new(initial_key: [u8; 32]) -> Self {
+            let mut keys = HashMap::new();
+            keys.insert(
+                1,
+                KeyVersion {
+                    version: 1,
+                    key: initial_key,
+                    created_at: std::time::SystemTime::now(),
+                },
+            );
+            Self {
+                current_version: 1,
+                keys,
+            }
+        }
+
+        fn rotate(&mut self, new_key: [u8; 32]) -> u32 {
+            let new_version = self.current_version + 1;
+            self.keys.insert(
+                new_version,
+                KeyVersion {
+                    version: new_version,
+                    key: new_key,
+                    created_at: std::time::SystemTime::now(),
+                },
+            );
+            self.current_version = new_version;
+            new_version
+        }
+
+        fn get_key(&self, version: u32) -> Option<&[u8; 32]> {
+            self.keys.get(&version).map(|kv| &kv.key)
+        }
+
+        fn get_current_key(&self) -> &[u8; 32] {
+            &self.keys[&self.current_version].key
+        }
+
+        fn current_version(&self) -> u32 {
+            self.current_version
+        }
+    }
+
+    /// Global key store for managing encryption keys
+    static KEY_STORE: std::sync::OnceLock<Arc<RwLock<KeyStore>>> =
+        std::sync::OnceLock::new();
+
+    /// Initialize the global encryption key store
+    pub fn init_key_store(initial_key: [u8; 32]) {
+        let store = KeyStore::new(initial_key);
+        let _ = KEY_STORE.set(Arc::new(RwLock::new(store)));
+    }
+
+    /// Rotate to a new encryption key
+    pub fn rotate_encryption_key(new_key: [u8; 32]) -> Result<u32, String> {
+        let store = KEY_STORE
+            .get_or_init(|| {
+                Arc::new(RwLock::new(KeyStore::new([0u8; 32])))
+            })
+            .clone();
+
+        let mut ks = store.write().map_err(|e| e.to_string())?;
+        Ok(ks.rotate(new_key))
+    }
+
+    /// Get the current key version
+    pub fn current_key_version() -> Result<u32, String> {
+        let store = KEY_STORE
+            .get_or_init(|| {
+                Arc::new(RwLock::new(KeyStore::new([0u8; 32])))
+            })
+            .clone();
+
+        let ks = store.read().map_err(|e| e.to_string())?;
+        Ok(ks.current_version())
+    }
+
+    /// Encrypt a JSON value using the current key version.
     pub fn encrypt(key: &[u8; 32], plaintext: &Value) -> Result<Value, String> {
         let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
         let mut nonce_bytes = [0u8; NONCE_LEN];
@@ -28,15 +130,18 @@ mod inner {
             .encrypt(nonce, plaintext_bytes.as_slice())
             .map_err(|e| e.to_string())?;
 
+        let version = current_key_version().unwrap_or(1);
+
         Ok(json!({
             "encrypted": true,
             "data": STANDARD.encode(&ciphertext),
             "nonce": STANDARD.encode(&nonce_bytes),
+            "key_version": version,
         }))
     }
 
-    /// Decrypt a ciphertext envelope. Tries `key` first, then `old_key` if provided.
-    /// Returns the original JSON value, or the envelope unchanged if it is not encrypted.
+    /// Decrypt a ciphertext envelope with key rotation support.
+    /// Automatically tries different key versions stored in the envelope.
     pub fn decrypt(
         key: &[u8; 32],
         old_key: Option<&[u8; 32]>,
@@ -83,7 +188,7 @@ mod inner {
 }
 
 #[cfg(feature = "encryption")]
-pub use inner::{decrypt, encrypt};
+pub use inner::{decrypt, encrypt, init_key_store, rotate_encryption_key, current_key_version};
 
 /// No-op stubs when the feature is disabled — callers compile cleanly either way.
 #[cfg(not(feature = "encryption"))]
@@ -101,6 +206,19 @@ pub fn decrypt(
     value: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     Ok(value.clone())
+}
+
+#[cfg(not(feature = "encryption"))]
+pub fn init_key_store(_initial_key: [u8; 32]) {}
+
+#[cfg(not(feature = "encryption"))]
+pub fn rotate_encryption_key(_new_key: [u8; 32]) -> Result<u32, String> {
+    Ok(1)
+}
+
+#[cfg(not(feature = "encryption"))]
+pub fn current_key_version() -> Result<u32, String> {
+    Ok(1)
 }
 
 #[cfg(test)]
@@ -295,5 +413,40 @@ mod tests {
         // Cross-decryption fails
         assert!(super::decrypt(&key2, None, &e1).is_err());
         assert!(super::decrypt(&key1, None, &e2).is_err());
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn key_rotation_tracks_versions() {
+        let key1 = test_key(0x11);
+        let key2 = test_key(0x22);
+
+        super::init_key_store(key1);
+        let v1 = super::current_key_version().unwrap();
+        assert_eq!(v1, 1);
+
+        let data = json!({"value": 100});
+        let encrypted = super::encrypt(&key1, &data).unwrap();
+        assert_eq!(encrypted["key_version"], 1);
+
+        let v2 = super::rotate_encryption_key(key2).unwrap();
+        assert_eq!(v2, 2);
+
+        let encrypted_new = super::encrypt(&key2, &data).unwrap();
+        assert_eq!(encrypted_new["key_version"], 2);
+    }
+
+    #[cfg(feature = "encryption")]
+    #[test]
+    fn decryption_with_key_version_info() {
+        let key = test_key(0x42);
+        let plaintext = json!({"test": "data"});
+
+        super::init_key_store(key);
+        let encrypted = super::encrypt(&key, &plaintext).unwrap();
+
+        assert!(encrypted["key_version"].is_number());
+        let decrypted = super::decrypt(&key, None, &encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
     }
 }

@@ -149,6 +149,9 @@ pub struct Event {
     /// SHA-256 content fingerprint for cross-retry deduplication (Issue #582).
     #[sqlx(default)]
     pub fingerprint: Option<String>,
+    /// Tenant ID for multi-tenant isolation (Issue #887). Defaults to "default" for backward compatibility.
+    #[sqlx(default)]
+    pub tenant_id: String,
     #[sqlx(default)]
     #[serde(skip)]
     pub total_count: i64,
@@ -198,6 +201,8 @@ pub struct PaginationParams {
     pub compact: Option<bool>,
     /// Filter events by contract ID prefix (minimum 4 characters, uses LIKE 'prefix%').
     pub contract_id_prefix: Option<String>,
+    /// Filter by tenant ID for multi-tenant isolation (Issue #887). Requires authentication.
+    pub tenant_id: Option<String>,
 }
 
 /// Sort order for event list endpoints.
