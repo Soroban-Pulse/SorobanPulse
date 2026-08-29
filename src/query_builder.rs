@@ -44,6 +44,59 @@
 use crate::error::{AppError, ValidationErrorDetail};
 
 // ---------------------------------------------------------------------------
+// Unified QueryBuilder trait
+// ---------------------------------------------------------------------------
+
+/// Common interface for all query builders.
+pub trait QueryBuilder {
+    /// Build and return the SQL query string.
+    fn build_sql(&self) -> String;
+
+    /// Get the number of bind parameters required.
+    fn bind_count(&self) -> usize;
+
+    /// Build both the data query and count query.
+    fn build_pair(&self) -> (String, String);
+}
+
+/// Filter operation types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterOp {
+    Equals,
+    NotEquals,
+    GreaterThan,
+    LessThan,
+    GreaterThanOrEqual,
+    LessThanOrEqual,
+    In,
+    Like,
+}
+
+impl FilterOp {
+    pub fn as_sql(&self) -> &str {
+        match self {
+            FilterOp::Equals => "=",
+            FilterOp::NotEquals => "!=",
+            FilterOp::GreaterThan => ">",
+            FilterOp::LessThan => "<",
+            FilterOp::GreaterThanOrEqual => ">=",
+            FilterOp::LessThanOrEqual => "<=",
+            FilterOp::In => "IN",
+            FilterOp::Like => "LIKE",
+        }
+    }
+}
+
+/// Generic filter clause for query building.
+#[derive(Debug, Clone)]
+pub struct FilterClause {
+    pub column: String,
+    pub op: FilterOp,
+    pub value: Option<String>,
+    pub param_index: usize,
+}
+
+// ---------------------------------------------------------------------------
 // Named queries
 // ---------------------------------------------------------------------------
 
@@ -263,6 +316,7 @@ pub fn validate_event_type(event_type: &str) -> Result<(), AppError> {
 ///     .paginate(page, limit)
 ///     .build();
 /// ```
+#[derive(Clone)]
 pub struct EventQueryBuilder {
     filters: EventFilters,
     pagination: Pagination,
@@ -285,6 +339,20 @@ impl Default for EventQueryBuilder {
     }
 }
 
+impl QueryBuilder for EventQueryBuilder {
+    fn build_sql(&self) -> String {
+        self.clone().build().0
+    }
+
+    fn bind_count(&self) -> usize {
+        self.where_param_count() + 2
+    }
+
+    fn build_pair(&self) -> (String, String) {
+        self.clone().build()
+    }
+}
+
 impl EventQueryBuilder {
     const BASE_COLS: &'static str =
         "id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, created_at";
@@ -299,6 +367,18 @@ impl EventQueryBuilder {
             param_idx: 0,
             where_clauses: Vec::new(),
         }
+    }
+
+    /// Fluent method to add a custom WHERE clause.
+    #[must_use]
+    pub fn with_where_clause(mut self, clause: String) -> Self {
+        self.where_clauses.push(clause);
+        self
+    }
+
+    /// Get the list of active WHERE clauses.
+    pub fn where_clauses(&self) -> &[String] {
+        &self.where_clauses
     }
 
     /// Apply the given filters.
@@ -430,6 +510,37 @@ impl EventQueryBuilder {
         .iter()
         .filter(|&&b| b)
         .count()
+    }
+
+    /// Add a complex filter clause with multiple conditions.
+    #[must_use]
+    pub fn add_complex_filter(
+        mut self,
+        column: &str,
+        op: FilterOp,
+        value: Option<&str>,
+    ) -> Self {
+        let param_str = self.next_param();
+        let clause = match op {
+            FilterOp::In if value.is_some() => {
+                format!("{} IN ({})", column, value.unwrap())
+            }
+            _ => {
+                format!("{} {} {}", column, op.as_sql(), param_str)
+            }
+        };
+        self.where_clauses.push(clause);
+        self
+    }
+
+    /// Get current pagination settings.
+    pub fn get_pagination(&self) -> Pagination {
+        self.pagination
+    }
+
+    /// Get current sort configuration.
+    pub fn get_sort(&self) -> (&str, SortDirection) {
+        (&self.sort_column, self.sort_direction)
     }
 }
 
@@ -596,5 +707,80 @@ mod tests {
         assert!(!queries::GET_EVENTS_APPROXIMATE_COUNT.is_empty());
         assert!(!queries::GET_EVENTS_EXACT_COUNT.is_empty());
         assert!(!queries::HEALTH_CHECK.is_empty());
+    }
+
+    #[test]
+    fn query_builder_trait_implementation() {
+        let builder = EventQueryBuilder::new()
+            .with_filters(EventFilters {
+                contract_id: Some("C1".into()),
+                ..Default::default()
+            });
+        assert_eq!(builder.bind_count(), 3); // 1 filter + LIMIT + OFFSET
+        let sql = builder.clone().build_sql();
+        assert!(!sql.is_empty());
+    }
+
+    #[test]
+    fn filter_op_as_sql() {
+        assert_eq!(FilterOp::Equals.as_sql(), "=");
+        assert_eq!(FilterOp::GreaterThan.as_sql(), ">");
+        assert_eq!(FilterOp::LessThan.as_sql(), "<");
+        assert_eq!(FilterOp::Like.as_sql(), "LIKE");
+    }
+
+    #[test]
+    fn query_builder_with_custom_where_clause() {
+        let (sql, _) = EventQueryBuilder::new()
+            .with_where_clause("custom_column = TRUE".to_string())
+            .build();
+        assert!(sql.contains("custom_column = TRUE"), "sql: {sql}");
+    }
+
+    #[test]
+    fn query_builder_get_pagination() {
+        let builder = EventQueryBuilder::new().paginate(2, 50);
+        let p = builder.get_pagination();
+        assert_eq!(p.page, 2);
+        assert_eq!(p.limit, 50);
+    }
+
+    #[test]
+    fn query_builder_get_sort() {
+        let builder = EventQueryBuilder::new().sort_by("timestamp", SortDirection::Asc);
+        let (col, dir) = builder.get_sort();
+        assert_eq!(col, "timestamp");
+        assert_eq!(dir, SortDirection::Asc);
+    }
+
+    #[test]
+    fn query_builder_add_complex_filter() {
+        let builder = EventQueryBuilder::new().add_complex_filter("status", FilterOp::Equals, None);
+        assert!(!builder.where_clauses().is_empty());
+    }
+
+    #[test]
+    fn query_builder_where_clauses_accessor() {
+        let builder = EventQueryBuilder::new()
+            .with_where_clause("clause1".to_string())
+            .with_where_clause("clause2".to_string());
+        let clauses = builder.where_clauses();
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(clauses[0], "clause1");
+        assert_eq!(clauses[1], "clause2");
+    }
+
+    #[test]
+    fn clone_builder_preserves_state() {
+        let builder1 = EventQueryBuilder::new()
+            .with_filters(EventFilters {
+                contract_id: Some("C1".into()),
+                ..Default::default()
+            })
+            .paginate(3, 15);
+
+        let builder2 = builder1.clone();
+        assert_eq!(builder1.where_param_count(), builder2.where_param_count());
+        assert_eq!(builder1.get_pagination().page, builder2.get_pagination().page);
     }
 }

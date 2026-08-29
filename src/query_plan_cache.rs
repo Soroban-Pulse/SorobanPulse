@@ -89,6 +89,10 @@ pub struct QueryPlanCache {
     hit_count: Arc<AtomicU64>,
     miss_count: Arc<AtomicU64>,
     eviction_count: Arc<AtomicU64>,
+    /// Schema version counter — incremented on schema changes to invalidate plans.
+    schema_version: Arc<AtomicU64>,
+    /// Last schema change timestamp.
+    last_schema_change: Arc<tokio::sync::Mutex<Option<std::time::SystemTime>>>,
 }
 
 impl QueryPlanCache {
@@ -116,7 +120,7 @@ impl QueryPlanCache {
             max_plans = config.max_plans,
             ttl_secs = config.ttl_secs,
             prepared_statements = config.enable_prepared_statements,
-            "Initialized query plan cache (adaptive TTL enabled)"
+            "Initialized query plan cache (adaptive TTL enabled, schema-aware invalidation)"
         );
 
         Self {
@@ -126,6 +130,8 @@ impl QueryPlanCache {
             hit_count,
             miss_count,
             eviction_count,
+            schema_version: Arc::new(AtomicU64::new(0)),
+            last_schema_change: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -288,6 +294,115 @@ impl QueryPlanCache {
         self.cache.invalidate_all();
         info!("Query plan cache cleared");
     }
+
+    /// Detect schema changes by querying pg_stat_user_tables catalog.
+    /// Returns true if schema has changed since last check.
+    pub async fn detect_schema_changes(
+        &self,
+        pool: &PgPool,
+    ) -> Result<bool, sqlx::Error> {
+        // Query schema modification timestamp
+        let row: (i64,) = sqlx::query_as(
+            "SELECT MAX(EXTRACT(EPOCH FROM schemachange)::bigint)::bigint
+             FROM (
+               SELECT MAX(n_tup_ins + n_tup_upd + n_tup_del) as schemachange
+               FROM pg_stat_user_tables
+             ) t"
+        )
+        .fetch_one(pool)
+        .await?;
+
+        let current_version = row.0;
+        let previous_version = self.schema_version.load(Ordering::Relaxed);
+
+        if current_version > previous_version as i64 {
+            self.schema_version.store(current_version as u64, Ordering::Relaxed);
+            let mut last_change = self.last_schema_change.lock().await;
+            *last_change = Some(std::time::SystemTime::now());
+
+            info!(
+                current_version,
+                previous_version,
+                "Schema changes detected, invalidating query plan cache"
+            );
+            self.cache.invalidate_all();
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    /// Detect structural schema changes (tables, indexes, columns added/dropped).
+    /// Returns the number of schema changes detected.
+    pub async fn detect_structural_changes(
+        &self,
+        pool: &PgPool,
+    ) -> Result<usize, sqlx::Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM pg_event_trigger_ddl_commands()"
+        )
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or((0,));
+
+        if row.0 > 0 {
+            debug!(change_count = row.0, "Structural schema changes detected");
+            self.cache.invalidate_all();
+        }
+
+        Ok(row.0 as usize)
+    }
+
+    /// Get cache diagnostic information.
+    pub async fn get_cache_diagnostics(&self) -> CacheDiagnostics {
+        let stats = self.get_cache_stats().await;
+        let schema_version = self.schema_version.load(Ordering::Relaxed);
+        let last_change = self.last_schema_change.lock().await.clone();
+
+        CacheDiagnostics {
+            cache_stats: stats,
+            schema_version,
+            last_schema_change: last_change,
+            frequency_map_size: self.frequency_map.len(),
+        }
+    }
+
+    /// Invalidate plans matching a pattern (useful for targeted invalidation).
+    pub async fn invalidate_pattern(&self, pattern: &str) -> usize {
+        let mut invalidated = 0;
+        for entry in self.frequency_map.iter() {
+            if entry.key().contains(pattern) {
+                self.cache.invalidate(entry.key());
+                invalidated += 1;
+            }
+        }
+        info!(pattern, invalidated, "Invalidated cache entries matching pattern");
+        invalidated
+    }
+
+    /// Invalidate plans for a specific table.
+    pub async fn invalidate_table(&self, table_name: &str) -> usize {
+        self.invalidate_pattern(&format!("FROM {}", table_name)).await
+    }
+
+    /// Get the schema version counter.
+    pub fn get_schema_version(&self) -> u64 {
+        self.schema_version.load(Ordering::Relaxed)
+    }
+
+    /// Reset schema version (useful after manual invalidation).
+    pub fn reset_schema_version(&self) {
+        self.schema_version.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Diagnostic information about cache state.
+#[derive(Debug, Clone)]
+pub struct CacheDiagnostics {
+    pub cache_stats: CacheStats,
+    pub schema_version: u64,
+    pub last_schema_change: Option<std::time::SystemTime>,
+    pub frequency_map_size: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -618,5 +733,73 @@ mod tests {
     #[test]
     fn safe_ratio_all_misses() {
         assert_eq!(safe_ratio(0, 10), 0.0);
+    }
+
+    // ── Schema invalidation tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn schema_version_tracking() {
+        let cache = QueryPlanCache::with_defaults();
+        assert_eq!(cache.get_schema_version(), 0);
+
+        cache.schema_version.store(42, Ordering::Relaxed);
+        assert_eq!(cache.get_schema_version(), 42);
+
+        cache.reset_schema_version();
+        assert_eq!(cache.get_schema_version(), 0);
+    }
+
+    #[tokio::test]
+    async fn cache_invalidate_pattern() {
+        let cache = QueryPlanCache::with_defaults();
+        let plan = QueryPlan {
+            query: "SELECT * FROM events".to_string(),
+            plan_hash: "hash1".to_string(),
+            estimated_cost: 100.0,
+            estimated_rows: 1.0,
+            actual_rows: None,
+            planning_time_ms: 0.5,
+            execution_time_ms: None,
+        };
+
+        cache.insert("SELECT * FROM events WHERE id = $1".to_string(), plan.clone()).await;
+        cache.frequency_map.insert("SELECT * FROM events WHERE id = $1".to_string(), 1);
+
+        let invalidated = cache.invalidate_pattern("events").await;
+        assert_eq!(invalidated, 1);
+
+        // Verify it's gone
+        let retrieved = cache.get("SELECT * FROM events WHERE id = $1").await;
+        assert!(retrieved.is_none());
+    }
+
+    #[tokio::test]
+    async fn cache_invalidate_table() {
+        let cache = QueryPlanCache::with_defaults();
+        let plan = QueryPlan {
+            query: "SELECT * FROM events".to_string(),
+            plan_hash: "hash1".to_string(),
+            estimated_cost: 100.0,
+            estimated_rows: 1.0,
+            actual_rows: None,
+            planning_time_ms: 0.5,
+            execution_time_ms: None,
+        };
+
+        cache.insert("SELECT * FROM events WHERE ledger = $1".to_string(), plan).await;
+        cache.frequency_map.insert("SELECT * FROM events WHERE ledger = $1".to_string(), 1);
+
+        let invalidated = cache.invalidate_table("events").await;
+        assert!(invalidated > 0);
+    }
+
+    #[tokio::test]
+    async fn cache_diagnostics() {
+        let cache = QueryPlanCache::with_defaults();
+        let diags = cache.get_cache_diagnostics().await;
+
+        assert_eq!(diags.schema_version, 0);
+        assert!(diags.last_schema_change.is_none());
+        assert_eq!(diags.frequency_map_size, 0);
     }
 }
