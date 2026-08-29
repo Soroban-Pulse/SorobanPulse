@@ -5,6 +5,7 @@ pub mod alert_manager;
 pub mod anonymization;
 pub mod backup_verification;
 pub mod codegen;
+pub mod conditional_get;
 pub mod event_compression;
 pub mod ledger_hashes;
 pub mod networks;

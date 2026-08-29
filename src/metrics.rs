@@ -977,6 +977,81 @@ pub fn record_batch_config_updated() {
     m::counter!("soroban_pulse_batch_config_updates_total").increment(1);
 }
 
+// ── Issue #885: Conditional Request Handling ────────────────────────────
+
+/// Record a 304 Not Modified response (bandwidth saved).
+pub fn record_conditional_get_304() {
+    m::counter!("soroban_pulse_conditional_get_304_total").increment(1);
+}
+
+/// Record bandwidth savings from conditional GETs.
+pub fn record_conditional_get_bandwidth_saved(bytes: u64) {
+    m::counter!("soroban_pulse_conditional_get_bandwidth_saved_bytes_total").increment(bytes);
+}
+
+/// Record ETag cache hit.
+pub fn record_etag_cache_hit() {
+    m::counter!("soroban_pulse_etag_cache_hits_total").increment(1);
+}
+
+/// Record ETag cache miss.
+pub fn record_etag_cache_miss() {
+    m::counter!("soroban_pulse_etag_cache_misses_total").increment(1);
+}
+
+// ── Issue #884: Subscription Pause/Resume ────────────────────────────────
+
+/// Record subscription pause event.
+pub fn record_subscription_paused() {
+    m::counter!("soroban_pulse_subscriptions_paused_total").increment(1);
+}
+
+/// Record subscription resume event.
+pub fn record_subscription_resumed() {
+    m::counter!("soroban_pulse_subscriptions_resumed_total").increment(1);
+}
+
+/// Record auto-resume of paused subscriptions.
+pub fn record_subscription_auto_resumed(count: u64) {
+    m::counter!("soroban_pulse_subscriptions_auto_resumed_total").increment(count);
+}
+
+// ── Issue #882: Anomaly Detection Alerting ────────────────────────────────
+
+/// Record anomaly detection configuration creation.
+pub fn record_anomaly_detection_configured(count: u64) {
+    m::counter!("soroban_pulse_anomaly_detection_configured_total").increment(count);
+}
+
+/// Record anomaly alerts retrieved.
+pub fn record_anomaly_alerts_queried(count: u64) {
+    m::counter!("soroban_pulse_anomaly_alerts_queried_total").increment(count);
+}
+
+/// Record anomaly alert acknowledged.
+pub fn record_anomaly_alert_acknowledged() {
+    m::counter!("soroban_pulse_anomaly_alerts_acknowledged_total").increment(1);
+}
+
+/// Record anomaly score observation.
+pub fn record_anomaly_score(metric_name: &str, score: f64) {
+    m::histogram!(
+        "soroban_pulse_anomaly_score",
+        "metric" => metric_name.to_string()
+    )
+    .record(score);
+}
+
+/// Record anomaly detection threshold crossing.
+pub fn record_anomaly_threshold_crossed(metric_name: &str, severity: &str) {
+    m::counter!(
+        "soroban_pulse_anomaly_threshold_crossings_total",
+        "metric" => metric_name.to_string(),
+        "severity" => severity.to_string()
+    )
+    .increment(1);
+}
+
 // ── Issue #696: SLI / SLO dashboard metrics ────────────────────────────────
 
 /// Set the rolling SLO completion ratio in `[0.0, 1.0]`.

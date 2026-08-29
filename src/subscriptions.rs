@@ -975,6 +975,204 @@ async fn send_smtp_email(
 }
 
 // ---------------------------------------------------------------------------
+// Subscription Pause/Resume (Issue #884)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct PauseSubscriptionRequest {
+    /// Duration to pause in seconds. If not provided, pauses indefinitely.
+    pub pause_seconds: Option<i64>,
+    /// Reason for pausing the subscription
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ResumeSubscriptionRequest {
+    /// Optional reason for resuming
+    pub reason: Option<String>,
+}
+
+/// Pause a subscription to prevent delivery of events.
+/// Events will continue to accumulate in the delivery queue during the pause.
+pub async fn pause_subscription(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PauseSubscriptionRequest>,
+) -> Result<Json<Value>, AppError> {
+    let pause_until = body.pause_seconds.map(|secs| {
+        chrono::Utc::now() + chrono::Duration::seconds(secs)
+    });
+
+    let rows = sqlx::query(
+        "UPDATE subscriptions
+         SET pause_until = $2, pause_reason = $3, paused_at = NOW()
+         WHERE id = $1 AND status = 'active'"
+    )
+    .bind(id)
+    .bind(pause_until)
+    .bind(&body.reason)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    if rows == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    // Log the pause action for audit trail
+    let _ = sqlx::query(
+        "INSERT INTO subscription_pause_resume_log (subscription_id, action, reason, paused_until, created_at)
+         VALUES ($1, $2, $3, $4, NOW())"
+    )
+    .bind(id)
+    .bind("paused")
+    .bind(&body.reason)
+    .bind(pause_until)
+    .execute(&state.pool)
+    .await;
+
+    tracing::info!(
+        subscription_id = %id,
+        pause_seconds = ?body.pause_seconds,
+        reason = ?body.reason,
+        "Subscription paused"
+    );
+
+    crate::metrics::record_subscription_paused();
+
+    Ok(Json(json!({
+        "subscription_id": id,
+        "status": "paused",
+        "pause_until": pause_until,
+        "reason": body.reason,
+    })))
+}
+
+/// Resume a previously paused subscription.
+/// Pending events in the delivery queue will resume delivery.
+pub async fn resume_subscription(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(body): Json<Option<ResumeSubscriptionRequest>>,
+) -> Result<Json<Value>, AppError> {
+    let rows = sqlx::query(
+        "UPDATE subscriptions
+         SET pause_until = NULL, pause_reason = NULL
+         WHERE id = $1 AND pause_until IS NOT NULL"
+    )
+    .bind(id)
+    .execute(&state.pool)
+    .await?
+    .rows_affected();
+
+    if rows == 0 {
+        return Err(AppError::NotFound);
+    }
+
+    // Log the resume action for audit trail
+    let reason = body.as_ref().and_then(|b| b.reason.as_ref());
+    let _ = sqlx::query(
+        "INSERT INTO subscription_pause_resume_log (subscription_id, action, reason, created_at)
+         VALUES ($1, $2, $3, NOW())"
+    )
+    .bind(id)
+    .bind("resumed")
+    .bind(reason)
+    .execute(&state.pool)
+    .await;
+
+    tracing::info!(
+        subscription_id = %id,
+        reason = ?reason,
+        "Subscription resumed"
+    );
+
+    crate::metrics::record_subscription_resumed();
+
+    Ok(Json(json!({
+        "subscription_id": id,
+        "status": "active",
+        "reason": reason,
+    })))
+}
+
+/// Get pause/resume status and history for a subscription.
+pub async fn get_pause_resume_status(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    let sub: Option<(Option<DateTime<Utc>>, Option<String>)> = sqlx::query_as(
+        "SELECT pause_until, pause_reason FROM subscriptions WHERE id = $1"
+    )
+    .bind(id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let (pause_until, pause_reason) = sub.ok_or(AppError::NotFound)?;
+
+    let history = sqlx::query_as::<_, (String, Option<String>, Option<DateTime<Utc>>, DateTime<Utc>)>(
+        "SELECT action, reason, paused_until, created_at
+         FROM subscription_pause_resume_log
+         WHERE subscription_id = $1
+         ORDER BY created_at DESC
+         LIMIT 20"
+    )
+    .bind(id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let is_paused = pause_until.is_some();
+    let is_auto_resuming = pause_until.as_ref().map(|until| *until <= chrono::Utc::now()).unwrap_or(false);
+
+    Ok(Json(json!({
+        "subscription_id": id,
+        "is_paused": is_paused,
+        "pause_until": pause_until,
+        "pause_reason": pause_reason,
+        "is_auto_resuming": is_auto_resuming,
+        "history": history.into_iter().map(|(action, reason, paused_until, created_at)| {
+            json!({
+                "action": action,
+                "reason": reason,
+                "paused_until": paused_until,
+                "created_at": created_at,
+            })
+        }).collect::<Vec<_>>(),
+    })))
+}
+
+/// Background task to automatically resume paused subscriptions when pause_until time arrives.
+pub async fn run_auto_resume_worker(pool: PgPool) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+
+        match sqlx::query(
+            "UPDATE subscriptions
+             SET pause_until = NULL, pause_reason = NULL
+             WHERE pause_until IS NOT NULL AND pause_until <= NOW()"
+        )
+        .execute(&pool)
+        .await
+        {
+            Ok(result) if result.rows_affected() > 0 => {
+                tracing::info!(
+                    count = result.rows_affected(),
+                    "Auto-resumed paused subscriptions"
+                );
+                crate::metrics::record_subscription_auto_resumed(result.rows_affected());
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "Auto-resume worker error");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

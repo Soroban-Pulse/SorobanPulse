@@ -589,6 +589,14 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/subscriptions/{id}/push/preferences", get(crate::push_notification::get_notification_preferences).put(crate::push_notification::update_notification_preferences))
         // Issue #628: Batch subscription config and delivery
         .route("/subscriptions/{id}/batch", get(subscriptions::get_subscription_batch_config).put(subscriptions::update_subscription_batch_config).post(subscriptions::deliver_batch))
+        // Issue #884: Subscription pause/resume
+        .route("/subscriptions/{id}/pause", axum::routing::post(subscriptions::pause_subscription))
+        .route("/subscriptions/{id}/resume", axum::routing::post(subscriptions::resume_subscription))
+        .route("/subscriptions/{id}/pause-status", get(subscriptions::get_pause_resume_status))
+        // Issue #882: Anomaly detection alerting
+        .route("/admin/subscriptions/{subscription_id}/anomaly-config", axum::routing::post(handlers::create_anomaly_config))
+        .route("/admin/subscriptions/{subscription_id}/anomaly-alerts", get(handlers::get_anomaly_alerts))
+        .route("/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge", axum::routing::post(handlers::acknowledge_anomaly_alert))
         // Issue #674: GitHub integration
         .route("/subscriptions/{id}/integrations/github", axum::routing::post(crate::integration_handlers::setup_github_integration).get(crate::integration_handlers::get_github_integration).delete(crate::integration_handlers::delete_github_integration))
         // Issue #675: Discord integration
