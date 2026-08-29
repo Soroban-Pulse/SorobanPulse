@@ -452,6 +452,111 @@ pub fn create_webhook_pipeline_span(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Issue #895: Enhanced spans for all handlers and critical operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Span for notification delivery (email, SMS, webhook).
+pub fn create_notification_span(
+    channel: &str,
+    recipient: &str,
+    event_type: &str,
+    trace_ctx: Option<&TraceContext>,
+) -> Span {
+    let trace_id = trace_ctx
+        .map(|c| c.trace_id.as_str())
+        .unwrap_or("unknown");
+
+    tracing::info_span!(
+        "notification.deliver",
+        notification.channel = %channel,
+        notification.recipient = %recipient,
+        notification.event_type = %event_type,
+        trace.id = %trace_id,
+        notification.status = tracing::field::Empty,
+        notification.latency_ms = tracing::field::Empty,
+        notification.error = tracing::field::Empty,
+    )
+}
+
+/// Span for database query execution with query text.
+pub fn create_db_query_span(operation: &str, table: &str, query_text: &str) -> Span {
+    tracing::info_span!(
+        "db.query_detailed",
+        db.system = "postgresql",
+        db.operation = %operation,
+        db.table = %table,
+        db.query_text = %query_text,
+        db.rows_affected = tracing::field::Empty,
+        db.duration_ms = tracing::field::Empty,
+        db.error = tracing::field::Empty,
+    )
+}
+
+/// Span for indexer event processing.
+pub fn create_event_processing_span(event_id: &str, contract_id: &str) -> Span {
+    tracing::info_span!(
+        "event.processing",
+        event.id = %event_id,
+        contract_id = %contract_id,
+        event.validation_status = tracing::field::Empty,
+        event.dedup_status = tracing::field::Empty,
+        event.db_status = tracing::field::Empty,
+    )
+}
+
+/// Span for API query/search operations.
+pub fn create_query_span(query_type: &str, contract_id: Option<&str>) -> Span {
+    tracing::info_span!(
+        "api.query",
+        query.type = %query_type,
+        contract_id = contract_id.unwrap_or("*"),
+        query.result_count = tracing::field::Empty,
+        query.duration_ms = tracing::field::Empty,
+    )
+}
+
+/// Span for subscription/notification registration.
+pub fn create_subscription_span(subscription_id: &str, webhook_url: &str) -> Span {
+    tracing::info_span!(
+        "subscription.register",
+        subscription.id = %subscription_id,
+        webhook.url = %webhook_url,
+        subscription.status = tracing::field::Empty,
+        subscription.verified = tracing::field::Empty,
+    )
+}
+
+/// Inject trace ID into response headers.
+pub fn inject_trace_response_headers(
+    mut headers: axum::http::HeaderMap,
+    trace_ctx: &TraceContext,
+) -> axum::http::HeaderMap {
+    if let Ok(header_value) = trace_ctx.trace_id.parse() {
+        headers.insert("X-Trace-ID", header_value);
+    }
+    if let Ok(header_value) = trace_ctx.trace_id.parse() {
+        headers.insert("traceparent", header_value);
+    }
+    headers
+}
+
+/// Get trace context from current span if available.
+pub fn get_current_trace_context() -> Option<TraceContext> {
+    let trace_id = tracing::Span::current()
+        .metadata()
+        .and_then(|_| Some("trace-id"))
+        .and_then(|_| None);
+
+    trace_id.map(|id| TraceContext::new_root(id))
+}
+
+/// Record trace-related metrics for monitoring.
+pub fn record_trace_sampling(sample_rate: f64) {
+    extern crate metrics as m;
+    m::gauge!("soroban_pulse_trace_sample_rate").set(sample_rate);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 

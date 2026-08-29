@@ -1,7 +1,9 @@
 pub mod abi;
 pub mod advisory_lock;
 pub mod aggregation;
+pub mod alert_manager;
 pub mod anonymization;
+pub mod backup_verification;
 pub mod codegen;
 pub mod event_compression;
 pub mod ledger_hashes;

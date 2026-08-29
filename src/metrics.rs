@@ -1079,6 +1079,147 @@ pub fn update_memory_vms_bytes(bytes: u64) {
     m::gauge!("soroban_pulse_process_memory_vms_bytes").set(bytes as f64);
 }
 
+/// Record a successful backup verification (Issue #894)
+pub fn record_backup_verification_success() {
+    m::counter!("soroban_pulse_backup_verification_success_total").increment(1);
+}
+
+/// Record a failed backup verification (Issue #894)
+pub fn record_backup_verification_failure() {
+    m::counter!("soroban_pulse_backup_verification_failure_total").increment(1);
+}
+
+/// Update backup size metrics (Issue #894)
+pub fn update_backup_size_bytes(bytes: u64) {
+    m::gauge!("soroban_pulse_backup_size_bytes").set(bytes as f64);
+}
+
+/// Update backup duration metrics in seconds (Issue #894)
+pub fn update_backup_duration_seconds(duration: f64) {
+    m::gauge!("soroban_pulse_backup_duration_seconds").set(duration);
+}
+
+/// Update restore duration metrics in seconds (Issue #894)
+pub fn update_restore_duration_seconds(duration: f64) {
+    m::gauge!("soroban_pulse_restore_duration_seconds").set(duration);
+}
+
+/// Record backup integrity verification (Issue #894)
+pub fn record_backup_integrity_verified() {
+    m::counter!("soroban_pulse_backup_integrity_verified_total").increment(1);
+}
+
+/// Record backup encryption verification (Issue #894)
+pub fn record_backup_encryption_verified() {
+    m::counter!("soroban_pulse_backup_encryption_verified_total").increment(1);
+}
+
+/// Record backup row count verification (Issue #894)
+pub fn record_backup_row_count_verified() {
+    m::counter!("soroban_pulse_backup_row_count_verified_total").increment(1);
+}
+
+/// Record distributed trace span created (Issue #895)
+pub fn record_trace_span_created(span_name: &str) {
+    m::counter!(
+        "soroban_pulse_trace_spans_created_total",
+        "span_name" => span_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Record trace sampling decision (Issue #895)
+pub fn record_trace_sampled(sampled: bool) {
+    m::counter!(
+        "soroban_pulse_trace_samples_total",
+        "sampled" => if sampled { "true" } else { "false" }
+    )
+    .increment(1);
+}
+
+/// Update trace injection latency (Issue #895)
+pub fn update_trace_injection_latency_ms(latency_ms: f64) {
+    m::gauge!("soroban_pulse_trace_injection_latency_ms").set(latency_ms);
+}
+
+/// Record SLI latency percentile calculation (Issue #896)
+pub fn record_sli_latency_percentile(percentile: &str, value_seconds: f64) {
+    m::gauge!(
+        "soroban_pulse_sli_latency_percentile",
+        "percentile" => percentile.to_string()
+    )
+    .set(value_seconds);
+}
+
+/// Record error rate metric (Issue #896)
+pub fn record_error_rate(endpoint: &str, rate: f64) {
+    m::gauge!(
+        "soroban_pulse_sli_error_rate",
+        "endpoint" => endpoint.to_string()
+    )
+    .set(rate);
+}
+
+/// Record availability metric (Issue #896)
+pub fn record_availability(endpoint: &str, availability: f64) {
+    m::gauge!(
+        "soroban_pulse_sli_availability",
+        "endpoint" => endpoint.to_string()
+    )
+    .set(availability);
+}
+
+/// Record SLO budget burndown (Issue #896)
+pub fn update_slo_budget_burndown(slo: &str, consumed: f64) {
+    m::gauge!(
+        "soroban_pulse_slo_budget_burndown",
+        "slo" => slo.to_string()
+    )
+    .set(consumed);
+}
+
+/// Record alert fired (Issue #897)
+pub fn record_alert_fired(alert_name: &str, severity: &str) {
+    m::counter!(
+        "soroban_pulse_alerts_fired_total",
+        "alert_name" => alert_name.to_string(),
+        "severity" => severity.to_string()
+    )
+    .increment(1);
+}
+
+/// Record alert resolved (Issue #897)
+pub fn record_alert_resolved(alert_name: &str) {
+    m::counter!(
+        "soroban_pulse_alerts_resolved_total",
+        "alert_name" => alert_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Record alert silenced (Issue #897)
+pub fn record_alert_silenced(alert_name: &str, duration_minutes: u64) {
+    m::counter!(
+        "soroban_pulse_alerts_silenced_total",
+        "alert_name" => alert_name.to_string()
+    )
+    .increment(1);
+    m::gauge!(
+        "soroban_pulse_alert_silence_duration_minutes",
+        "alert_name" => alert_name.to_string()
+    )
+    .set(duration_minutes as f64);
+}
+
+/// Update active alert count (Issue #897)
+pub fn update_active_alerts_count(component: &str, count: u64) {
+    m::gauge!(
+        "soroban_pulse_active_alerts",
+        "component" => component.to_string()
+    )
+    .set(count as f64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

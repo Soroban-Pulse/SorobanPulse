@@ -79,3 +79,26 @@
 *Runbook:* <{{ .Annotations.runbook_url }}|View Runbook>
 {{ end }}
 {{- end }}
+
+{{ define "opsgenie.default.message" -}}
+{{ .GroupLabels.alertname }}
+{{- end }}
+
+{{ define "opsgenie.default.description" -}}
+{{ .GroupLabels.alertname }}: {{ (index .Alerts 0).Annotations.summary }}
+Component: {{ (index .Alerts 0).Labels.component }}
+Severity: {{ (index .Alerts 0).Labels.severity }}
+{{ (index .Alerts 0).Annotations.description }}
+Runbook: {{ (index .Alerts 0).Annotations.runbook_url }}
+{{- end }}
+
+{{ define "victorops.default.message" -}}
+{{ .GroupLabels.alertname }}: {{ (index .Alerts 0).Annotations.summary }}
+{{- end }}
+
+{{ define "victorops.default.details" -}}
+Component: {{ (index .Alerts 0).Labels.component }}
+Severity: {{ (index .Alerts 0).Labels.severity }}
+Description: {{ (index .Alerts 0).Annotations.description }}
+Runbook: {{ (index .Alerts 0).Annotations.runbook_url }}
+{{- end }}

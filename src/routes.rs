@@ -490,6 +490,13 @@ pub fn create_router_with_tx_and_tenant_map(
         // #696: SLI / SLO dashboard reporting endpoints (admin-gated)
         .route("/admin/slo/report", axum::routing::get(handlers::get_slo_report))
         .route("/admin/slo/sample", axum::routing::post(handlers::record_slo_sample))
+        // #894: Backup verification
+        .route("/admin/backup/verification/report", axum::routing::get(handlers::get_backup_verification_report))
+        .route("/admin/backup/verification/trigger", axum::routing::post(handlers::trigger_backup_verification))
+        // #897: Alert silence management
+        .route("/admin/alerts/silences", axum::routing::post(handlers::create_alert_silence))
+        .route("/admin/alerts/silences", axum::routing::get(handlers::get_alert_silences))
+        .route("/admin/alerts/silences/{silence_id}", axum::routing::delete(handlers::delete_alert_silence))
         // #839: Push notification delivery analytics
         .route("/admin/push/analytics", axum::routing::get(crate::push_notification::get_push_analytics))
         // #879: Webhook circuit breaker admin endpoints

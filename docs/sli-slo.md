@@ -204,6 +204,65 @@ To produce an out-of-band report for an incident, follow this runbook:
 4. After the incident, identify the SLOs that breached and trigger the
    post-mortem runbook referenced in [`docs/api-sla.md`](api-sla.md).
 
+## Enhanced Dashboard Panels (Issue #896)
+
+The SLI/SLO dashboard includes several advanced panels for real-time monitoring:
+
+### Latency Percentiles
+Shows HTTP request latency at p50, p95, and p99 percentiles calculated from Prometheus histogram buckets.
+
+**PromQL:**
+```promql
+histogram_quantile(0.95, rate(soroban_pulse_http_request_duration_seconds_bucket[5m]))
+```
+
+### Error Rate by Status Code
+Tracks the percentage of 5xx errors relative to total requests, broken down by HTTP method and endpoint.
+
+**PromQL:**
+```promql
+rate(soroban_pulse_http_request_duration_seconds_count{status_code=~"5.."}[5m]) 
+/ 
+rate(soroban_pulse_http_request_duration_seconds_count[5m])
+```
+
+### API Availability
+Inverse of error rate — percentage of requests that succeeded (non-5xx responses).
+
+**PromQL:**
+```promql
+1 - (rate(soroban_pulse_http_request_duration_seconds_count{status_code=~"5.."}[5m]) 
+/ 
+rate(soroban_pulse_http_request_duration_seconds_count[5m]))
+```
+
+### SLO Budget Burndown
+Shows cumulative consumption of error budget over the window, useful for visualizing budget depletion trends.
+
+**PromQL:**
+```promql
+1 - soroban_pulse_slo_error_budget_remaining
+```
+
+### Request Distribution by Endpoint
+Histogram of request rates grouped by HTTP method and path, identifying which endpoints drive the most traffic.
+
+**PromQL:**
+```promql
+sum(rate(soroban_pulse_http_request_duration_seconds_count[5m])) by (method, path)
+```
+
+## SLI Metric Calculations
+
+SLI metrics are calculated in-process by `src/slo_tracker.rs`:
+
+1. **Latency SLI**: Sample value is request duration in seconds. Good if `duration <= target`.
+2. **Error Rate SLI**: Sample value is success count (1.0 = success, 0.0 = failure). Good if `value == 1.0`.
+3. **Availability SLI**: Treated as error rate; `1.0` = up, `0.0` = down.
+4. **Throughput/Saturation SLI**: Sample value is rate (requests/sec). Good if `rate <= target`.
+
+Completion ratio is the fraction of good samples in the rolling window.
+
 ## Related documentation
 
 * [API response time SLA](api-sla.md)
@@ -212,3 +271,4 @@ To produce an out-of-band report for an incident, follow this runbook:
 * [Capacity planning](capacity-planning.md)
 * [Replica sync monitoring](replica-monitoring.md)
 * [Performance regression testing](performance-regression-testing.md)
+* [Distributed tracing configuration](tracing.md)
