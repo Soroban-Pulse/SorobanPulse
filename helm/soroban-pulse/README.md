@@ -91,6 +91,35 @@ Encrypt the Secret with `kubeseal` and commit the resulting `SealedSecret` to
 Git. The in-cluster controller decrypts it at deploy time. Point `existingSecret`
 at the resulting decrypted Secret name.
 
+## Production customization
+
+The chart exposes production controls in `values.yaml` without requiring template edits:
+
+```yaml
+replicaCount: 3
+imagePullSecrets:
+  - name: registry-credentials
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "3000"
+nodeSelector:
+  kubernetes.io/os: linux
+tolerations: []
+affinity: {}
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: soroban-pulse
+extraEnv:
+  - name: LOG_LEVEL
+    value: info
+```
+
+The deployment uses a rolling-update strategy, a non-root runtime security context, a disabled service-account token mount, configurable scheduling constraints, and a configurable ServiceAccount with cloud-identity annotations. Set `serviceAccount.create: false` and provide `serviceAccount.name` when your platform provisions the workload identity externally. Set `existingSecret` in production so credentials come from an external secret manager rather than chart values.
+
 ## Installation
 
 ```bash
