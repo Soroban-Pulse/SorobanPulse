@@ -2,6 +2,8 @@
 
 A reference for diagnosing and resolving common issues in Soroban Pulse.
 
+Not sure which section applies? Start at the [Troubleshooting Decision Tree](troubleshooting-guide.md) for a symptom-first path into the sections below.
+
 ## Table of Contents
 
 - [Common Errors and Solutions](#common-errors-and-solutions)
