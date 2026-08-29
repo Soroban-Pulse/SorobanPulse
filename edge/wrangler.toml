@@ -1,0 +1,23 @@
+name = "soroban-pulse-edge"
+type = "javascript"
+account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+workers_dev = true
+route = "api.soroban-pulse.example.com/*"
+zone_id = "YOUR_CLOUDFLARE_ZONE_ID"
+
+[env.production]
+name = "soroban-pulse-edge-prod"
+route = "api.soroban-pulse.example.com/*"
+
+[env.staging]
+name = "soroban-pulse-edge-staging"
+route = "staging-api.soroban-pulse.example.com/*"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[build]
+command = ""
+[build.upload]
+format = "service-worker"

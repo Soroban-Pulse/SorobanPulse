@@ -1,0 +1,120 @@
+---
+apiVersion: policy.linkerd.io/v1beta1
+kind: Server
+metadata:
+  name: soroban-pulse-http
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  podSelector:
+    matchLabels:
+      app: soroban-pulse
+  port: http
+  proxyProtocol: HTTP/1
+
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: ServerAuthorization
+metadata:
+  name: soroban-pulse-authz
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  server:
+    name: soroban-pulse-http
+  client:
+    # Allow traffic from ingress
+    meshTLS:
+      serviceAccounts:
+      - name: linkerd-proxy
+        namespace: linkerd
+    # Allow traffic from prometheus for metrics scraping
+    - meshTLS:
+        serviceAccounts:
+        - name: prometheus
+          namespace: monitoring
+    # Allow authenticated traffic from other services
+    - meshTLS:
+        serviceAccounts:
+        - name: soroban-pulse
+          namespace: default
+    # Allow unauthenticated traffic for health checks
+    unauthenticated: true
+
+---
+apiVersion: policy.linkerd.io/v1beta1
+kind: HTTPRoute
+metadata:
+  name: soroban-pulse-routes
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  parentRefs:
+  - name: soroban-pulse-http
+    kind: Server
+    group: policy.linkerd.io
+  rules:
+  # Health checks
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /health
+    - path:
+        type: PathPrefix
+        value: /ready
+    timeouts:
+      request: 5s
+  
+  # API endpoints
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /api/v1
+    timeouts:
+      request: 30s
+    backendRefs:
+    - name: soroban-pulse-service
+      port: 8080
+  
+  # GraphQL with longer timeout
+  - matches:
+    - path:
+        type: Exact
+        value: /graphql
+    - method: POST
+    timeouts:
+      request: 60s
+  
+  # SSE streaming - no timeout
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /api/v1/events/stream
+    timeouts:
+      request: 0s
+
+---
+# Rate limiting configuration
+apiVersion: policy.linkerd.io/v1alpha1
+kind: HTTPLocalRateLimitPolicy
+metadata:
+  name: soroban-pulse-rate-limit
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  targetRef:
+    group: policy.linkerd.io
+    kind: HTTPRoute
+    name: soroban-pulse-routes
+  total:
+    requestsPerSecond: 1000
+  identity:
+    requestsPerSecond: 100

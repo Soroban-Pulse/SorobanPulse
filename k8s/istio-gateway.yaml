@@ -1,0 +1,43 @@
+---
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: soroban-pulse-gateway
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "soroban-pulse.example.com"
+    - "*.soroban-pulse.example.com"
+    tls:
+      httpsRedirect: true
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    hosts:
+    - "soroban-pulse.example.com"
+    - "*.soroban-pulse.example.com"
+    tls:
+      mode: SIMPLE
+      credentialName: soroban-pulse-tls-cert
+      minProtocolVersion: TLSV1_3
+  # gRPC support for high-performance API calls
+  - port:
+      number: 50051
+      name: grpc
+      protocol: GRPC
+    hosts:
+    - "grpc.soroban-pulse.example.com"
+    tls:
+      mode: SIMPLE
+      credentialName: soroban-pulse-grpc-tls-cert
