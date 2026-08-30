@@ -820,6 +820,45 @@ pub fn record_streaming_response_duration(seconds: f64) {
     m::histogram!("soroban_pulse_streaming_response_duration_seconds").record(seconds);
 }
 
+// ── Query Result Streaming metrics (Issue #960) ───────────────────────────────
+
+/// Record a row handed out by a streamed query.
+pub fn record_query_stream_row() {
+    m::counter!("soroban_pulse_query_stream_rows_total").increment(1);
+}
+
+/// Record a completed batch fetch and how many rows it returned.
+pub fn record_query_stream_batch(rows: u64) {
+    m::counter!("soroban_pulse_query_stream_batches_total").increment(1);
+    m::histogram!("soroban_pulse_query_stream_batch_rows").record(rows as f64);
+}
+
+/// Record a failed batch fetch.
+pub fn record_query_stream_error() {
+    m::counter!("soroban_pulse_query_stream_batch_errors_total").increment(1);
+}
+
+/// Record a keep-alive tick emitted while a batch was still running.
+pub fn record_query_stream_keepalive() {
+    m::counter!("soroban_pulse_query_stream_keepalives_total").increment(1);
+}
+
+/// Record a stream stopped by its caller.
+pub fn record_query_stream_cancelled() {
+    m::counter!("soroban_pulse_query_streams_cancelled_total").increment(1);
+}
+
+/// Record a stream that stopped at `max_batches` with rows still unread.
+pub fn record_query_stream_truncated() {
+    m::counter!("soroban_pulse_query_streams_truncated_total").increment(1);
+}
+
+/// Record a stream that delivered its whole result set.
+pub fn record_query_stream_completed(rows: u64) {
+    m::counter!("soroban_pulse_query_streams_completed_total").increment(1);
+    m::histogram!("soroban_pulse_query_stream_rows_per_stream").record(rows as f64);
+}
+
 // ── JSON Serialization metrics (Issue #687) ──────────────────────────────────
 
 /// Record JSON serialization cache hit

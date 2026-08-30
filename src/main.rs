@@ -14,6 +14,7 @@ mod cross_chain_correlation;
 mod cursor_expiry_handler;
 mod db;
 mod advisory_lock;
+mod query_streaming;
 mod serialization_cache;
 mod streaming_response;
 mod dedup;
