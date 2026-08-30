@@ -32,6 +32,8 @@ mod kinesis;
 #[cfg(feature = "lua")]
 mod lua_transform;
 mod metrics;
+mod prometheus_remote_write;
+mod eventbridge;
 mod middleware;
 mod models;
 mod normalizer;
