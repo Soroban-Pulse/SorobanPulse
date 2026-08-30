@@ -849,6 +849,67 @@ pub fn record_serialization_time(entity_type: &str, duration_us: u64) {
     .record(duration_us as f64);
 }
 
+/// Record an entry evicted from the serialization cache (TTL or capacity). (#959)
+pub fn record_serialization_cache_eviction(entity_type: &str) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_evictions_total",
+        "entity_type" => entity_type.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a deliberate invalidation. `strategy` is `key`, `entity_type`, or `all`. (#959)
+pub fn record_serialization_cache_invalidation(entity_type: &str, strategy: &str) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_invalidations_total",
+        "entity_type" => entity_type.to_string(),
+        "strategy" => strategy.to_string()
+    )
+    .increment(1);
+}
+
+/// Record entries loaded by a pre-warm pass. (#959)
+pub fn record_serialization_cache_prewarm(entity_type: &str, entries: u64) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_prewarmed_total",
+        "entity_type" => entity_type.to_string()
+    )
+    .increment(entries);
+}
+
+/// Record bytes served from cache rather than re-serialized — the CPU the
+/// cache actually saved, as opposed to how often it was consulted. (#959)
+pub fn record_serialization_cache_bytes_saved(entity_type: &str, bytes: u64) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_bytes_saved_total",
+        "entity_type" => entity_type.to_string()
+    )
+    .increment(bytes);
+}
+
+/// Update the live serialization cache entry-count gauge. (#959)
+pub fn update_serialization_cache_entry_count(count: u64) {
+    m::gauge!("soroban_pulse_serialization_cache_entry_count").set(count as f64);
+}
+
+/// Update the observed hit rate, in the range 0.0 to 1.0. (#959)
+pub fn update_serialization_cache_hit_rate(entity_type: &str, rate: f64) {
+    m::gauge!(
+        "soroban_pulse_serialization_cache_hit_rate",
+        "entity_type" => entity_type.to_string()
+    )
+    .set(rate);
+}
+
+/// Update the current cache version, bumped on a bulk invalidation. (#959)
+pub fn update_serialization_cache_version(entity_type: &str, version: u64) {
+    m::gauge!(
+        "soroban_pulse_serialization_cache_version",
+        "entity_type" => entity_type.to_string()
+    )
+    .set(version as f64);
+}
+
 // ── PostgreSQL Query Plan Caching metrics (Issue #689 / #802) ──────────────────
 
 /// Record query plan cache hit
