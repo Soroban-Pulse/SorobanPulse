@@ -46,9 +46,13 @@ See [docs/schema.md](docs/schema.md) for a detailed description of the database 
 ## Documentation
 
 - [Developer onboarding guide](docs/onboarding.md) — start here if you're new: a day-1 checklist and fixes for the most common first-build issues.
+- [Development environment setup](docs/development-setup.md) — OS-specific setup, IDE/editor configuration, pre-commit hooks, debugging tools, and performance profiling.
 - [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
 - [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
-- [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, common patterns, and anti-patterns.
+- [SDK integration guide](docs/sdk-integration-guide.md) — using the TypeScript, Python, and Go SDKs: auth, subscriptions, streaming, and error handling.
+- [SDK development guide](docs/sdk-development.md) — building and extending the SDKs themselves: architecture, per-language tutorials, and webhook verification.
+- [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, performance benchmarks, monitoring, common patterns, and anti-patterns.
+- [Troubleshooting decision tree](docs/troubleshooting-guide.md) — symptom-first navigation into the detailed [troubleshooting guide](docs/troubleshooting.md) and runbooks.
 - [Contract event schemas](docs/contract-event-schemas.md) documents Stellar contract event patterns, XDR encoding, event data types, examples, and validation rules.
 - [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.
 - [Data retention policy](docs/data-retention.md) explains default retention periods, archival, GDPR procedures, deletion workflows, and audit trail retention.
