@@ -116,6 +116,8 @@ pub async fn deliver(
 ///
 /// All parameters are owned so the resulting future is `'static` and safe to
 /// pass to `tokio::spawn`.
+///
+/// See docs/adr/0003-webhook-retry-strategy.md for the design rationale.
 pub async fn deliver_with_retry_policy(
     client: Client,
     url: String,

@@ -244,6 +244,14 @@ The preferred contribution path is: open or find an issue, confirm the intended 
 | Architecture change | An [ADR](docs/adr/README.md) linked from the pull request |
 | Documentation-only change | A reproducible example checked against the current commands and configuration |
 
+### When a pull request needs an ADR
+
+A pull request needs an Architecture Decision Record when it changes a public API or event contract, storage or migration behavior, deployment topology, data retention, a security boundary, or an operational dependency — or introduces a decision future contributors could reasonably revisit. Routine bug fixes, dependency bumps, and localized refactors do not need one. If you are unsure whether your change qualifies, ask in the issue before opening the pull request rather than guessing.
+
+To propose an ADR, copy [`docs/adr/0000-template.md`](docs/adr/0000-template.md) to the next available number under `docs/adr/`, fill in the context, decision, alternatives, consequences, and rollout sections, add it to the index in [`docs/adr/README.md`](docs/adr/README.md), and link it from your pull request description. New ADRs start as `Proposed`.
+
+An ADR is reviewed and approved like any other code change: reviewers check that the decision is specific, that rejected alternatives are documented, and that consequences and rollback are addressed, before the pull request (and the ADR's status) can move to `Accepted`. See [`docs/adr/README.md`](docs/adr/README.md) for the full authoring workflow and [`docs/adr/review-guidelines.md`](docs/adr/review-guidelines.md) for what reviewers look for.
+
 ### Example: branch, checks, and pull request
 
 ```bash

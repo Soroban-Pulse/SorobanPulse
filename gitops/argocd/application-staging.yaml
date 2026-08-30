@@ -1,0 +1,57 @@
+# ArgoCD Application for the staging environment. Same chart and repository
+# as production, deployed into soroban-pulse-staging with self-heal disabled
+# (drift is flagged as OutOfSync but not auto-corrected) so staging can be
+# poked at manually for debugging without ArgoCD immediately reverting it.
+# See docs/gitops.md, "Add manual sync with drift detection".
+#
+#   kubectl apply -n argocd -f gitops/argocd/application-staging.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: soroban-pulse-staging
+  namespace: argocd
+spec:
+  project: soroban-pulse
+
+  source:
+    repoURL: https://github.com/Soroban-Pulse/SorobanPulse.git
+    # Staging tracks a branch rather than main so it can pick up changes
+    # ahead of production if that workflow is adopted; pin to `main` if a
+    # single-branch-both-environments flow is preferred instead.
+    targetRevision: main
+    path: helm/soroban-pulse
+    helm:
+      # PREREQUISITE: this file does not exist yet in the repository as of
+      # this writing. helm/soroban-pulse/values.yaml only ships one set of
+      # defaults (effectively production-shaped: ENVIRONMENT=production,
+      # replicaCount=2). Before this Application can sync successfully,
+      # create helm/soroban-pulse/values-staging.yaml with at least:
+      #   env:
+      #     ENVIRONMENT: "staging"
+      #     STELLAR_RPC_URL: "https://soroban-testnet.stellar.org"
+      #   replicaCount: 1
+      #   autoscaling:
+      #     minReplicas: 1
+      #     maxReplicas: 3
+      #   existingSecret: "soroban-pulse-staging-credentials"
+      # See docs/gitops.md, "Create application manifests repository", for
+      # why this is documented as a prerequisite instead of invented here.
+      valueFiles:
+        - values-staging.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: soroban-pulse-staging
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: false   # detect drift, do not auto-correct (see docs/gitops.md)
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
