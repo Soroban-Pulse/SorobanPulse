@@ -59,6 +59,7 @@ mod pagerduty;
 mod github;
 mod discord;
 mod slack;
+mod teams;
 mod telegram;
 mod notification_channel;
 mod integration_handlers;
