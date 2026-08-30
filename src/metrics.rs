@@ -177,6 +177,17 @@ pub fn record_rate_limit_rejected() {
     m::counter!("soroban_pulse_rate_limit_rejected_total").increment(1);
 }
 
+/// Record that a notification was suppressed by a suppression list.
+pub fn record_notification_suppressed() {
+    m::counter!("soroban_pulse_notification_suppressed_total").increment(1);
+}
+
+/// Record a webhook failover event.
+pub fn record_notification_failover(channel: &str) {
+    m::counter!("soroban_pulse_notification_failover_total", "channel" => channel.to_string())
+        .increment(1);
+}
+
 /// Record a persistent webhook delivery failure (all retries exhausted)
 pub fn record_webhook_failure() {
     m::counter!("soroban_pulse_webhook_failures_total").increment(1);
