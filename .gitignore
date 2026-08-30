@@ -113,3 +113,25 @@ terraform/**/terraform.tfstate.backup
 # Never commit actual tfvars (may contain secrets)
 terraform.tfvars
 **/terraform.tfvars
+
+# Secrets scanning artifacts
+.secrets.scan-results.json
+gitleaks-report.sarif
+results.sarif
+
+# detect-secrets baseline (keep this committed for CI comparison)
+# .secrets.baseline
+
+# Compliance report artifacts (generated, not source-controlled)
+compliance-reports/
+audit-exports/
+
+# Pre-commit hook cache
+.pre-commit-cache/
+
+# Python virtual environments (for pre-commit tools)
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
