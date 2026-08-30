@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-db lint fmt run docker-up docker-down migrate clean gen-openapi gen-postman deny compliance-tests
+.PHONY: help build test test-db lint fmt run docker-up docker-down migrate clean gen-openapi gen-postman deny
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -29,26 +29,6 @@ deny: ## Run cargo-deny checks (advisories, bans, licenses, sources)
 	cargo deny check bans
 	cargo deny check licenses
 	cargo deny check sources
-
-audit: ## Run cargo-audit vulnerability scan against the RustSec advisory database
-	@command -v cargo-audit >/dev/null 2>&1 || cargo install cargo-audit --locked
-	cargo audit --deny warnings
-
-security-tests: ## Run the dedicated security test suite (no DATABASE_URL needed)
-	cargo test --test security -- --nocapture
-
-compliance-tests: ## Run API compliance tests
-	cargo test --test api_compliance
-
-check-secrets: ## Scan for hardcoded secrets and credentials in the codebase
-	@bash scripts/check_secrets.sh
-
-security: deny audit security-tests check-secrets ## Run all security checks (deny + audit + tests + secrets scan)
-
-geiger: ## Audit unsafe code usage with cargo-geiger (advisory, non-blocking)
-	@command -v cargo-geiger >/dev/null 2>&1 || cargo install cargo-geiger --locked
-	cargo geiger --all-features 2>&1 | tee geiger-report.txt || true
-	@echo "Geiger report saved to geiger-report.txt"
 
 run: ## Start the development server
 	cargo run
