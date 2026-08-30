@@ -661,6 +661,21 @@ pub fn create_router_with_tx_and_tenant_map(
             "/push/{contract_id}/abi",
             axum::routing::get(crate::push_preload::get_push_abi),
         )
+        // Issue #931: Batch event operations
+        .route("/events/batch/retrieve", axum::routing::post(crate::batch_operations::batch_retrieve_events))
+        .route("/events/batch/delete", axum::routing::post(crate::batch_operations::batch_delete_events))
+        .route("/events/batch/tag", axum::routing::post(crate::batch_operations::batch_tag_events))
+        .route("/events/batch/subscriptions", axum::routing::post(crate::batch_operations::batch_update_subscriptions))
+        .route("/events/batch/transform", axum::routing::post(crate::batch_operations::batch_transform_events))
+        .route("/events/batch/progress/{job_id}", axum::routing::get(crate::batch_operations::get_batch_progress))
+        // Issue #929: Real-time event stream statistics
+        .route("/stats/stream", axum::routing::get(crate::stream_statistics::get_stream_stats))
+        .route("/stats/stream/throughput", axum::routing::get(crate::stream_statistics::get_stream_throughput))
+        .route("/stats/stream/{contract_id}", axum::routing::get(crate::stream_statistics::get_contract_stream_stats))
+        // Issue #928: Event filtering DSL
+        .route("/events/filter", axum::routing::post(crate::filter_dsl::get_events_with_dsl))
+        .route("/admin/dsl/compile", axum::routing::post(crate::filter_dsl::compile_dsl_filter))
+        .route("/admin/dsl/filters", axum::routing::post(crate::filter_dsl::save_dsl_filter).get(crate::filter_dsl::list_dsl_filters))
         // Append Link preload headers to responses for
         // /v1/events/contract/{contract_id} when the feature flag is on.
         .route_layer(axum::middleware::from_fn_with_state(
