@@ -70,6 +70,7 @@ pub mod financial_accuracy;
 pub mod sse_ring_buffer;
 pub mod query_cache;
 pub mod query_optimizer;
+pub mod query_profiler;
 pub mod push_notification;
 pub mod connection_pool;
 pub mod push_preload;
