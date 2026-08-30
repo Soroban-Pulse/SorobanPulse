@@ -796,6 +796,74 @@ pub fn record_streaming_response_error(error_type: &str) {
     .increment(1);
 }
 
+/// Record a chunk flushed to a streaming client, in bytes on the wire.
+pub fn record_streaming_response_chunk(bytes: u64) {
+    m::counter!("soroban_pulse_streaming_response_chunks_total").increment(1);
+    m::histogram!("soroban_pulse_streaming_response_chunk_bytes").record(bytes as f64);
+}
+
+/// Record that a producer parked on a full channel waiting for a slow consumer.
+///
+/// A rising rate here means clients are reading slower than the database
+/// produces — the healthy signal that backpressure is doing its job, and the
+/// early warning that request timeouts are coming.
+pub fn record_streaming_response_backpressure() {
+    m::counter!("soroban_pulse_streaming_response_backpressure_total").increment(1);
+}
+
+/// Record a stream that ended early. `reason` is `caller` or `client`.
+pub fn record_streaming_response_cancelled(reason: &str) {
+    m::counter!(
+        "soroban_pulse_streaming_responses_cancelled_total",
+        "reason" => reason.to_string()
+    )
+    .increment(1);
+}
+
+/// Record total wall time of a streaming response, in seconds.
+pub fn record_streaming_response_duration(seconds: f64) {
+    m::histogram!("soroban_pulse_streaming_response_duration_seconds").record(seconds);
+}
+
+// ── Query Result Streaming metrics (Issue #960) ───────────────────────────────
+
+/// Record a row handed out by a streamed query.
+pub fn record_query_stream_row() {
+    m::counter!("soroban_pulse_query_stream_rows_total").increment(1);
+}
+
+/// Record a completed batch fetch and how many rows it returned.
+pub fn record_query_stream_batch(rows: u64) {
+    m::counter!("soroban_pulse_query_stream_batches_total").increment(1);
+    m::histogram!("soroban_pulse_query_stream_batch_rows").record(rows as f64);
+}
+
+/// Record a failed batch fetch.
+pub fn record_query_stream_error() {
+    m::counter!("soroban_pulse_query_stream_batch_errors_total").increment(1);
+}
+
+/// Record a keep-alive tick emitted while a batch was still running.
+pub fn record_query_stream_keepalive() {
+    m::counter!("soroban_pulse_query_stream_keepalives_total").increment(1);
+}
+
+/// Record a stream stopped by its caller.
+pub fn record_query_stream_cancelled() {
+    m::counter!("soroban_pulse_query_streams_cancelled_total").increment(1);
+}
+
+/// Record a stream that stopped at `max_batches` with rows still unread.
+pub fn record_query_stream_truncated() {
+    m::counter!("soroban_pulse_query_streams_truncated_total").increment(1);
+}
+
+/// Record a stream that delivered its whole result set.
+pub fn record_query_stream_completed(rows: u64) {
+    m::counter!("soroban_pulse_query_streams_completed_total").increment(1);
+    m::histogram!("soroban_pulse_query_stream_rows_per_stream").record(rows as f64);
+}
+
 // ── JSON Serialization metrics (Issue #687) ──────────────────────────────────
 
 /// Record JSON serialization cache hit
@@ -823,6 +891,67 @@ pub fn record_serialization_time(entity_type: &str, duration_us: u64) {
         "entity_type" => entity_type.to_string()
     )
     .record(duration_us as f64);
+}
+
+/// Record an entry evicted from the serialization cache (TTL or capacity). (#959)
+pub fn record_serialization_cache_eviction(entity_type: &str) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_evictions_total",
+        "entity_type" => entity_type.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a deliberate invalidation. `strategy` is `key`, `entity_type`, or `all`. (#959)
+pub fn record_serialization_cache_invalidation(entity_type: &str, strategy: &str) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_invalidations_total",
+        "entity_type" => entity_type.to_string(),
+        "strategy" => strategy.to_string()
+    )
+    .increment(1);
+}
+
+/// Record entries loaded by a pre-warm pass. (#959)
+pub fn record_serialization_cache_prewarm(entity_type: &str, entries: u64) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_prewarmed_total",
+        "entity_type" => entity_type.to_string()
+    )
+    .increment(entries);
+}
+
+/// Record bytes served from cache rather than re-serialized — the CPU the
+/// cache actually saved, as opposed to how often it was consulted. (#959)
+pub fn record_serialization_cache_bytes_saved(entity_type: &str, bytes: u64) {
+    m::counter!(
+        "soroban_pulse_serialization_cache_bytes_saved_total",
+        "entity_type" => entity_type.to_string()
+    )
+    .increment(bytes);
+}
+
+/// Update the live serialization cache entry-count gauge. (#959)
+pub fn update_serialization_cache_entry_count(count: u64) {
+    m::gauge!("soroban_pulse_serialization_cache_entry_count").set(count as f64);
+}
+
+/// Update the observed hit rate, in the range 0.0 to 1.0. (#959)
+pub fn update_serialization_cache_hit_rate(entity_type: &str, rate: f64) {
+    m::gauge!(
+        "soroban_pulse_serialization_cache_hit_rate",
+        "entity_type" => entity_type.to_string()
+    )
+    .set(rate);
+}
+
+/// Update the current cache version, bumped on a bulk invalidation. (#959)
+pub fn update_serialization_cache_version(entity_type: &str, version: u64) {
+    m::gauge!(
+        "soroban_pulse_serialization_cache_version",
+        "entity_type" => entity_type.to_string()
+    )
+    .set(version as f64);
 }
 
 // ── PostgreSQL Query Plan Caching metrics (Issue #689 / #802) ──────────────────
