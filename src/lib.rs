@@ -82,3 +82,5 @@ pub mod cloud_replication;
 pub mod deployment_orchestrator;
 pub mod saas_platform;
 pub mod ml_integration;
+pub mod prometheus_remote_write;
+pub mod eventbridge;
