@@ -5,7 +5,10 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{metrics, models::SorobanEvent};
+use crate::{
+    metrics,
+    models::{Event, EventType},
+};
 
 /// Slack OAuth configuration
 #[derive(Debug, Clone)]
@@ -49,14 +52,13 @@ impl SlackClient {
     /// Send a formatted message to Slack using Block Kit
     pub async fn send_event_notification(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
         thread_ts: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let color = match event.event_type.as_str() {
-            "contract" => "#0099FF",   // Blue
-            "diagnostic" => "#FF9900", // Orange
-            "system" => "#FF0000",     // Red
-            _ => "#999999",            // Gray
+        let color = match event.event_type {
+            EventType::Contract => "#0099FF",   // Blue
+            EventType::Diagnostic => "#FF9900", // Orange
+            EventType::System => "#FF0000",     // Red
         };
 
         let blocks = json!([
@@ -235,7 +237,7 @@ impl SlackClient {
     /// Send event to Slack with retry logic
     pub async fn send_with_retry(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
         max_retries: u32,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut backoff_ms = 1000u64;
@@ -307,7 +309,7 @@ impl SlackClient {
 /// Deliver an event to Slack with retry logic
 pub async fn deliver_slack(
     client: &SlackClient,
-    event: SorobanEvent,
+    event: Event,
 ) {
     if let Err(e) = client.send_with_retry(&event, 3).await {
         error!(
