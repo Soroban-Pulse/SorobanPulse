@@ -39,6 +39,7 @@ pub mod kinesis;
 #[cfg(feature = "lua")]
 pub mod lua_transform;
 pub mod metrics;
+pub mod model_serving;
 pub mod middleware;
 pub mod models;
 pub mod multi_tenancy;
