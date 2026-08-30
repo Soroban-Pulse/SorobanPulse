@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help build test test-db lint fmt run docker-up docker-down migrate clean gen-openapi gen-postman deny
+.PHONY: help build test test-db lint fmt run docker-up docker-down migrate clean gen-openapi gen-postman deny compliance-tests
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*##' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
@@ -36,6 +36,9 @@ audit: ## Run cargo-audit vulnerability scan against the RustSec advisory databa
 
 security-tests: ## Run the dedicated security test suite (no DATABASE_URL needed)
 	cargo test --test security -- --nocapture
+
+compliance-tests: ## Run API compliance tests
+	cargo test --test api_compliance
 
 check-secrets: ## Scan for hardcoded secrets and credentials in the codebase
 	@bash scripts/check_secrets.sh
