@@ -791,6 +791,35 @@ pub fn record_streaming_response_error(error_type: &str) {
     .increment(1);
 }
 
+/// Record a chunk flushed to a streaming client, in bytes on the wire.
+pub fn record_streaming_response_chunk(bytes: u64) {
+    m::counter!("soroban_pulse_streaming_response_chunks_total").increment(1);
+    m::histogram!("soroban_pulse_streaming_response_chunk_bytes").record(bytes as f64);
+}
+
+/// Record that a producer parked on a full channel waiting for a slow consumer.
+///
+/// A rising rate here means clients are reading slower than the database
+/// produces — the healthy signal that backpressure is doing its job, and the
+/// early warning that request timeouts are coming.
+pub fn record_streaming_response_backpressure() {
+    m::counter!("soroban_pulse_streaming_response_backpressure_total").increment(1);
+}
+
+/// Record a stream that ended early. `reason` is `caller` or `client`.
+pub fn record_streaming_response_cancelled(reason: &str) {
+    m::counter!(
+        "soroban_pulse_streaming_responses_cancelled_total",
+        "reason" => reason.to_string()
+    )
+    .increment(1);
+}
+
+/// Record total wall time of a streaming response, in seconds.
+pub fn record_streaming_response_duration(seconds: f64) {
+    m::histogram!("soroban_pulse_streaming_response_duration_seconds").record(seconds);
+}
+
 // ── JSON Serialization metrics (Issue #687) ──────────────────────────────────
 
 /// Record JSON serialization cache hit
