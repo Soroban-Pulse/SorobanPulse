@@ -202,6 +202,11 @@ pub fn record_slack_failure() {
     m::counter!("soroban_pulse_slack_failures_total").increment(1);
 }
 
+/// Record a Microsoft Teams delivery failure (all retries exhausted)
+pub fn record_teams_failure() {
+    m::counter!("soroban_pulse_teams_failures_total").increment(1);
+}
+
 /// Record a Telegram delivery failure (all retries exhausted)
 pub fn record_telegram_failure() {
     m::counter!("soroban_pulse_telegram_failures_total").increment(1);
