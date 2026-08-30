@@ -16,6 +16,7 @@ pub mod compliance_report;
 pub mod config;
 pub mod content_filter;
 pub mod data_integrity;
+pub mod data_quality;
 pub mod db;
 pub mod db_config_advisor;
 pub mod dedup;
