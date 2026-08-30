@@ -115,3 +115,82 @@ fuzz: ## Run fuzz tests locally (60 seconds each)
 	cd fuzz && cargo fuzz run fuzz_validate_contract_id -- -max_total_time=60
 	cd fuzz && cargo fuzz run fuzz_validate_tx_hash -- -max_total_time=60
 	cd fuzz && cargo fuzz run fuzz_pagination_params -- -max_total_time=60
+
+# ── Load testing targets (Issue #923) ──────────────────────────────────────
+# Requires k6: https://k6.io/docs/get-started/installation/
+# All scripts read BASE_URL from the environment (default: http://localhost:3000).
+
+.PHONY: load-test load-test-quick load-test-constant load-test-ramp \
+        load-test-burst load-test-overload load-test-stress load-test-soak \
+        load-test-spike
+
+load-test-quick: ## Quick smoke check — constant load for 60 s (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed. See https://k6.io/docs/get-started/installation/"; exit 1; }
+	@echo "Running 60-second steady-state smoke check..."
+	@mkdir -p tests/load/results
+	k6 run -e DURATION=60s ${K6_FLAGS} tests/load/constant_load.js
+
+load-test-constant: ## Constant load — 50 VUs for 5 min (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed."; exit 1; }
+	@mkdir -p tests/load/results
+	k6 run ${K6_FLAGS} tests/load/constant_load.js
+
+load-test-ramp: ## Ramp-up — 0→100 VUs / 5 min ramp, 2 min hold (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed."; exit 1; }
+	@mkdir -p tests/load/results
+	k6 run ${K6_FLAGS} tests/load/ramp_up.js
+
+load-test-burst: ## Burst — 10 VU baseline + two 200 req/s spikes (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed."; exit 1; }
+	@mkdir -p tests/load/results
+	k6 run ${K6_FLAGS} tests/load/burst.js
+
+load-test-overload: ## Sustained overload — 200 req/s for 3 min, observational (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed."; exit 1; }
+	@mkdir -p tests/load/results
+	k6 run ${K6_FLAGS} tests/load/sustained_overload.js
+
+load-test-stress: ## Stress test — ramp from 200 to 1000 req/s (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed."; exit 1; }
+	@mkdir -p tests/load/results
+	k6 run ${K6_FLAGS} tests/load/stress.js
+
+load-test-soak: ## Soak test — 24-hour stability run (requires k6; use SOAK_DURATION=30m for a short run)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed."; exit 1; }
+	@mkdir -p tests/load/results
+	k6 run -e SOAK_DURATION=$${SOAK_DURATION:-24h} ${K6_FLAGS} tests/load/soak.js
+
+load-test-spike: ## Spike test — instant 10× burst + recovery (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed."; exit 1; }
+	@mkdir -p tests/load/results
+	k6 run ${K6_FLAGS} tests/load/spike.js
+
+load-test: ## Run all load test scenarios sequentially and print summary (requires k6)
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 not installed. See https://k6.io/docs/get-started/installation/"; exit 1; }
+	@mkdir -p tests/load/results
+	@echo "================================================================"
+	@echo "  SorobanPulse Load Test Suite — Issue #923"
+	@echo "  BASE_URL = $${BASE_URL:-http://localhost:3000}"
+	@echo "================================================================"
+	@echo ""
+	@echo "[1/6] Constant Load (50 VUs, 5 min)..."
+	@k6 run ${K6_FLAGS} tests/load/constant_load.js    && echo "  ✅ constant_load passed"    || echo "  ❌ constant_load FAILED"
+	@echo ""
+	@echo "[2/6] Ramp-Up (0→100 VUs, 9 min total)..."
+	@k6 run ${K6_FLAGS} tests/load/ramp_up.js          && echo "  ✅ ramp_up passed"          || echo "  ❌ ramp_up FAILED"
+	@echo ""
+	@echo "[3/6] Burst (10 VU baseline + two 200 req/s spikes)..."
+	@k6 run ${K6_FLAGS} tests/load/burst.js            && echo "  ✅ burst passed"            || echo "  ❌ burst FAILED"
+	@echo ""
+	@echo "[4/6] Sustained Overload (200 req/s, 3 min, observational)..."
+	@k6 run ${K6_FLAGS} tests/load/sustained_overload.js && echo "  ✅ sustained_overload done" || echo "  ⚠️  sustained_overload done (observational — check summary)"
+	@echo ""
+	@echo "[5/6] Stress Test (200→1000 req/s ramp)..."
+	@k6 run ${K6_FLAGS} tests/load/stress.js           && echo "  ✅ stress done"             || echo "  ⚠️  stress done (observational — check summary)"
+	@echo ""
+	@echo "[6/6] Spike Test (10× burst)..."
+	@k6 run ${K6_FLAGS} tests/load/spike.js            && echo "  ✅ spike passed"            || echo "  ❌ spike FAILED"
+	@echo ""
+	@echo "================================================================"
+	@echo "  All scenarios complete. Results in tests/load/results/"
+	@echo "================================================================"
