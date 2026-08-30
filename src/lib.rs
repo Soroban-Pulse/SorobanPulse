@@ -83,5 +83,6 @@ pub mod cloud_replication;
 pub mod deployment_orchestrator;
 pub mod saas_platform;
 pub mod ml_integration;
-pub mod notification_delivery;
-pub mod scheduled_replay;
+pub mod batch_operations;
+pub mod stream_statistics;
+pub mod filter_dsl;
