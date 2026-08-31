@@ -434,69 +434,89 @@ impl RetryConfig {
 ///
 /// Aggregates delivery statistics per device type for monitoring and the
 /// analytics summary endpoint.
-#[derive(Debug, Default)]
+///
+/// Issue #993: uses `metrics::SafeCounter` instead of raw `AtomicU64` so a
+/// long-running instance saturates (and emits an overflow-detection metric)
+/// rather than silently wrapping back to a small number.
+#[derive(Debug)]
 pub struct DeliveryAnalytics {
-    pub total_sent: std::sync::atomic::AtomicU64,
-    pub total_failed: std::sync::atomic::AtomicU64,
-    pub total_invalid_tokens: std::sync::atomic::AtomicU64,
-    pub total_retries: std::sync::atomic::AtomicU64,
-    pub android_sent: std::sync::atomic::AtomicU64,
-    pub ios_sent: std::sync::atomic::AtomicU64,
-    pub web_sent: std::sync::atomic::AtomicU64,
+    pub total_sent: crate::metrics::SafeCounter,
+    pub total_failed: crate::metrics::SafeCounter,
+    pub total_invalid_tokens: crate::metrics::SafeCounter,
+    pub total_retries: crate::metrics::SafeCounter,
+    pub android_sent: crate::metrics::SafeCounter,
+    pub ios_sent: crate::metrics::SafeCounter,
+    pub web_sent: crate::metrics::SafeCounter,
+}
+
+impl Default for DeliveryAnalytics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DeliveryAnalytics {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            total_sent: crate::metrics::SafeCounter::new("push_total_sent"),
+            total_failed: crate::metrics::SafeCounter::new("push_total_failed"),
+            total_invalid_tokens: crate::metrics::SafeCounter::new("push_total_invalid_tokens"),
+            total_retries: crate::metrics::SafeCounter::new("push_total_retries"),
+            android_sent: crate::metrics::SafeCounter::new("push_android_sent"),
+            ios_sent: crate::metrics::SafeCounter::new("push_ios_sent"),
+            web_sent: crate::metrics::SafeCounter::new("push_web_sent"),
+        }
     }
 
     pub fn record_sent(&self, device_type: DeviceType) {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.total_sent.fetch_add(1, Relaxed);
+        self.total_sent.increment(1);
         match device_type {
-            DeviceType::Android => self.android_sent.fetch_add(1, Relaxed),
-            DeviceType::Ios => self.ios_sent.fetch_add(1, Relaxed),
-            DeviceType::Web => self.web_sent.fetch_add(1, Relaxed),
+            DeviceType::Android => self.android_sent.increment(1),
+            DeviceType::Ios => self.ios_sent.increment(1),
+            DeviceType::Web => self.web_sent.increment(1),
         };
     }
 
     pub fn record_failed(&self) {
-        self.total_failed
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_failed.increment(1);
     }
 
     pub fn record_invalid_token(&self) {
-        self.total_invalid_tokens
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_invalid_tokens.increment(1);
     }
 
     pub fn record_retry(&self) {
-        self.total_retries
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.total_retries.increment(1);
     }
 
     /// Snapshot the current analytics state as a JSON value.
     pub fn snapshot(&self) -> Value {
-        use std::sync::atomic::Ordering::Relaxed;
-        let sent = self.total_sent.load(Relaxed);
-        let failed = self.total_failed.load(Relaxed);
-        let total = sent + failed;
+        let sent = self.total_sent.get();
+        let failed = self.total_failed.get();
+        // Issue #993: saturating_add avoids wraparound when computing the
+        // combined total from two independently-saturating counters.
+        let total = sent.saturating_add(failed);
         let delivery_rate = if total > 0 {
             (sent as f64 / total as f64) * 100.0
         } else {
             0.0
         };
 
+        // Publish counter state gauges so operators can see how close these
+        // counters are to saturating (issue #993).
+        crate::metrics::record_counter_state("push_total_sent", sent);
+        crate::metrics::record_counter_state("push_total_failed", failed);
+
         json!({
             "total_sent": sent,
             "total_failed": failed,
-            "total_invalid_tokens": self.total_invalid_tokens.load(Relaxed),
-            "total_retries": self.total_retries.load(Relaxed),
+            "total_invalid_tokens": self.total_invalid_tokens.get(),
+            "total_retries": self.total_retries.get(),
             "delivery_rate_percent": (delivery_rate * 100.0).round() / 100.0,
             "by_platform": {
-                "android": self.android_sent.load(Relaxed),
-                "ios": self.ios_sent.load(Relaxed),
-                "web": self.web_sent.load(Relaxed),
+                "android": self.android_sent.get(),
+                "ios": self.ios_sent.get(),
+                "web": self.web_sent.get(),
             }
         })
     }
@@ -593,6 +613,86 @@ impl PushWorkerConfig {
 
     pub fn is_enabled(&self) -> bool {
         self.fcm.is_some() || self.apns.is_some() || self.vapid.is_some()
+    }
+}
+
+/// Issue #994: adapts push delivery (FCM/APNs) to the unified notification
+/// delivery framework so push shares retry/error-handling/metrics with email
+/// and SMS instead of each channel reimplementing them independently.
+///
+/// `target` passed to `deliver()` is the device's push token. Web push
+/// tokens are routed through FCM, matching the existing behavior of
+/// [`run_push_delivery_worker`] below (true W3C Web Push via VAPID needs a
+/// full [`WebPushSubscription`], not a bare token, so it isn't represented
+/// by this adapter — see docs/notification-architecture.md).
+pub struct PushChannelAdapter {
+    pub client: Client,
+    pub config: std::sync::Arc<PushWorkerConfig>,
+    pub device_type: DeviceType,
+}
+
+#[async_trait::async_trait]
+impl crate::notification_delivery::DeliveryChannel for PushChannelAdapter {
+    fn channel_name(&self) -> &'static str {
+        "push"
+    }
+
+    fn retry_policy(&self) -> crate::retry_policy::RetryPolicy {
+        crate::retry_policy::RetryPolicy {
+            max_attempts: self.config.retry.max_retries.max(1),
+            initial_backoff_ms: self.config.retry.base_delay_secs.saturating_mul(1000),
+            backoff_multiplier: 2.0,
+            max_backoff_ms: self.config.retry.max_delay_secs.saturating_mul(1000),
+            strategy: Some(crate::retry_policy::RetryStrategy::Exponential),
+            use_jitter: true,
+        }
+    }
+
+    async fn deliver(
+        &self,
+        target: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<
+        crate::notification_delivery::DeliveryOutcome,
+        crate::notification_delivery::NotificationError,
+    > {
+        use crate::notification_delivery::{DeliveryOutcome, NotificationError};
+
+        let send_result: Result<bool, String> = match self.device_type {
+            DeviceType::Ios => {
+                let apns_cfg = match self.config.apns.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        return Err(NotificationError::Configuration(
+                            "APNs not configured".to_string(),
+                        ))
+                    }
+                };
+                let jwt = match build_apns_jwt(apns_cfg) {
+                    Ok(j) => j,
+                    Err(e) => return Err(NotificationError::Configuration(e)),
+                };
+                apns_send(&self.client, apns_cfg, target, subject, body, &jwt).await
+            }
+            DeviceType::Android | DeviceType::Web => {
+                let fcm_cfg = match self.config.fcm.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        return Err(NotificationError::Configuration(
+                            "FCM not configured".to_string(),
+                        ))
+                    }
+                };
+                fcm_send(&self.client, fcm_cfg, target, subject, body, None).await
+            }
+        };
+
+        match send_result {
+            Ok(true) => Ok(DeliveryOutcome::Delivered),
+            Ok(false) => Ok(DeliveryOutcome::InvalidTarget),
+            Err(msg) => Err(NotificationError::Transient(msg)),
+        }
     }
 }
 

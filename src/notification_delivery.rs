@@ -7,6 +7,14 @@
 //!
 //! Every delivery attempt is recorded in the `notification_deliveries` table
 //! and exposed through the `GET /v1/admin/notifications/deliveries` endpoint.
+//!
+//! Issue #994 additionally adds a unified delivery *framework* (the
+//! [`DeliveryChannel`] trait, [`NotificationError`], [`DeliveryOutcome`], and
+//! [`deliver_with_retry`]) to this module — see the "Unified notification
+//! delivery framework" section below and `docs/notification-architecture.md`.
+//! It is additive to, and independent of, the receipts functionality above:
+//! receipts record *that* a delivery happened; the framework governs *how*
+//! a delivery attempt (with retries) is driven.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -340,10 +348,155 @@ pub async fn get_receipts_by_event(
     .await
 }
 
+// ============================================================================
+// Unified notification delivery framework (Issue #994)
+// ============================================================================
+//
+// Consolidates the retry logic and error handling that were previously
+// duplicated across `email.rs`, `sms.rs`, and `push_notification.rs` into a
+// single `DeliveryChannel` trait plus a shared `deliver_with_retry` driver.
+// See `docs/notification-architecture.md` for the full design and the
+// per-channel migration notes.
+//
+// This is distinct from `crate::notification_channel`, which covers
+// webhook-style outbound channels (Discord, Telegram, ...). This section
+// covers the three channels named in issue #994: email, SMS, and push.
+
+use crate::retry_policy::RetryPolicy;
+
+/// Consolidated error type for notification delivery across all channels.
+///
+/// Replaces the ad-hoc `String` / `Box<dyn Error>` error types previously
+/// used independently by each channel.
+#[derive(Debug, Clone)]
+pub enum NotificationError {
+    /// A transient failure (network error, upstream 5xx, rate limit). Safe to retry.
+    Transient(String),
+    /// The target (email address, phone number, device token) is permanently
+    /// invalid and retrying will not help (e.g. bounced address, unregistered
+    /// push token, malformed phone number).
+    InvalidTarget(String),
+    /// The channel is misconfigured (missing credentials, invalid config).
+    /// Not retryable — requires operator intervention.
+    Configuration(String),
+}
+
+impl std::fmt::Display for NotificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NotificationError::Transient(msg) => write!(f, "transient delivery error: {msg}"),
+            NotificationError::InvalidTarget(msg) => write!(f, "invalid delivery target: {msg}"),
+            NotificationError::Configuration(msg) => write!(f, "channel misconfigured: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for NotificationError {}
+
+/// Outcome of a single delivery attempt driven through the unified framework.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    /// The message was accepted for delivery by the upstream provider.
+    Delivered,
+    /// The target was rejected as permanently invalid (e.g. expired push
+    /// token); the caller should stop sending to it, not retry.
+    InvalidTarget,
+}
+
+/// A notification delivery channel (email, SMS, push, ...).
+///
+/// Implementors provide a single-attempt `deliver` plus the retry policy
+/// that should govern it; `deliver_with_retry` supplies the shared retry
+/// loop, metrics, and error classification so channels don't each
+/// reimplement it.
+#[async_trait::async_trait]
+pub trait DeliveryChannel: Send + Sync {
+    /// Short, stable identifier used in metrics and logs (e.g. "email").
+    fn channel_name(&self) -> &'static str;
+
+    /// The retry policy this channel should be driven with.
+    fn retry_policy(&self) -> RetryPolicy;
+
+    /// Attempt one delivery to `target`. Implementations should classify
+    /// failures as [`NotificationError::Transient`] (retryable),
+    /// [`NotificationError::InvalidTarget`] (not retryable — target is bad),
+    /// or [`NotificationError::Configuration`] (not retryable — channel is
+    /// misconfigured) rather than returning an opaque error.
+    async fn deliver(
+        &self,
+        target: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<DeliveryOutcome, NotificationError>;
+}
+
+/// Drive a [`DeliveryChannel`] through its retry policy, recording the
+/// consolidated delivery-success/failure metrics uniformly across all
+/// channels (issue #994; previously each channel recorded its own ad-hoc
+/// metrics on success/failure).
+///
+/// Only [`NotificationError::Transient`] is retried; `InvalidTarget` and
+/// `Configuration` fail fast since retrying cannot help either case. This is
+/// why this driver does not reuse `RetryPolicy::execute_with_retry` directly
+/// — that helper retries on any `Err`, with no way to opt individual error
+/// variants out of the retry loop.
+pub async fn deliver_with_retry(
+    channel: &dyn DeliveryChannel,
+    target: &str,
+    subject: &str,
+    body: &str,
+) -> Result<DeliveryOutcome, NotificationError> {
+    let policy = channel.retry_policy();
+    let start = std::time::Instant::now();
+
+    let mut result = Err(NotificationError::Transient("no attempts made".to_string()));
+
+    for attempt in 1..=policy.max_attempts {
+        match channel.deliver(target, subject, body).await {
+            Ok(outcome) => {
+                result = Ok(outcome);
+                break;
+            }
+            Err(NotificationError::Transient(msg)) => {
+                result = Err(NotificationError::Transient(msg));
+                if attempt < policy.max_attempts {
+                    tokio::time::sleep(policy.calculate_backoff(attempt)).await;
+                }
+            }
+            Err(other) => {
+                // Not retryable — fail fast rather than burning through
+                // the rest of the retry budget.
+                result = Err(other);
+                break;
+            }
+        }
+    }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    crate::metrics::record_notification_delivery_latency(channel.channel_name(), elapsed);
+
+    match &result {
+        Ok(_) => crate::metrics::record_notification_delivery_success(),
+        Err(_) => crate::metrics::record_notification_delivery_failure(),
+    }
+
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use sqlx::PgPool;
+
+    // Issue #994 checklist item "Write comprehensive delivery tests" was
+    // intentionally NOT done for the DeliveryChannel/deliver_with_retry
+    // additions below — this change was implemented under an explicit
+    // "implement only, do not test" instruction. Do not treat the absence of
+    // tests for that part of this module as an oversight; add them (mock
+    // `DeliveryChannel` impls covering Transient/InvalidTarget/Configuration
+    // and retry exhaustion) before relying on the framework in production.
+    // The tests below predate issue #994 and cover the delivery-receipts
+    // functionality only.
 
     #[test]
     fn delivery_status_serializes_to_expected_strings() {

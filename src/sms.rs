@@ -235,6 +235,49 @@ impl SmsNotifier {
     }
 }
 
+/// Issue #994: adapt `SmsNotifier` to the unified notification delivery
+/// framework so SMS shares retry/error-handling/metrics with email and push
+/// instead of each channel reimplementing them independently.
+#[async_trait::async_trait]
+impl crate::notification_delivery::DeliveryChannel for SmsNotifier {
+    fn channel_name(&self) -> &'static str {
+        "sms"
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        self.retry_policy.clone()
+    }
+
+    async fn deliver(
+        &self,
+        target: &str,
+        _subject: &str,
+        body: &str,
+    ) -> Result<
+        crate::notification_delivery::DeliveryOutcome,
+        crate::notification_delivery::NotificationError,
+    > {
+        match self
+            .send_twilio_sms(&self.client, &self.config, target, body, 1)
+            .await
+        {
+            Ok(_twilio_sid) => Ok(crate::notification_delivery::DeliveryOutcome::Delivered),
+            Err(msg) => {
+                // Twilio error code 21211 ("invalid 'To' phone number") is the
+                // clearest permanent-failure signal available from this
+                // client's string-based errors; anything else is treated as
+                // retryable. See docs/notification-architecture.md follow-up
+                // notes for a proper Twilio error-code mapping.
+                if msg.contains("21211") {
+                    Err(crate::notification_delivery::NotificationError::InvalidTarget(msg))
+                } else {
+                    Err(crate::notification_delivery::NotificationError::Transient(msg))
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

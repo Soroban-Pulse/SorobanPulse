@@ -649,6 +649,41 @@ impl EmailNotifier {
     }
 }
 
+/// Issue #994: adapt `EmailNotifier` to the unified notification delivery
+/// framework so email shares retry/error-handling/metrics with SMS and push
+/// instead of each channel reimplementing them independently.
+#[async_trait::async_trait]
+impl crate::notification_delivery::DeliveryChannel for EmailNotifier {
+    fn channel_name(&self) -> &'static str {
+        "email"
+    }
+
+    fn retry_policy(&self) -> RetryPolicy {
+        self.retry_policy.clone()
+    }
+
+    async fn deliver(
+        &self,
+        target: &str,
+        subject: &str,
+        body: &str,
+    ) -> Result<
+        crate::notification_delivery::DeliveryOutcome,
+        crate::notification_delivery::NotificationError,
+    > {
+        self.send_email(target, subject, body, None)
+            .await
+            .map(|()| crate::notification_delivery::DeliveryOutcome::Delivered)
+            .map_err(|e| {
+                // The lettre-backed `send_email` doesn't currently distinguish
+                // permanent (bad address) from transient (SMTP hiccup)
+                // failures, so this classifies conservatively as transient.
+                // See docs/notification-architecture.md follow-up notes.
+                crate::notification_delivery::NotificationError::Transient(e.to_string())
+            })
+    }
+}
+
 /// Numeric rank for priority comparison (higher = more urgent) (Issue #492).
 fn priority_rank(p: &str) -> u8 {
     match p {
