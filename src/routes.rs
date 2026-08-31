@@ -831,9 +831,13 @@ pub fn create_router_with_tx_and_tenant_map(
     Router::new()
         .merge(health_routes)
         .merge(rate_limited_routes)
-        .layer(axum::middleware::from_fn(
-            middleware::security_headers_middleware,
-        ))
+        .layer(axum::middleware::from_fn({
+            let security_headers_config = middleware::SecurityHeadersConfig::from_env();
+            move |req, next| {
+                let config = security_headers_config.clone();
+                middleware::security_headers_middleware_with_config(config, req, next)
+            }
+        }))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
             middleware::rate_limit_headers_middleware,

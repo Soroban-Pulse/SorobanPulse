@@ -1008,6 +1008,12 @@ impl Config {
             ));
         }
 
+        // Issue #938: fail fast on malformed origins instead of letting
+        // build_cors() silently drop them from the CORS layer.
+        for msg in crate::middleware::validate_cors_origins(&allowed_origins) {
+            errors.push(format!("  {msg}"));
+        }
+
         let database_url = resolve_database_url_checked(&mut errors);
 
         let stellar_rpc_url = {

@@ -188,6 +188,22 @@ pub async fn deliver_with_retry_policy(
     let signature = secret.as_deref().map(|s| sign_payload(s, &body));
     let priority_owned = priority.clone();
 
+    let log_pool = pool.cloned();
+    let log_url = url.clone();
+    let log_request_headers = {
+        let mut headers = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("X-Notification-Priority".to_string(), priority_owned.clone()),
+        ];
+        if let Some(ref sig) = signature {
+            headers.push(("X-Signature-256".to_string(), format!("sha256={sig}")));
+        }
+        headers
+    };
+    let log_request_body = payload.clone();
+    let log_contract_id = event.contract_id.clone();
+    let log_event_type = event.event_type.to_string();
+
     let result = retry_policy
         .execute_with_retry(|attempt| {
             let client = client.clone();
@@ -195,6 +211,12 @@ pub async fn deliver_with_retry_policy(
             let body = body.clone();
             let signature = signature.clone();
             let priority_header = priority_owned.clone();
+            let log_pool = log_pool.clone();
+            let log_url = log_url.clone();
+            let log_request_headers = log_request_headers.clone();
+            let log_request_body = log_request_body.clone();
+            let log_contract_id = log_contract_id.clone();
+            let log_event_type = log_event_type.clone();
 
             async move {
                 let mut req = client
@@ -207,7 +229,11 @@ pub async fn deliver_with_retry_policy(
                     req = req.header("X-Signature-256", format!("sha256={sig}"));
                 }
 
-                match req.send().await {
+                let started_at = std::time::Instant::now();
+                let send_result = req.send().await;
+                let duration_ms = started_at.elapsed().as_millis() as i64;
+
+                let outcome = match send_result {
                     Ok(resp) if resp.status().is_success() => {
                         info!(
                             url = %url,
@@ -217,18 +243,58 @@ pub async fn deliver_with_retry_policy(
                             "Webhook delivered successfully"
                         );
                         crate::metrics::record_webhook_delivery_success();
-                        Ok(())
+                        let status = resp.status().as_u16() as i32;
+                        let body_text = resp.text().await.unwrap_or_default();
+                        (Ok(()), Some(status), body_text)
                     }
                     Ok(resp) => {
-                        let error_msg = format!(
-                            "HTTP {}: {}",
-                            resp.status(),
-                            resp.text().await.unwrap_or_default()
-                        );
-                        Err(error_msg)
+                        let status = resp.status().as_u16() as i32;
+                        let body_text = resp.text().await.unwrap_or_default();
+                        let error_msg = format!("HTTP {status}: {body_text}");
+                        (Err(error_msg), Some(status), body_text)
                     }
-                    Err(e) => Err(format!("Request error: {}", e)),
+                    Err(e) => (Err(format!("Request error: {}", e)), None, String::new()),
+                };
+
+                // Best-effort request/response log, spawned so it never
+                // slows down delivery/retry timing (Issue #937).
+                if let Some(pool) = log_pool {
+                    let response_body: Option<Value> = if outcome.2.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            serde_json::from_str(&outcome.2)
+                                .unwrap_or_else(|_| serde_json::json!({"raw": outcome.2})),
+                        )
+                    };
+                    let response_status = outcome.1;
+                    let request_headers = log_request_headers.clone();
+                    let request_body = log_request_body.clone();
+                    let contract_id = log_contract_id.clone();
+                    let event_type = log_event_type.clone();
+                    let url_for_log = log_url.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::webhook_logging::log_exchange(
+                            &pool,
+                            crate::webhook_logging::WebhookLogEntry {
+                                url: &url_for_log,
+                                request_headers: &request_headers,
+                                request_body: &request_body,
+                                response_status,
+                                response_body: response_body.as_ref(),
+                                duration_ms,
+                                contract_id: Some(&contract_id),
+                                event_type: Some(&event_type),
+                            },
+                        )
+                        .await
+                        {
+                            warn!(error = %e, "Failed to store webhook request/response log");
+                        }
+                    });
                 }
+
+                outcome.0
             }
         })
         .await;
