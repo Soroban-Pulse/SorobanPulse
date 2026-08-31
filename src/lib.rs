@@ -68,6 +68,7 @@ pub mod sqs;
 pub mod subscriptions;
 pub mod subscription_validator;
 pub mod webhook;
+pub mod webhook_logging;
 pub mod webhook_template;
 pub mod webhook_verification;
 pub mod webhook_circuit_breaker;

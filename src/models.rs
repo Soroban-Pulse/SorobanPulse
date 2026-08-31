@@ -152,6 +152,11 @@ pub struct Event {
     /// Tenant ID for multi-tenant isolation (Issue #887). Defaults to "default" for backward compatibility.
     #[sqlx(default)]
     pub tenant_id: String,
+    /// Source chain/network identifier (e.g. "soroban-mainnet",
+    /// "soroban-testnet"), used for cross-chain event correlation (Issue
+    /// #935). Defaults to "soroban-mainnet" for backward compatibility.
+    #[sqlx(default)]
+    pub network: String,
     #[sqlx(default)]
     #[serde(skip)]
     pub total_count: i64,
