@@ -25,6 +25,8 @@ mod error;
 mod event_hubs;
 mod graceful_shutdown;
 mod handlers;
+mod idempotency;
+mod log_analysis_tool;
 mod index_monitor;
 mod indexer;
 mod kafka;

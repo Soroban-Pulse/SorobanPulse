@@ -34,6 +34,8 @@ pub mod time_series;
 pub mod anomaly_detection;
 pub mod graceful_shutdown;
 pub mod handlers;
+pub mod idempotency;
+pub mod log_analysis_tool;
 pub mod health_check;
 pub mod indexer;
 pub mod kinesis;
