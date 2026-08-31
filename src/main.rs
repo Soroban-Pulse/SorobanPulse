@@ -43,6 +43,7 @@ mod notification_dedup;
 
 #[cfg(feature = "parquet")]
 mod parquet_export;
+mod warehouse;
 
 mod pruner;
 mod pubsub;
