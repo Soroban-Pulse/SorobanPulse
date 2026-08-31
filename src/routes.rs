@@ -24,7 +24,7 @@ struct ApiKeyExtractor;
 impl KeyExtractor for ApiKeyExtractor {
     type Key = String;
 
-    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<String, GovernorError> {
         let bearer = req
             .headers()
             .get("Authorization")
@@ -38,6 +38,35 @@ impl KeyExtractor for ApiKeyExtractor {
             .map(|s| s.to_string());
         bearer.or(x_api_key).ok_or(GovernorError::UnableToExtractKey)
     }
+}
+
+pub async fn get_events_with_params(
+    State(state): State<AppState>,
+    Query(params): Query<crate::models::PaginationParams>,
+) -> Result<Json<crate::models::Paginated<Event>>, AppError> {
+    let response = handlers::get_events(
+        State(state),
+        Query(params),
+        axum::http::HeaderMap::new(),
+        axum::http::Extensions::new(),
+    )
+    .await?;
+
+    let payload = response.into_body();
+    let bytes = axum::body::to_bytes(payload, usize::MAX)
+        .await
+        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode events response: {}", e)))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| crate::error::AppError::Internal(format!("failed to parse events response: {}", e)))?;
+    let records: Vec<Event> = serde_json::from_value(value["events"].clone())
+        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode event records: {}", e)))?;
+    Ok(Json(crate::models::Paginated {
+        data: records,
+        page: value["page"].as_i64().unwrap_or(1),
+        limit: value["limit"].as_i64().unwrap_or(20),
+        total: value["total"].as_i64().unwrap_or(0),
+        has_more: value["has_more"].as_bool().unwrap_or(false),
+    }))
 }
 use tower_http::{
     compression::CompressionLayer,
