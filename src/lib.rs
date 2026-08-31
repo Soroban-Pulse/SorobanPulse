@@ -96,6 +96,7 @@ pub mod cloud_provider;
 pub mod cloud_replication;
 pub mod http3_support;
 pub mod notification_batching;
+pub mod notification_delivery;
 pub mod deployment_orchestrator;
 pub mod saas_platform;
 pub mod ml_integration;

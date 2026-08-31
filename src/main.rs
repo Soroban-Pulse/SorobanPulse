@@ -68,6 +68,7 @@ mod slack;
 mod teams;
 mod telegram;
 mod notification_channel;
+mod notification_delivery;
 mod integration_handlers;
 mod retry_policy;
 mod sms;

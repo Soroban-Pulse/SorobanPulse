@@ -1,9 +1,93 @@
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // The local module is also named `metrics`, which shadows the external crate
 // of the same name. Use an explicit extern-crate alias to disambiguate.
 extern crate metrics as m;
+
+// ── Issue #993: Overflow-safe counter primitives ────────────────────────────
+//
+// Long-running instances accumulate counts in a handful of places using raw
+// `u64`/`AtomicU64` arithmetic (as opposed to the `metrics` crate's own
+// `counter!()` macro, whose internal representation is out of our control).
+// Plain `fetch_add`/`+` wraps silently on overflow, which would make a
+// long-lived counter appear to reset to a small number. `SafeCounter`
+// saturates at `u64::MAX` instead of wrapping, and emits a
+// `soroban_pulse_counter_overflow_total` metric the moment it saturates so
+// the condition is observable rather than silent. See
+// docs/metrics-design.md for the full audit and rationale.
+pub struct SafeCounter {
+    value: AtomicU64,
+    name: &'static str,
+}
+
+impl SafeCounter {
+    pub const fn new(name: &'static str) -> Self {
+        Self {
+            value: AtomicU64::new(0),
+            name,
+        }
+    }
+
+    /// Increment by `delta` using saturating arithmetic. Returns the new value.
+    /// If the counter has already saturated at `u64::MAX`, records an
+    /// overflow-detection metric instead of wrapping around to a small number.
+    pub fn increment(&self, delta: u64) -> u64 {
+        let mut current = self.value.load(Ordering::Relaxed);
+        loop {
+            let new_value = current.saturating_add(delta);
+            match self.value.compare_exchange_weak(
+                current,
+                new_value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    if new_value == u64::MAX && current != u64::MAX {
+                        record_counter_overflow_detected(self.name);
+                    }
+                    return new_value;
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn get(&self) -> u64 {
+        self.value.load(Ordering::Relaxed)
+    }
+}
+
+impl std::fmt::Debug for SafeCounter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SafeCounter")
+            .field("name", &self.name)
+            .field("value", &self.get())
+            .finish()
+    }
+}
+
+/// Record that a `SafeCounter` saturated instead of wrapping (issue #993).
+pub fn record_counter_overflow_detected(counter_name: &str) {
+    m::counter!(
+        "soroban_pulse_counter_overflow_total",
+        "counter" => counter_name.to_string()
+    )
+    .increment(1);
+}
+
+/// Publish the current value of a long-running counter as a gauge, so
+/// operators can see counter state (and how close it is to saturating)
+/// without needing to reconstruct it from the exported counter series
+/// (issue #993).
+pub fn record_counter_state(counter_name: &str, value: u64) {
+    m::gauge!(
+        "soroban_pulse_counter_state",
+        "counter" => counter_name.to_string()
+    )
+    .set(value as f64);
+}
 
 /// SLO-aligned histogram buckets for HTTP request duration (seconds).
 const HTTP_DURATION_BUCKETS: &[f64] = &[0.05, 0.1, 0.2, 0.5, 1.0, 5.0];
@@ -365,7 +449,9 @@ pub fn record_contract_count_cache_invalidation() {
 
 /// Update the contract count cache hit ratio gauge (hits / (hits + misses))
 pub fn update_contract_count_cache_hit_ratio(hits: u64, misses: u64) {
-    let total = hits + misses;
+    // Issue #993: saturating_add avoids a debug-build panic / release-build
+    // wraparound if a long-running instance's hit+miss counts approach u64::MAX.
+    let total = hits.saturating_add(misses);
     let ratio = if total == 0 { 0.0 } else { hits as f64 / total as f64 };
     m::gauge!("soroban_pulse_contract_count_cache_hit_ratio").set(ratio);
 }
