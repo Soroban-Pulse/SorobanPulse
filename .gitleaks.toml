@@ -1,0 +1,105 @@
+# .gitleaks.toml
+# Gitleaks configuration for SorobanPulse secrets scanning (Issue #943)
+# https://github.com/gitleaks/gitleaks
+
+title = "SorobanPulse Gitleaks Configuration"
+
+[extend]
+# Extend the default gitleaks ruleset
+useDefault = true
+
+# ─── Global allowlists ────────────────────────────────────────────────────────
+[allowlist]
+description = "Global allowlist for known false positives"
+paths = [
+  ".gitleaks.toml",
+  ".env.example",
+  ".env.staging.example",
+  ".env.production.example",
+  "docs/.*",
+  ".*\\.md$",
+  "Cargo.lock",
+]
+regexes = [
+  # Soroban / Stellar testnet URLs are not secrets
+  "soroban-testnet\\.stellar\\.org",
+  # Placeholder values in example files
+  "<USER>",
+  "<PASSWORD>",
+  "<TOKEN>",
+  "your-.*-here",
+  "example\\.com",
+  # Test / fixture values
+  "test_api_key",
+  "test_admin_key",
+  "test-secret",
+  "dummy_key",
+  "placeholder",
+  # SHA-256 hashes in audit logs are not secrets
+  "[a-f0-9]{64}",
+  # UUIDs
+  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+]
+
+# ─── Custom rules ─────────────────────────────────────────────────────────────
+
+[[rules]]
+id = "soroban-pulse-api-key"
+description = "SorobanPulse API key pattern"
+regex = '''(?i)(api_key|admin_api_key)\s*=\s*[\"']([a-zA-Z0-9_\-]{20,})[\"']'''
+secretGroup = 2
+
+  [rules.allowlist]
+  regexes = [
+    # Allow example/placeholder values
+    "your_api_key_here",
+    "change_me",
+    "<.*>",
+  ]
+  paths = [
+    "\\.env\\..*example",
+    ".*\\.md$",
+  ]
+
+[[rules]]
+id = "soroban-pulse-db-url"
+description = "PostgreSQL connection string with credentials"
+regex = '''postgres(?:ql)?://[^:]+:[^@]+@[^/\s]+'''
+
+  [rules.allowlist]
+  regexes = [
+    # CI/CD template placeholders
+    "postgres://postgres:postgres@localhost",
+    "postgres://user:password@",
+    "<USER>:<PASSWORD>",
+  ]
+  paths = [
+    "\\.env\\..*example",
+    ".*\\.md$",
+    ".*\\.yml$",
+    ".*\\.yaml$",
+  ]
+
+[[rules]]
+id = "soroban-pulse-hmac-key"
+description = "HMAC/webhook signing key"
+regex = '''(?i)(hmac_key|webhook_secret|signing_key)\s*=\s*[\"']([a-zA-Z0-9+/=_\-]{16,})[\"']'''
+secretGroup = 2
+
+  [rules.allowlist]
+  paths = [
+    "\\.env\\..*example",
+    ".*\\.md$",
+  ]
+
+[[rules]]
+id = "soroban-pulse-encryption-key"
+description = "Encryption key material"
+regex = '''(?i)(encryption_key|kek_|dek_)\s*=\s*[\"']([a-zA-Z0-9+/=]{32,})[\"']'''
+secretGroup = 2
+
+  [rules.allowlist]
+  paths = [
+    "\\.env\\..*example",
+    ".*\\.md$",
+  ]

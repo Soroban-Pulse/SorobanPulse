@@ -177,6 +177,17 @@ pub fn record_rate_limit_rejected() {
     m::counter!("soroban_pulse_rate_limit_rejected_total").increment(1);
 }
 
+/// Record that a notification was suppressed by a suppression list.
+pub fn record_notification_suppressed() {
+    m::counter!("soroban_pulse_notification_suppressed_total").increment(1);
+}
+
+/// Record a webhook failover event.
+pub fn record_notification_failover(channel: &str) {
+    m::counter!("soroban_pulse_notification_failover_total", "channel" => channel.to_string())
+        .increment(1);
+}
+
 /// Record a persistent webhook delivery failure (all retries exhausted)
 pub fn record_webhook_failure() {
     m::counter!("soroban_pulse_webhook_failures_total").increment(1);
@@ -1530,6 +1541,56 @@ mod tests {
         record_notification_delivery_failure();
         assert!(true);
     }
+}
+
+/// Record a successful Prometheus remote write push
+pub fn record_prometheus_remote_write_success() {
+    m::counter!("soroban_pulse_prometheus_remote_write_success_total").increment(1);
+}
+
+/// Record a failed Prometheus remote write push
+pub fn record_prometheus_remote_write_failure() {
+    m::counter!("soroban_pulse_prometheus_remote_write_failures_total").increment(1);
+}
+
+/// Record Prometheus remote write endpoint health check OK
+pub fn record_prometheus_remote_write_health_ok() {
+    m::gauge!("soroban_pulse_prometheus_remote_write_health").set(1.0);
+}
+
+/// Record Prometheus remote write endpoint health check failure
+pub fn record_prometheus_remote_write_health_fail() {
+    m::gauge!("soroban_pulse_prometheus_remote_write_health").set(0.0);
+}
+
+/// Record EventBridge event submission success
+pub fn record_eventbridge_put_events_success(count: u64) {
+    m::counter!("soroban_pulse_eventbridge_put_events_success_total").increment(count);
+}
+
+/// Record EventBridge event submission failure
+pub fn record_eventbridge_put_events_failure() {
+    m::counter!("soroban_pulse_eventbridge_put_events_failures_total").increment(1);
+}
+
+/// Record EventBridge rule creation/update
+pub fn record_eventbridge_rule_created() {
+    m::counter!("soroban_pulse_eventbridge_rules_created_total").increment(1);
+}
+
+/// Record EventBridge rule deletion
+pub fn record_eventbridge_rule_deleted() {
+    m::counter!("soroban_pulse_eventbridge_rules_deleted_total").increment(1);
+}
+
+/// Update EventBridge active rules gauge
+pub fn update_eventbridge_active_rules(count: u64) {
+    m::gauge!("soroban_pulse_eventbridge_active_rules").set(count as f64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn test_update_contract_event_count() {

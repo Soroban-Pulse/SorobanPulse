@@ -25,6 +25,8 @@ mod error;
 mod event_hubs;
 mod graceful_shutdown;
 mod handlers;
+mod idempotency;
+mod log_analysis_tool;
 mod index_monitor;
 mod indexer;
 mod kafka;
@@ -32,6 +34,8 @@ mod kinesis;
 #[cfg(feature = "lua")]
 mod lua_transform;
 mod metrics;
+mod prometheus_remote_write;
+mod eventbridge;
 mod middleware;
 mod models;
 mod normalizer;

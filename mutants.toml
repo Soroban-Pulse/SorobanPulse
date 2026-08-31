@@ -1,74 +1,98 @@
-# Mutation Testing Configuration (Issue #555)
-# This file configures cargo-mutants for quality assurance testing
+# Mutation Testing Configuration — Issue #922
+# cargo-mutants: https://mutants.live
+#
+# Score threshold: 70% minimum (enforced in CI), 80% target.
+# Run locally: make -f Makefile.mutations mutants
+# Score report: make -f Makefile.mutations mutants-score
+# Survivor report: make -f Makefile.mutations mutants-report
 
 [mutation]
-# List of source files or directories to mutate
-# By default, all .rs files in src/ are mutated
+# Mutate all source files except generated / entry-point code.
 paths = ["src/"]
 
-# Exclude certain files or patterns from mutation
+# Exclude files where mutation is impractical or adds no signal:
+#   - main.rs: entry point wiring — no logic to mutate
+#   - bin/*: CLI / utility binaries — covered by integration tests only
+#   - **/tests/*: test helpers themselves
+#   - metrics.rs: counter increments — almost all mutations survive by design
+#   - observability.rs: tracing/logging — format mutations don't affect behaviour
+#   - distributed_tracing.rs: spans/attributes — same reason as observability
 exclude = [
+    "src/main.rs",
     "src/bin/*",
-    "src/main.rs",  # Skip main entry point
-    "**/tests/*",
+    "src/metrics.rs",
+    "src/observability.rs",
+    "src/distributed_tracing.rs",
 ]
 
-# Maximum number of mutations to generate
-# This helps control test runtime for large projects
-max_mutations = 500
-
-# Only test certain mutation types
-# Uncomment to enable specific mutation types:
-# mutation_types = [
-#     "arith",      # Arithmetic operators
-#     "logical",    # Logical operators
-#     "const",      # Constant changes
-#     "relational", # Comparison operators
-# ]
+# Mutation operators to apply.
+# Covering arithmetic, boolean, comparison, and return-value mutations gives
+# the broadest signal without generating unviable mutations.
+# (cargo-mutants applies all operators by default; this section is explicit
+# documentation of what we expect to see.)
+#
+# Uncomment to restrict to a subset for faster local runs:
+# mutation_types = ["arith", "logical", "relational", "const"]
 
 [test]
-# Timeout for running tests (in seconds)
+# Per-mutation test timeout (seconds).  Generous to accommodate integration
+# tests that hit a real database under load.
 test_timeout = 300
 
-# Number of parallel test jobs
+# Parallel jobs.  4 is a safe default for CI runners (2 physical cores × 2).
+# Override locally: CARGO_MUTANTS_JOBS=8 make -f Makefile.mutations mutants
 jobs = 4
 
-# Command to run tests
+# Run the full test suite including integration and property-based tests so
+# mutations in business logic are caught by the widest possible net.
 command = "cargo test"
-
-# Additional test arguments
 args = [
     "--lib",
     "--test", "property_based_tests",
+    "--test", "property_tests",
     "--test", "integration_tests",
+    "--test", "contract_tests",
 ]
 
-# Verbose output for failed mutations
+# Show test output for surviving mutations to make analysis easier.
 verbose = true
 
 [output]
-# Directory for mutation testing reports
+# Report artefacts land in target/mutants — gitignored by default.
 report_dir = "target/mutants"
 
-# Generate JSON report for CI integration
+# JSON report consumed by mutants-score and mutants-report make targets.
 json_report = true
 
-# Generate HTML report
+# HTML report for local browsing.
 html_report = true
 
 [skip]
-# Skip mutation testing for certain modules
-# These are patterns matched against module paths:
+# Modules where surviving mutations are expected and accepted.
+# These are tracked here for transparency, not silently ignored.
 skip = [
-    # Infrastructure code that doesn't need mutation testing
+    # Metric counter increments: incrementing vs not-incrementing a counter
+    # does not change externally observable behaviour tested by the suite.
     "metrics",
+    # Log/trace format strings: different log levels or message text do not
+    # affect correctness tests.
     "logging",
-    "config",
+    "tracing",
 ]
 
+# ── Score threshold (informational — enforced in CI via mutants-score) ─────
+# Target:  80%  (green in CI badge)
+# Minimum: 70%  (PR gate — fails CI if below this)
+#
+# To update the baseline after intentional score changes:
+#   make -f Makefile.mutations mutants-score
+#   git add mutation-score.json && git commit -m "chore: update mutation baseline"
+
 [expected_to_fail]
-# These mutations are expected to survive because tests can't detect them
-# For documentation purposes - helps identify test coverage gaps
+# Document mutations that are expected to survive permanently because they
+# cannot be caught without heroic test infrastructure (e.g. OS-level mocking).
+# Format: "path/to/file.rs:<line>:<operator>"
 expected = [
-    # Example: "src/module.rs:123:logtype()"
+    # Example (uncomment when a real case is identified):
+    # "src/resource_metrics.rs:*:*"  # proc-filesystem reads — not testable in unit tests
 ]

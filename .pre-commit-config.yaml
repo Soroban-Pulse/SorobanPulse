@@ -1,0 +1,74 @@
+# .pre-commit-config.yaml
+# Pre-commit hook configuration for SorobanPulse (Issue #943)
+# https://pre-commit.com/
+#
+# Install:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Run manually:
+#   pre-commit run --all-files
+
+repos:
+  # ─── Secrets scanning ────────────────────────────────────────────────────────
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+        name: Detect secrets with gitleaks
+        description: Detects hardcoded secrets using the .gitleaks.toml configuration
+        args:
+          - --config=.gitleaks.toml
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        name: Detect secrets with detect-secrets
+        args:
+          - --baseline
+          - .secrets.baseline
+        exclude: |
+          (?x)^(
+            Cargo\.lock|
+            \.env\..*example|
+            .*\.snap|
+            .*\.snap\.new
+          )$
+
+  # ─── Rust formatting (fast, no-deps) ─────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: cargo-fmt-check
+        name: cargo fmt (check)
+        language: system
+        entry: cargo fmt --check
+        types: [rust]
+        pass_filenames: false
+
+  # ─── Shell script linting ────────────────────────────────────────────────────
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.10.0.1
+    hooks:
+      - id: shellcheck
+        name: shellcheck
+        types: [shell]
+
+  # ─── General file hygiene ────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      # Prevent large files from being committed accidentally
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+      # Block commits to main/master directly
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master]
