@@ -875,18 +875,6 @@ fn default_true() -> bool {
     true
 }
 
-/// A notification channel stored in the database.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct NotificationChannel {
-    pub id: Uuid,
-    pub name: String,
-    pub channel_type: String,
-    pub config: Value,
-    pub retry_policy: Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 /// Request body for creating a notification channel.
 #[derive(Debug, Deserialize)]
 pub struct CreateChannelRequest {
@@ -1048,21 +1036,6 @@ pub struct PaginatedResponse<T> {
 }
 
 // ── #511: Notification channel bulk operations ────────────────────────────────
-
-/// A managed notification channel (in-memory store).
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
-pub struct NotificationChannel {
-    pub id: Uuid,
-    pub name: String,
-    pub channel_type: String,
-    pub active: bool,
-    pub tags: Vec<String>,
-    /// #513: optional delivery SLA in seconds
-    pub delivery_sla_seconds: Option<u64>,
-    pub config: Value,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BulkChannelRequest {

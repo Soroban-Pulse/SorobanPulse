@@ -557,6 +557,142 @@ pub fn record_trace_sampling(sample_rate: f64) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Correlation IDs
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Correlation IDs let a single logical request be followed across every
+// service, log line, and metric it touches, even though a W3C trace-id is
+// not always propagated by every internal caller. Correlation IDs use the
+// same hex format as trace IDs (see `new_trace_id`) so they can be swapped
+// in as a trace-id when OTel is enabled.
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+thread_local! {
+    static CORRELATION_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// A single entry in the in-memory correlation log ring buffer, used by the
+/// correlation search interface and correlation-based debugging tools.
+#[derive(Clone, Debug)]
+pub struct CorrelationLogEntry {
+    pub correlation_id: String,
+    pub service: String,
+    pub message: String,
+    pub timestamp_ms: u128,
+}
+
+/// Bounded in-memory ring buffer of recent correlation log entries.
+///
+/// This is intentionally simple (no external dependency) so that any service
+/// can record and search correlation-tagged events without a log aggregator
+/// being present. Production deployments should also ship these to the
+/// centralized logging backend described in `docs/correlation-ids.md`.
+pub static CORRELATION_LOG: Mutex<Option<VecDeque<CorrelationLogEntry>>> = Mutex::new(None);
+
+const CORRELATION_LOG_CAPACITY: usize = 2000;
+
+/// Set the correlation ID for the current request/thread.
+pub fn set_correlation_id(id: String) {
+    CORRELATION_ID.with(|c| *c.borrow_mut() = Some(id));
+}
+
+/// Retrieve the correlation ID for the current request/thread, if any.
+pub fn get_correlation_id() -> Option<String> {
+    CORRELATION_ID.with(|c| c.borrow().clone())
+}
+
+/// Clear the correlation ID (call at the end of request handling to avoid
+/// leaking state across pooled threads).
+pub fn clear_correlation_id() {
+    CORRELATION_ID.with(|c| *c.borrow_mut() = None);
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// Record a correlation-tagged log line into the in-memory ring buffer, and
+/// increment the correlation metrics counter. This implements "correlation
+/// log filtering" support: callers can later filter/search by correlation ID.
+pub fn record_correlation_log(service: &str, message: impl Into<String>) {
+    let Some(correlation_id) = get_correlation_id() else {
+        return;
+    };
+
+    let entry = CorrelationLogEntry {
+        correlation_id: correlation_id.clone(),
+        service: service.to_string(),
+        message: message.into(),
+        timestamp_ms: now_ms(),
+    };
+
+    let mut guard = CORRELATION_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    let buf = guard.get_or_insert_with(|| VecDeque::with_capacity(CORRELATION_LOG_CAPACITY));
+    if buf.len() >= CORRELATION_LOG_CAPACITY {
+        buf.pop_front();
+    }
+    buf.push_back(entry);
+
+    extern crate metrics as m;
+    m::counter!("soroban_pulse_correlation_log_entries_total", "service" => service.to_string())
+        .increment(1);
+}
+
+/// Correlation-based debugging: return every recorded log entry for a given
+/// correlation ID, in chronological order, across all services that recorded
+/// one. This is the backbone of the correlation search interface.
+pub fn search_by_correlation_id(correlation_id: &str) -> Vec<CorrelationLogEntry> {
+    let guard = CORRELATION_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .map(|buf| {
+            buf.iter()
+                .filter(|entry| entry.correlation_id == correlation_id)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Filter recorded correlation log entries by service name, optionally
+/// restricted to a single correlation ID. Supports the "correlation log
+/// filtering" checklist item independent of the search-by-id path above.
+pub fn filter_correlation_logs(
+    service: Option<&str>,
+    correlation_id: Option<&str>,
+) -> Vec<CorrelationLogEntry> {
+    let guard = CORRELATION_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .as_ref()
+        .map(|buf| {
+            buf.iter()
+                .filter(|e| service.is_none_or(|s| e.service == s))
+                .filter(|e| correlation_id.is_none_or(|c| e.correlation_id == c))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Record a metric observation tagged with the current correlation ID's
+/// presence, used to track how much of the traffic is fully correlated
+/// end-to-end vs. falling back to a freshly minted ID.
+pub fn record_correlation_metrics(had_incoming_id: bool) {
+    extern crate metrics as m;
+    m::counter!(
+        "soroban_pulse_correlation_ids_total",
+        "source" => if had_incoming_id { "propagated" } else { "generated" }
+    )
+    .increment(1);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -712,5 +848,42 @@ mod tests {
     fn inject_trace_headers_without_context_generates_fresh_trace() {
         let client = reqwest::Client::new();
         let _builder = inject_trace_headers(client.post("http://localhost"), None);
+    }
+
+    #[test]
+    fn correlation_id_roundtrip() {
+        set_correlation_id("corr-1".to_string());
+        assert_eq!(get_correlation_id(), Some("corr-1".to_string()));
+        clear_correlation_id();
+        assert_eq!(get_correlation_id(), None);
+    }
+
+    #[test]
+    fn record_and_search_correlation_log() {
+        set_correlation_id("corr-search-test".to_string());
+        record_correlation_log("indexer", "processed event");
+        record_correlation_log("api", "served response");
+
+        let results = search_by_correlation_id("corr-search-test");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|e| e.service == "indexer"));
+        assert!(results.iter().any(|e| e.service == "api"));
+        clear_correlation_id();
+    }
+
+    #[test]
+    fn filter_correlation_logs_by_service() {
+        set_correlation_id("corr-filter-test".to_string());
+        record_correlation_log("webhook", "delivered");
+        clear_correlation_id();
+
+        let results = filter_correlation_logs(Some("webhook"), Some("corr-filter-test"));
+        assert!(results.iter().all(|e| e.service == "webhook"));
+    }
+
+    #[test]
+    fn record_correlation_metrics_does_not_panic() {
+        record_correlation_metrics(true);
+        record_correlation_metrics(false);
     }
 }

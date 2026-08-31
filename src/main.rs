@@ -25,6 +25,8 @@ mod error;
 mod event_hubs;
 mod graceful_shutdown;
 mod handlers;
+mod idempotency;
+mod log_analysis_tool;
 mod index_monitor;
 mod indexer;
 mod kafka;
@@ -88,26 +90,14 @@ mod query_optimizer;
 mod partition_manager;
 mod query_builder;
 mod adaptive_pool;
-mod pool_management;
-mod statistics_management;
 mod notification_admin;
-mod push_preload;
 mod financial_accuracy;
 mod webhook_template;
 mod event_aggregation;
 mod anomaly_detection;
 mod push_notification;
 mod connection_pool;
-mod pool_management;
-mod adaptive_pool;
 mod slo_tracker;
-mod statistics_management;
-mod notification_admin;
-mod push_preload;
-mod financial_accuracy;
-mod webhook_template;
-mod event_aggregation;
-mod anomaly_detection;
 
 // These modules were already part of the library target (see src/lib.rs) but
 // missing here, leaving `crate::pool_management` and friends unresolved in
@@ -123,6 +113,11 @@ mod health_check;
 mod ledger_hashes;
 #[allow(clippy::pedantic)]
 mod networks;
+// Issue #942: same gap as the modules above — zero_trust.rs was part of
+// the library target but missing from the binary, so `crate::zero_trust`
+// was unresolved for anything in the binary (e.g. middleware/ip_access.rs).
+#[allow(clippy::pedantic)]
+mod zero_trust;
 #[allow(clippy::pedantic)]
 mod pool_management;
 #[allow(clippy::pedantic)]

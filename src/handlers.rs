@@ -1985,7 +1985,7 @@ fn accepts_ndjson(headers: &axum::http::HeaderMap) -> bool {
 }
 
 /// Extract client IP from X-Forwarded-For or X-Real-IP headers, falling back to "unknown".
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -15101,6 +15101,7 @@ pub async fn get_rate_limit_status(
         state.config.rate_limit_key_per_minute,
         state.config.rate_limit_key_per_hour,
         state.config.rate_limit_key_per_day,
+        state.config.rate_limit_key_per_month,
     );
 
     // Get status (no counter increment)

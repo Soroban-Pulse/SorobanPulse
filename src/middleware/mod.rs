@@ -31,6 +31,7 @@
 pub mod auth;
 pub mod builder;
 pub mod http_utils;
+pub mod ip_access;
 pub mod rate_limit;
 pub mod request_id;
 pub mod security_headers;
@@ -46,11 +47,9 @@ pub use auth::{
 };
 pub use builder::MiddlewareStack;
 pub use http_utils::{cache_middleware, head_middleware};
+pub use ip_access::ip_access_control_middleware;
 pub use rate_limit::rate_limit_headers_middleware;
-pub use request_id::request_id_middleware;
-pub use security_headers::{
-    security_headers_middleware, security_headers_middleware_with_config, validate_cors_origins,
-    SecurityHeadersConfig,
-};
+pub use request_id::{correlation_id_middleware, request_id_middleware, CORRELATION_ID_HEADER};
+pub use security_headers::security_headers_middleware;
 pub use tenant::{tenant_context_middleware, TenantExtractor};
 pub use tracing::{request_tracking_middleware, tracing_middleware};
