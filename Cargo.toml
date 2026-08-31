@@ -92,7 +92,7 @@ prost = { version = "0.12", optional = true }
 
 # Messaging integrations (optional, enabled per-deployment)
 rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
-google-cloud-pubsub = { version = "0.33", optional = true }
+google-cloud-pubsub = { version = "1.2", optional = true }
 google-cloud-googleapis = { version = "0.16", optional = true }
 url = { version = "2.5", optional = true }
 
