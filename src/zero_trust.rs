@@ -10,6 +10,8 @@
 //!   Deny, and Challenge outcomes.
 //! - **In-memory access logging** for audit trail and forensic analysis.
 
+extern crate metrics as m;
+
 use chrono::{DateTime, Utc};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
@@ -157,6 +159,18 @@ impl ApiKeySet {
         self.secondary = Some(std::mem::take(&mut self.primary));
         self.primary = new_key.into();
         self.rotated_at = Some(Utc::now());
+    }
+
+    /// Same as [`rotate`](Self::rotate), plus records a
+    /// `soroban_pulse_api_key_rotations_total` metric (Issue #939) — use
+    /// this instead of `rotate()` directly at any real rotation call site
+    /// so rotation events are observable. Kept as a separate method rather
+    /// than folding the `metrics::counter!` call into `rotate()` itself so
+    /// `rotate()` stays a plain, dependency-free, synchronously-testable
+    /// state transition (see this module's own tests).
+    pub fn rotate_with_metrics(&mut self, new_key: impl Into<String>) {
+        self.rotate(new_key);
+        m::counter!("soroban_pulse_api_key_rotations_total").increment(1);
     }
 
     /// Return `true` if a rotation has occurred within the last
@@ -321,26 +335,132 @@ impl Default for PolicyEvaluator {
 // ---------------------------------------------------------------------------
 
 /// Deny requests originating from specific IP addresses.
+/// A single IP filter list entry: either an exact address or a CIDR block
+/// (e.g. `"203.0.113.5"` or `"203.0.113.0/24"`, IPv4 or IPv6). Parsed once
+/// at construction so evaluate() never re-parses on the hot path.
+///
+/// Issue #942: `IpDenyListRule` previously only supported exact-string
+/// matches — a `/24` block had to be listed one address at a time, which
+/// isn't practical for real network-level allow/deny lists.
+#[derive(Clone, Debug)]
+struct IpFilterEntry {
+    network: std::net::IpAddr,
+    prefix_len: u8,
+}
+
+impl IpFilterEntry {
+    fn parse(entry: &str) -> Option<Self> {
+        if let Some((addr, len)) = entry.split_once('/') {
+            let network: std::net::IpAddr = addr.trim().parse().ok()?;
+            let prefix_len: u8 = len.trim().parse().ok()?;
+            let max_len = match network {
+                std::net::IpAddr::V4(_) => 32,
+                std::net::IpAddr::V6(_) => 128,
+            };
+            if prefix_len > max_len {
+                return None;
+            }
+            Some(Self { network, prefix_len })
+        } else {
+            let network: std::net::IpAddr = entry.trim().parse().ok()?;
+            let prefix_len = match network {
+                std::net::IpAddr::V4(_) => 32,
+                std::net::IpAddr::V6(_) => 128,
+            };
+            Some(Self { network, prefix_len })
+        }
+    }
+
+    fn contains(&self, candidate: std::net::IpAddr) -> bool {
+        match (self.network, candidate) {
+            (std::net::IpAddr::V4(net), std::net::IpAddr::V4(addr)) => {
+                let mask = if self.prefix_len == 0 {
+                    0u32
+                } else {
+                    u32::MAX << (32 - self.prefix_len)
+                };
+                (u32::from(net) & mask) == (u32::from(addr) & mask)
+            }
+            (std::net::IpAddr::V6(net), std::net::IpAddr::V6(addr)) => {
+                let mask = if self.prefix_len == 0 {
+                    0u128
+                } else {
+                    u128::MAX << (128 - self.prefix_len)
+                };
+                (u128::from(net) & mask) == (u128::from(addr) & mask)
+            }
+            // IPv4/IPv6 family mismatch never matches.
+            _ => false,
+        }
+    }
+}
+
+/// Parses a list of IP/CIDR strings, silently skipping unparseable entries
+/// (a malformed config entry must never panic the whole rule set).
+fn parse_ip_filter_list(entries: &[String]) -> Vec<IpFilterEntry> {
+    entries.iter().filter_map(|e| IpFilterEntry::parse(e)).collect()
+}
+
 pub struct IpDenyListRule {
-    denied_ips: Vec<String>,
+    denied: Vec<IpFilterEntry>,
 }
 
 impl IpDenyListRule {
+    /// `denied_ips` accepts exact addresses and/or CIDR blocks
+    /// (`"203.0.113.5"`, `"203.0.113.0/24"`, IPv4 or IPv6).
     #[must_use]
     pub fn new(denied_ips: Vec<String>) -> Self {
-        Self { denied_ips }
+        Self { denied: parse_ip_filter_list(&denied_ips) }
     }
 }
 
 impl PolicyRule for IpDenyListRule {
     fn evaluate(&self, ctx: &RequestContext) -> Option<AccessDecision> {
-        if self.denied_ips.contains(&ctx.ip_address) {
+        let Ok(candidate) = ctx.ip_address.parse::<std::net::IpAddr>() else {
+            return None;
+        };
+        if self.denied.iter().any(|entry| entry.contains(candidate)) {
             Some(AccessDecision::Deny(format!(
                 "IP address {} is blocked",
                 ctx.ip_address
             )))
         } else {
             None
+        }
+    }
+}
+
+/// Only allow requests from a pre-approved set of IPs/CIDR blocks; every
+/// other address is denied. The counterpart to [`IpDenyListRule`] — use
+/// one or the other, not both, in a given [`PolicyEvaluator`] (an allow
+/// list is the more restrictive posture: everything not explicitly listed
+/// is rejected).
+pub struct IpAllowListRule {
+    allowed: Vec<IpFilterEntry>,
+}
+
+impl IpAllowListRule {
+    /// `allowed_ips` accepts exact addresses and/or CIDR blocks.
+    #[must_use]
+    pub fn new(allowed_ips: Vec<String>) -> Self {
+        Self { allowed: parse_ip_filter_list(&allowed_ips) }
+    }
+}
+
+impl PolicyRule for IpAllowListRule {
+    fn evaluate(&self, ctx: &RequestContext) -> Option<AccessDecision> {
+        let Ok(candidate) = ctx.ip_address.parse::<std::net::IpAddr>() else {
+            return Some(AccessDecision::Deny(
+                "Unparseable client IP address".to_string(),
+            ));
+        };
+        if self.allowed.iter().any(|entry| entry.contains(candidate)) {
+            None // Not this rule's business to Allow — just don't block.
+        } else {
+            Some(AccessDecision::Deny(format!(
+                "IP address {} is not on the allow list",
+                ctx.ip_address
+            )))
         }
     }
 }
@@ -613,6 +733,18 @@ mod tests {
         assert_eq!(ks.primary, "new-key");
         assert_eq!(ks.secondary.as_deref(), Some("old-key"));
         assert!(ks.rotated_at.is_some());
+    }
+
+    #[test]
+    fn rotate_with_metrics_behaves_identically_to_rotate() {
+        let mut ks = ApiKeySet::new("old-key");
+        ks.rotate_with_metrics("new-key");
+
+        assert_eq!(ks.primary, "new-key");
+        assert_eq!(ks.secondary.as_deref(), Some("old-key"));
+        assert!(ks.rotated_at.is_some());
+        assert!(ks.is_valid("new-key"));
+        assert!(ks.is_valid("old-key"));
     }
 
     #[test]
@@ -920,5 +1052,66 @@ mod tests {
         assert!(keys.is_valid("final-key"));
         assert!(keys.is_valid("rotated-key"));
         assert!(!keys.is_valid("original-key"));
+    }
+
+    // -- IP filter list (CIDR) tests -------------------------------------------
+
+    fn ctx_from_ip(ip: &str) -> RequestContext {
+        RequestContext::new(ip, "keyhash", "/", "GET")
+    }
+
+    #[test]
+    fn ip_deny_list_matches_exact_address() {
+        let rule = IpDenyListRule::new(vec!["203.0.113.5".to_string()]);
+        assert!(matches!(
+            rule.evaluate(&ctx_from_ip("203.0.113.5")),
+            Some(AccessDecision::Deny(_))
+        ));
+        assert!(rule.evaluate(&ctx_from_ip("203.0.113.6")).is_none());
+    }
+
+    #[test]
+    fn ip_deny_list_matches_cidr_block() {
+        let rule = IpDenyListRule::new(vec!["203.0.113.0/24".to_string()]);
+        assert!(matches!(
+            rule.evaluate(&ctx_from_ip("203.0.113.200")),
+            Some(AccessDecision::Deny(_))
+        ));
+        assert!(rule.evaluate(&ctx_from_ip("203.0.114.1")).is_none());
+    }
+
+    #[test]
+    fn ip_deny_list_ipv6_cidr() {
+        let rule = IpDenyListRule::new(vec!["2001:db8::/32".to_string()]);
+        assert!(matches!(
+            rule.evaluate(&ctx_from_ip("2001:db8::1")),
+            Some(AccessDecision::Deny(_))
+        ));
+        assert!(rule.evaluate(&ctx_from_ip("2001:db9::1")).is_none());
+    }
+
+    #[test]
+    fn ip_deny_list_ignores_malformed_entries_rather_than_panicking() {
+        let rule = IpDenyListRule::new(vec!["not-an-ip".to_string(), "203.0.113.5".to_string()]);
+        assert!(matches!(
+            rule.evaluate(&ctx_from_ip("203.0.113.5")),
+            Some(AccessDecision::Deny(_))
+        ));
+    }
+
+    #[test]
+    fn ip_allow_list_denies_anything_not_listed() {
+        let rule = IpAllowListRule::new(vec!["203.0.113.0/24".to_string()]);
+        assert!(rule.evaluate(&ctx_from_ip("203.0.113.10")).is_none());
+        assert!(matches!(
+            rule.evaluate(&ctx_from_ip("198.51.100.1")),
+            Some(AccessDecision::Deny(_))
+        ));
+    }
+
+    #[test]
+    fn ip_family_mismatch_never_matches() {
+        let rule = IpDenyListRule::new(vec!["203.0.113.0/24".to_string()]);
+        assert!(rule.evaluate(&ctx_from_ip("2001:db8::1")).is_none());
     }
 }

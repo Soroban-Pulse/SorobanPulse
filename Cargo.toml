@@ -79,6 +79,13 @@ tokio-tungstenite = "0.21"
 bytes = "1.5"
 base64 = "0.21"
 hex = "0.4"
+# Issue #942/#941 investigation: zero_trust.rs and middleware/auth.rs both
+# already used `subtle::ConstantTimeEq` for constant-time secret comparison,
+# but subtle was never a direct dependency here — only ever present
+# transitively (via hmac and others), which edition 2021 does not allow
+# `use subtle::...` to resolve against. Version pinned to match what's
+# already resolved in Cargo.lock from those transitive deps.
+subtle = "2.6"
 
 # Service mesh integration
 tonic = { version = "0.10", optional = true }

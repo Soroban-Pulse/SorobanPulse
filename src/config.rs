@@ -220,6 +220,16 @@ pub struct Config {
     /// Per-API-key rate limit: max requests per day (Issue #669).
     /// Set via RATE_LIMIT_KEY_PER_DAY env var.
     pub rate_limit_key_per_day: Option<u32>,
+    /// Per-API-key rate limit: max requests per rolling 30-day window (Issue #941).
+    /// Set via RATE_LIMIT_KEY_PER_MONTH env var.
+    pub rate_limit_key_per_month: Option<u32>,
+    /// IP addresses/CIDR blocks to block (Issue #942). Comma-separated,
+    /// IPv4 or IPv6. Set via IP_DENYLIST env var. Empty disables enforcement.
+    pub ip_denylist: Vec<String>,
+    /// IP addresses/CIDR blocks to exclusively allow (Issue #942).
+    /// Comma-separated, IPv4 or IPv6. Set via IP_ALLOWLIST env var. Empty
+    /// disables enforcement (every IP allowed).
+    pub ip_allowlist: Vec<String>,
     pub indexer_lag_warn_threshold: u64,
     pub indexer_stall_timeout_secs: u64,
     pub db_statement_timeout_ms: u64,
@@ -504,6 +514,9 @@ impl Default for Config {
             rate_limit_key_per_minute: None,
             rate_limit_key_per_hour: None,
             rate_limit_key_per_day: None,
+            rate_limit_key_per_month: None,
+            ip_denylist: Vec::new(),
+            ip_allowlist: Vec::new(),
             indexer_lag_warn_threshold: 100,
             indexer_stall_timeout_secs: 60,
             db_statement_timeout_ms: 5000,
@@ -1097,6 +1110,23 @@ impl Config {
             .and_then(|v| parse_int::<u32>("RATE_LIMIT_KEY_PER_DAY", &v, "100000", &mut errors))
             .filter(|&n| n > 0);
 
+        // Issue #941: monthly quota pool, on top of the existing minute/hour/day tiers.
+        let rate_limit_key_per_month = env_or_file("RATE_LIMIT_KEY_PER_MONTH", &file)
+            .and_then(|v| parse_int::<u32>("RATE_LIMIT_KEY_PER_MONTH", &v, "1000000", &mut errors))
+            .filter(|&n| n > 0);
+
+        // Issue #942: IP allow/deny lists (comma-separated IPs and/or CIDR blocks).
+        let ip_denylist: Vec<String> = env_or_file_or("IP_DENYLIST", &file, "")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let ip_allowlist: Vec<String> = env_or_file_or("IP_ALLOWLIST", &file, "")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
         let indexer_lag_warn_threshold = parse_int::<u64>(
             "INDEXER_LAG_WARN_THRESHOLD",
             &env_or_file_or("INDEXER_LAG_WARN_THRESHOLD", &file, "100"),
@@ -1360,6 +1390,9 @@ impl Config {
             rate_limit_key_per_minute,
             rate_limit_key_per_hour,
             rate_limit_key_per_day,
+            rate_limit_key_per_month,
+            ip_denylist,
+            ip_allowlist,
             indexer_lag_warn_threshold,
             indexer_stall_timeout_secs,
             db_statement_timeout_ms,
