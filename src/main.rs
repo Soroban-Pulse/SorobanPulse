@@ -9,6 +9,7 @@ mod audit_logging;
 mod bloom_filter;
 mod compliance_report;
 mod config;
+mod config_validation;
 mod content_filter;
 mod cross_chain_correlation;
 mod cursor_expiry_handler;
@@ -189,6 +190,19 @@ async fn main() -> anyhow::Result<()> {
     metrics::spawn_memory_collector();
 
     let config = config::Config::from_env();
+
+    // Issue #997: Validate the fully-loaded configuration before doing anything else.
+    {
+        let report = config_validation::validate(&config);
+        report.log();
+        if !report.is_ok() {
+            eprintln!(
+                "Configuration validation failed with {} error(s) — aborting startup.",
+                report.errors.len()
+            );
+            std::process::exit(1);
+        }
+    }
 
     info!(
         rpc_url = %config.stellar_rpc_url,
