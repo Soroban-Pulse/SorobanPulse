@@ -634,6 +634,11 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/subscriptions/{id}/integrations/slack", axum::routing::post(crate::integration_handlers::setup_slack_integration).get(crate::integration_handlers::get_slack_integration).delete(crate::integration_handlers::delete_slack_integration))
         // Issue #677: Telegram integration
         .route("/subscriptions/{id}/integrations/telegram", axum::routing::post(crate::integration_handlers::setup_telegram_integration).get(crate::integration_handlers::get_telegram_integration).delete(crate::integration_handlers::delete_telegram_integration))
+        // Issue #951: PagerDuty integration
+        .route("/subscriptions/{id}/integrations/pagerduty", axum::routing::post(crate::integration_handlers::setup_pagerduty_integration).get(crate::integration_handlers::get_pagerduty_integration).delete(crate::integration_handlers::delete_pagerduty_integration))
+        .route("/subscriptions/{id}/integrations/pagerduty/incidents", axum::routing::get(crate::integration_handlers::list_pagerduty_incidents))
+        .route("/subscriptions/{id}/integrations/pagerduty/incidents/acknowledge", axum::routing::post(crate::integration_handlers::acknowledge_pagerduty_incident))
+        .route("/subscriptions/{id}/integrations/pagerduty/incidents/resolve", axum::routing::post(crate::integration_handlers::resolve_pagerduty_incident))
         // Issue #487: email open tracking (public – email clients fetch the pixel)
         .route("/notifications/email/track/{token}", get(handlers::track_email_open))
         // Issue #487: email open stats (admin)
