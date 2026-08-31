@@ -30,6 +30,7 @@ diesel = { version = "2.1", features = ["postgres", "uuid", "chrono", "serde_jso
 ed25519-dalek = "2.1"
 sha2 = "0.10"
 hmac = "0.12"
+subtle = "2.6"
 aes-gcm = "0.10"
 
 # Cryptography - Post-Quantum (optional feature)

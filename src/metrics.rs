@@ -1074,6 +1074,64 @@ pub fn record_advisory_lock_release_error(lock_id: i64) {
     .increment(1);
 }
 
+// ── Webhook priority queue metrics ─────────────────────────────────────────────
+
+/// Record a priority-queue dequeue with the observed wait time.
+pub fn record_priority_dequeue(priority: &str, wait_ms: u64) {
+    m::counter!(
+        "soroban_pulse_webhook_priority_dequeued_total",
+        "priority" => priority.to_string()
+    )
+    .increment(1);
+    m::histogram!(
+        "soroban_pulse_webhook_priority_wait_ms",
+        "priority" => priority.to_string()
+    )
+    .record(wait_ms as f64);
+}
+
+/// Record a priority SLA violation (task waited longer than its priority allows).
+pub fn record_priority_violation(priority: &str) {
+    m::counter!(
+        "soroban_pulse_webhook_priority_violations_total",
+        "priority" => priority.to_string()
+    )
+    .increment(1);
+}
+
+// ── Webhook signing metrics ────────────────────────────────────────────────────
+
+/// Record a webhook payload signing operation for a given key id.
+pub fn record_webhook_signature_created(key_id: &str) {
+    m::counter!(
+        "soroban_pulse_webhook_signatures_created_total",
+        "key_id" => key_id.to_string()
+    )
+    .increment(1);
+}
+
+/// Record a webhook signature verification result.
+pub fn record_webhook_signature_verified(key_id: &str, success: bool) {
+    m::counter!(
+        "soroban_pulse_webhook_signature_verifications_total",
+        "key_id" => key_id.to_string(),
+        "result" => if success { "success" } else { "failure" }
+    )
+    .increment(1);
+}
+
+// ── HTTP caching metrics ───────────────────────────────────────────────────────
+
+/// Record a conditional-request cache outcome for HTTP caching effectiveness.
+pub fn record_http_cache_result(resource: &str, hit: bool) {
+    m::counter!(
+        "soroban_pulse_http_cache_results_total",
+        "resource" => resource.to_string(),
+        "result" => if hit { "hit" } else { "miss" }
+    )
+    .increment(1);
+}
+
 // ── Health check metrics ──────────────────────────────────────────────────────
 
 /// Record successful PostgreSQL health check

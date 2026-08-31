@@ -97,7 +97,8 @@ pub async fn run_migrations(pool: &PgPool) -> Result<usize, sqlx::migrate::Migra
             .map_err(|e| sqlx::Error::Configuration(format!("Connection validation failed: {}", e).into()))?;
 
         // Acquire the advisory lock with retry logic
-        lock.acquire(&mut conn)
+        let lock_guard = lock
+            .acquire(&mut conn)
             .await
             .map_err(|e| sqlx::Error::Configuration(format!("Advisory lock acquisition failed: {}", e).into()))?;
 
@@ -125,7 +126,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<usize, sqlx::migrate::Migra
         .unwrap_or_default();
 
         // Always release — ignore unlock errors so the migration result is returned.
-        let _ = lock.release(&mut conn).await;
+        let _ = lock.release(&mut conn, lock_guard).await;
 
         result?;
 
