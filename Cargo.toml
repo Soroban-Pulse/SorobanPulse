@@ -82,7 +82,7 @@ base64 = "0.21"
 hex = "0.4"
 regex = "1"
 blake3 = "1"
-toml = "0.8"
+toml = "1.1"
 secrecy = "0.5"
 rand = "0.8"
 
