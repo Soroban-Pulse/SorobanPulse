@@ -114,24 +114,25 @@ terraform/**/terraform.tfstate.backup
 terraform.tfvars
 **/terraform.tfvars
 
-# Secrets scanning artifacts
-.secrets.scan-results.json
-gitleaks-report.sarif
-results.sarif
+# Test parallelization cache
+.test-cache/
+test-results/
+*.test-result.json
 
-# detect-secrets baseline (keep this committed for CI comparison)
-# .secrets.baseline
+# DSL compiled artifacts
+*.dsl.compiled
 
-# Compliance report artifacts (generated, not source-controlled)
-compliance-reports/
-audit-exports/
+# Batch operation temp files
+batch-*.tmp
 
-# Pre-commit hook cache
-.pre-commit-cache/
+# Filter DSL schema cache
+filter_dsl_schema_cache.json
 
-# Python virtual environments (for pre-commit tools)
-venv/
-.venv/
-__pycache__/
-*.pyc
-*.pyo
+# Parallel test worker databases (local dev)
+test_schemas/
+
+# Test parallelization temp output
+tests/parallel_output/
+
+# jsonschema generated artefacts
+*.jsonschema.out

@@ -24,7 +24,7 @@ struct ApiKeyExtractor;
 impl KeyExtractor for ApiKeyExtractor {
     type Key = String;
 
-    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<Self::Key, GovernorError> {
+    fn extract<T>(&self, req: &axum::http::Request<T>) -> Result<String, GovernorError> {
         let bearer = req
             .headers()
             .get("Authorization")
@@ -38,6 +38,35 @@ impl KeyExtractor for ApiKeyExtractor {
             .map(|s| s.to_string());
         bearer.or(x_api_key).ok_or(GovernorError::UnableToExtractKey)
     }
+}
+
+pub async fn get_events_with_params(
+    State(state): State<AppState>,
+    Query(params): Query<crate::models::PaginationParams>,
+) -> Result<Json<crate::models::Paginated<Event>>, AppError> {
+    let response = handlers::get_events(
+        State(state),
+        Query(params),
+        axum::http::HeaderMap::new(),
+        axum::http::Extensions::new(),
+    )
+    .await?;
+
+    let payload = response.into_body();
+    let bytes = axum::body::to_bytes(payload, usize::MAX)
+        .await
+        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode events response: {}", e)))?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| crate::error::AppError::Internal(format!("failed to parse events response: {}", e)))?;
+    let records: Vec<Event> = serde_json::from_value(value["events"].clone())
+        .map_err(|e| crate::error::AppError::Internal(format!("failed to decode event records: {}", e)))?;
+    Ok(Json(crate::models::Paginated {
+        data: records,
+        page: value["page"].as_i64().unwrap_or(1),
+        limit: value["limit"].as_i64().unwrap_or(20),
+        total: value["total"].as_i64().unwrap_or(0),
+        has_more: value["has_more"].as_bool().unwrap_or(false),
+    }))
 }
 use tower_http::{
     compression::CompressionLayer,
@@ -661,6 +690,21 @@ pub fn create_router_with_tx_and_tenant_map(
             "/push/{contract_id}/abi",
             axum::routing::get(crate::push_preload::get_push_abi),
         )
+        // Issue #931: Batch event operations
+        .route("/events/batch/retrieve", axum::routing::post(crate::batch_operations::batch_retrieve_events))
+        .route("/events/batch/delete", axum::routing::post(crate::batch_operations::batch_delete_events))
+        .route("/events/batch/tag", axum::routing::post(crate::batch_operations::batch_tag_events))
+        .route("/events/batch/subscriptions", axum::routing::post(crate::batch_operations::batch_update_subscriptions))
+        .route("/events/batch/transform", axum::routing::post(crate::batch_operations::batch_transform_events))
+        .route("/events/batch/progress/{job_id}", axum::routing::get(crate::batch_operations::get_batch_progress))
+        // Issue #929: Real-time event stream statistics
+        .route("/stats/stream", axum::routing::get(crate::stream_statistics::get_stream_stats))
+        .route("/stats/stream/throughput", axum::routing::get(crate::stream_statistics::get_stream_throughput))
+        .route("/stats/stream/{contract_id}", axum::routing::get(crate::stream_statistics::get_contract_stream_stats))
+        // Issue #928: Event filtering DSL
+        .route("/events/filter", axum::routing::post(crate::filter_dsl::get_events_with_dsl))
+        .route("/admin/dsl/compile", axum::routing::post(crate::filter_dsl::compile_dsl_filter))
+        .route("/admin/dsl/filters", axum::routing::post(crate::filter_dsl::save_dsl_filter).get(crate::filter_dsl::list_dsl_filters))
         // Append Link preload headers to responses for
         // /v1/events/contract/{contract_id} when the feature flag is on.
         .route_layer(axum::middleware::from_fn_with_state(

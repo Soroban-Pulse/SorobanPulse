@@ -141,6 +141,7 @@ The project employs a comprehensive testing strategy across multiple dimensions:
 - **Property-Based Tests**: Discover edge cases with `proptest` — see [docs/property-testing.md](docs/property-testing.md)
 - **Mutation Testing**: Evaluate test coverage quality with `cargo-mutants` — see [docs/mutation-testing.md](docs/mutation-testing.md)
 - **API Contract Tests**: Verify client-server API compatibility — see [docs/contract-testing.md](docs/contract-testing.md)
+- **Security Tests**: OWASP Top 10, auth bypass, crypto verification, regression tests — see [docs/security-testing.md](docs/security-testing.md)
 
 Run tests locally:
 ```bash
@@ -156,6 +157,12 @@ make -f Makefile.mutations mutants
 
 # Contract tests (verify API compatibility)
 cargo test --test contract_tests
+
+# Security tests (OWASP, auth bypass, crypto, regression — no DB needed)
+make security-tests
+
+# Full security suite (tests + dependency audit + secrets scan)
+make security
 ```
 
 ## API

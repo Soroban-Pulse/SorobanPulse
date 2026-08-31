@@ -16,6 +16,7 @@ actix-cors = "0.7"
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 futures = "0.3"
+async-trait = "0.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -45,10 +46,10 @@ time = "0.3"
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-opentelemetry = "0.22"
+tracing-opentelemetry = { version = "0.22", optional = true }
 opentelemetry = { version = "0.21", features = ["trace", "metrics"] }
 opentelemetry-otlp = "0.14"
-opentelemetry-jaeger = "0.20"
+opentelemetry-jaeger = { version = "0.20", optional = true }
 
 # Metrics
 prometheus = "0.13"
@@ -79,10 +80,21 @@ tokio-tungstenite = "0.21"
 bytes = "1.5"
 base64 = "0.21"
 hex = "0.4"
+regex = "1"
+blake3 = "1"
+toml = "0.8"
+secrecy = "0.5"
+rand = "0.8"
 
 # Service mesh integration
 tonic = { version = "0.10", optional = true }
 prost = { version = "0.12", optional = true }
+
+# Messaging integrations (optional, enabled per-deployment)
+rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
+google-cloud-pubsub = { version = "0.33", optional = true }
+google-cloud-googleapis = { version = "0.16", optional = true }
+url = { version = "2.5", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -111,6 +123,11 @@ linkerd = ["tonic", "prost"]
 # Observability features
 full-observability = ["tracing-opentelemetry", "opentelemetry-jaeger"]
 
+# Messaging integrations
+kafka = ["dep:rdkafka"]
+sqs = ["dep:url"]
+pubsub = ["dep:google-cloud-pubsub", "dep:google-cloud-googleapis"]
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -119,16 +136,6 @@ strip = true
 
 [profile.bench]
 inherits = "release"
-
-[[bench]]
-name = "quantum_crypto"
-harness = false
-required-features = ["quantum-crypto"]
-
-[[bench]]
-name = "hybrid_signatures"
-harness = false
-required-features = ["hybrid-crypto"]
 
 [lib]
 name = "soroban_pulse"
