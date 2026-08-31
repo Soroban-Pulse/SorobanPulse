@@ -53,7 +53,7 @@ opentelemetry-jaeger = { version = "0.20", optional = true }
 
 # Metrics
 prometheus = "0.13"
-metrics = "0.21"
+metrics = "0.24"
 
 # Configuration
 config = "0.13"
