@@ -515,6 +515,41 @@ pub fn record_sse_multi_contract_ids(count: u64) {
     m::histogram!("soroban_pulse_sse_multi_contract_ids").record(count as f64);
 }
 
+/// Issue #995: Record connection wait time (time a request spent waiting for a pool slot).
+pub fn record_pool_wait_time(duration: std::time::Duration) {
+    m::histogram!("soroban_pulse_db_pool_wait_seconds").record(duration.as_secs_f64());
+}
+
+/// Issue #995: Increment the counter of requests that waited >1 s for a pool connection.
+pub fn record_pool_wait_timeout() {
+    m::counter!("soroban_pulse_db_pool_wait_timeout_total").increment(1);
+}
+
+/// Issue #995: Record the current depth of the connection acquisition queue.
+pub fn update_pool_queue_depth(depth: usize) {
+    m::gauge!("soroban_pulse_db_pool_queue_depth").set(depth as f64);
+}
+
+/// Issue #996: Record a bloom filter reset triggered by memory pressure.
+pub fn record_bloom_filter_memory_reset() {
+    m::counter!("soroban_pulse_bloom_filter_memory_resets_total").increment(1);
+}
+
+/// Issue #996: Update the bloom filter fill ratio (inserted items / capacity).
+pub fn update_bloom_filter_fill_ratio(ratio: f64) {
+    m::gauge!("soroban_pulse_bloom_filter_fill_ratio").set(ratio);
+}
+
+/// Issue #996: Record the estimated memory usage of the bloom filter in bytes.
+pub fn update_bloom_filter_memory_bytes(bytes: u64) {
+    m::gauge!("soroban_pulse_bloom_filter_memory_bytes").set(bytes as f64);
+}
+
+/// Issue #996: Record when the bloom filter was rotated (periodic cleanup cycle).
+pub fn record_bloom_filter_rotation() {
+    m::counter!("soroban_pulse_bloom_filter_rotations_total").increment(1);
+}
+
 /// Record SSE per-IP connection count (histogram, issue #453)
 pub fn record_sse_connections_per_ip(count: usize) {
     m::histogram!("soroban_pulse_sse_connections_per_ip").record(count as f64);

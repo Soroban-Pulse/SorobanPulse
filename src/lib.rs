@@ -15,6 +15,7 @@ pub mod bloom_filter;
 pub mod capacity_planning;
 pub mod compliance_report;
 pub mod config;
+pub mod config_validation;
 pub mod content_filter;
 pub mod data_integrity;
 pub mod data_quality;
