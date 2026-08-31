@@ -61,6 +61,7 @@ pub mod saved_queries;
 pub mod schema_validator;
 pub mod sqs;
 pub mod subscriptions;
+pub mod event_tagging;
 pub mod webhook;
 pub mod webhook_logging;
 pub mod webhook_template;

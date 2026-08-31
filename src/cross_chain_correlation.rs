@@ -267,6 +267,211 @@ impl Default for CorrelationEngine {
     }
 }
 
+// ── Persistence, querying, metrics, dedup, and grouping (Issue #935) ──────
+
+use sqlx::PgPool;
+
+/// Persists one correlation edge to `cross_chain_correlations`. Idempotent
+/// for a given `(source_event_id, target_event_id)` pair — a repeat
+/// detection updates the existing row's causality/confidence/reason rather
+/// than inserting a duplicate.
+pub async fn persist_correlation(
+    pool: &PgPool,
+    source_event_id: Uuid,
+    target_event_id: Uuid,
+    source_network: &str,
+    target_network: &str,
+    causality: CausalityType,
+    confidence: f64,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    let causality_str = match causality {
+        CausalityType::Direct => "Direct",
+        CausalityType::Indirect => "Indirect",
+        CausalityType::Related => "Related",
+        CausalityType::Sequential => "Sequential",
+    };
+    sqlx::query(
+        "INSERT INTO cross_chain_correlations \
+         (source_event_id, target_event_id, source_network, target_network, causality, confidence, reason) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+         ON CONFLICT (source_event_id, target_event_id) DO UPDATE SET \
+             causality = EXCLUDED.causality, \
+             confidence = EXCLUDED.confidence, \
+             reason = EXCLUDED.reason, \
+             detected_at = NOW()",
+    )
+    .bind(source_event_id)
+    .bind(target_event_id)
+    .bind(source_network)
+    .bind(target_network)
+    .bind(causality_str)
+    .bind(confidence)
+    .bind(reason)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[derive(Debug, sqlx::FromRow, Serialize)]
+pub struct PersistedCorrelation {
+    pub id: Uuid,
+    pub source_event_id: Uuid,
+    pub target_event_id: Uuid,
+    pub source_network: String,
+    pub target_network: String,
+    pub causality: String,
+    pub confidence: f64,
+    pub reason: String,
+    pub detected_at: DateTime<Utc>,
+}
+
+/// Query parameters for cross-chain correlation filtering (Issue #935:
+/// "Add cross-chain filtering and querying").
+#[derive(Debug, Default, Clone)]
+pub struct CorrelationQuery {
+    pub network: Option<String>,
+    pub min_confidence: Option<f64>,
+    pub causality: Option<CausalityType>,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+impl CorrelationQuery {
+    pub fn new() -> Self {
+        Self {
+            limit: 100,
+            ..Default::default()
+        }
+    }
+}
+
+/// Returns correlations matching `query`, most recently detected first.
+/// `network` matches either the source or target network — a cross-chain
+/// correlation involving a given network should surface regardless of
+/// which side it appears on.
+pub async fn query_correlations(
+    pool: &PgPool,
+    query: &CorrelationQuery,
+) -> Result<Vec<PersistedCorrelation>, sqlx::Error> {
+    let causality_str = query.causality.map(|c| match c {
+        CausalityType::Direct => "Direct",
+        CausalityType::Indirect => "Indirect",
+        CausalityType::Related => "Related",
+        CausalityType::Sequential => "Sequential",
+    });
+
+    sqlx::query_as::<_, PersistedCorrelation>(
+        "SELECT id, source_event_id, target_event_id, source_network, target_network, \
+                causality, confidence, reason, detected_at \
+         FROM cross_chain_correlations \
+         WHERE ($1::text IS NULL OR source_network = $1 OR target_network = $1) \
+           AND ($2::double precision IS NULL OR confidence >= $2) \
+           AND ($3::text IS NULL OR causality = $3) \
+         ORDER BY detected_at DESC \
+         LIMIT $4 OFFSET $5",
+    )
+    .bind(&query.network)
+    .bind(query.min_confidence)
+    .bind(causality_str)
+    .bind(query.limit)
+    .bind(query.offset)
+    .fetch_all(pool)
+    .await
+}
+
+/// Aggregate metrics over persisted correlations (Issue #935: "Create
+/// correlation metrics").
+#[derive(Debug, Default, Serialize)]
+pub struct CorrelationMetrics {
+    pub total_correlations: i64,
+    pub avg_confidence: f64,
+    pub by_causality: HashMap<String, i64>,
+    pub by_network_pair: HashMap<String, i64>,
+}
+
+pub async fn correlation_metrics(pool: &PgPool) -> Result<CorrelationMetrics, sqlx::Error> {
+    let rows: Vec<(String, String, String, f64)> = sqlx::query_as(
+        "SELECT causality, source_network, target_network, confidence FROM cross_chain_correlations",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut metrics = CorrelationMetrics::default();
+    metrics.total_correlations = rows.len() as i64;
+    let mut confidence_sum = 0.0;
+    for (causality, source_network, target_network, confidence) in &rows {
+        confidence_sum += confidence;
+        *metrics.by_causality.entry(causality.clone()).or_insert(0) += 1;
+        let pair_key = format!("{source_network}->{target_network}");
+        *metrics.by_network_pair.entry(pair_key).or_insert(0) += 1;
+    }
+    metrics.avg_confidence = if rows.is_empty() {
+        0.0
+    } else {
+        confidence_sum / rows.len() as f64
+    };
+    Ok(metrics)
+}
+
+/// Checks whether an event with `fingerprint` on `network` has already
+/// been indexed, scoping deduplication to that network rather than
+/// globally (Issue #935: "Implement network-specific deduplication") —
+/// the same fingerprint occurring independently on two different networks
+/// is not a duplicate.
+pub async fn is_network_duplicate(
+    pool: &PgPool,
+    network: &str,
+    fingerprint: &str,
+) -> Result<bool, sqlx::Error> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM events WHERE network = $1 AND fingerprint = $2",
+    )
+    .bind(network)
+    .bind(fingerprint)
+    .fetch_one(pool)
+    .await?;
+    Ok(count > 0)
+}
+
+/// Creates a named cross-chain event group and assigns the given event ids
+/// to it (Issue #935: "Add cross-chain event grouping").
+pub async fn create_event_group(
+    pool: &PgPool,
+    label: Option<&str>,
+    event_ids: &[Uuid],
+) -> Result<Uuid, sqlx::Error> {
+    let group_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO cross_chain_event_groups (label) VALUES ($1) RETURNING id",
+    )
+    .bind(label)
+    .fetch_one(pool)
+    .await?;
+
+    for event_id in event_ids {
+        sqlx::query(
+            "INSERT INTO cross_chain_event_group_members (group_id, event_id) \
+             VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        )
+        .bind(group_id)
+        .bind(event_id)
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(group_id)
+}
+
+/// Returns the event ids belonging to `group_id`.
+pub async fn event_group_members(pool: &PgPool, group_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT event_id FROM cross_chain_event_group_members WHERE group_id = $1",
+    )
+    .bind(group_id)
+    .fetch_all(pool)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,7 +562,7 @@ mod tests {
 
     #[test]
     fn test_causality_type_detection() {
-        let engine = CorrelationEngine::with_threshold(0.5);
+        let engine = CorrelationEngine::new().with_threshold(0.5);
 
         let source = TraceEvent {
             event_id: "e1".to_string(),
@@ -385,5 +590,69 @@ mod tests {
 
         let causality = engine.detect_causality(&source, &target);
         assert!(causality.is_some());
+    }
+
+    #[test]
+    fn correlation_query_defaults_to_reasonable_limit() {
+        let q = CorrelationQuery::new();
+        assert_eq!(q.limit, 100);
+        assert_eq!(q.offset, 0);
+        assert!(q.network.is_none());
+    }
+
+    #[test]
+    fn same_chain_events_are_never_direct_causality() {
+        // Same-chain pairs should be Sequential (or None), never the
+        // cross-chain-only Direct classification.
+        let engine = CorrelationEngine::new();
+        let source = TraceEvent {
+            event_id: "e1".to_string(),
+            chain: "chain1".to_string(),
+            contract_id: "contract1".to_string(),
+            event_type: "invoke".to_string(),
+            tx_hash: "tx1".to_string(),
+            ledger: 1000,
+            ledger_close_time: Utc::now(),
+            depth: 0,
+            confidence: 1.0,
+        };
+        let target = TraceEvent {
+            chain: "chain1".to_string(),
+            depth: 1,
+            event_id: "e2".to_string(),
+            ..source.clone()
+        };
+        assert_eq!(
+            engine.detect_causality(&source, &target),
+            Some(CausalityType::Sequential)
+        );
+    }
+
+    #[test]
+    fn dissimilar_cross_chain_events_have_no_causality() {
+        let engine = CorrelationEngine::new().with_threshold(0.9);
+        let source = TraceEvent {
+            event_id: "e1".to_string(),
+            chain: "chain1".to_string(),
+            contract_id: "contract1".to_string(),
+            event_type: "invoke".to_string(),
+            tx_hash: "tx1".to_string(),
+            ledger: 1000,
+            ledger_close_time: Utc::now(),
+            depth: 0,
+            confidence: 1.0,
+        };
+        let target = TraceEvent {
+            event_id: "e2".to_string(),
+            chain: "chain2".to_string(),
+            contract_id: "contract2".to_string(),
+            event_type: "other".to_string(),
+            tx_hash: "tx2".to_string(),
+            ledger: 5000,
+            ledger_close_time: Utc::now(),
+            depth: 0,
+            confidence: 1.0,
+        };
+        assert_eq!(engine.detect_causality(&source, &target), None);
     }
 }
