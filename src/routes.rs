@@ -867,6 +867,13 @@ pub fn create_router_with_tx_and_tenant_map(
             app_state.clone(),
             middleware::rate_limit_headers_middleware,
         ))
+        // Issue #942: registered after (so it runs before, in tower's
+        // outside-in layering) rate limiting — a blocked IP should never
+        // spend a rate-limit quota check before being rejected.
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            middleware::ip_access_control_middleware,
+        ))
         .layer(axum::middleware::from_fn(middleware::head_middleware))
         .layer(axum::middleware::from_fn(middleware::request_id_middleware))
         .layer(axum::middleware::from_fn(
