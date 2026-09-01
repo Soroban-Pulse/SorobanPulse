@@ -85,7 +85,7 @@ regex = "1"
 blake3 = "1"
 toml = "0.8"
 secrecy = "0.5"
-rand = "0.8"
+rand = "0.10"
 
 # Service mesh integration
 tonic = { version = "0.10", optional = true }
