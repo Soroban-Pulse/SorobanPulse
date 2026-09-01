@@ -75,7 +75,7 @@ async-graphql = "7.0"
 async-graphql-actix-web = "7.0"
 
 # WebSocket
-tokio-tungstenite = "0.21"
+tokio-tungstenite = "0.29"
 
 # Utilities
 bytes = "1.5"
