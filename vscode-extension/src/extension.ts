@@ -2,6 +2,8 @@ import * as vscode from 'vscode';
 import { ApiExplorerProvider, EndpointItem } from './apiExplorer';
 import { RequestTesterPanel } from './requestTester';
 import { ApiEndpoint } from './types';
+import { setApiKey, setAdminApiKey, clearApiKeys } from './apiKeyManager';
+import { testWebhook } from './webhookTester';
 
 export function activate(context: vscode.ExtensionContext): void {
     const explorer = new ApiExplorerProvider();
@@ -27,7 +29,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
 
         vscode.commands.registerCommand('sorobanpulse.openRequestTester', (endpoint?: ApiEndpoint) => {
-            RequestTesterPanel.open(context.extensionUri, endpoint);
+            RequestTesterPanel.open(context, endpoint);
         }),
 
         vscode.commands.registerCommand('sorobanpulse.copyUrl', async (item?: EndpointItem) => {
@@ -41,6 +43,14 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('sorobanpulse.openSettings', () => {
             vscode.commands.executeCommand('workbench.action.openSettings', 'sorobanpulse');
         }),
+
+        // Issue #963: secure API key management (SecretStorage-backed).
+        vscode.commands.registerCommand('sorobanpulse.setApiKey', () => setApiKey(context)),
+        vscode.commands.registerCommand('sorobanpulse.setAdminApiKey', () => setAdminApiKey(context)),
+        vscode.commands.registerCommand('sorobanpulse.clearApiKeys', () => clearApiKeys(context)),
+
+        // Issue #963: webhook test interface.
+        vscode.commands.registerCommand('sorobanpulse.testWebhook', () => testWebhook()),
     );
 }
 

@@ -69,7 +69,6 @@ pub async fn get_events_with_params(
     }))
 }
 use tower_http::{
-    compression::CompressionLayer,
     cors::CorsLayer,
     limit::RequestBodyLimitLayer,
     request_id::{MakeRequestId, PropagateRequestIdLayer, RequestId, SetRequestIdLayer},
@@ -943,7 +942,14 @@ pub fn create_router_with_tx_and_tenant_map(
             }),
         )
         .layer(PropagateRequestIdLayer::x_request_id())
-        .layer(CompressionLayer::new())
+        .layer(crate::compression_config::CompressionSettings::from_env().layer())
+        // Issue #961: registered *after* (so it wraps, and on the
+        // response path runs *after*) CompressionLayer, so it observes the
+        // final Content-Encoding header rather than the pre-compression
+        // response.
+        .layer(axum::middleware::from_fn(
+            crate::compression_config::compression_metrics_middleware,
+        ))
         .layer(SetRequestIdLayer::x_request_id(UuidMakeRequestId))
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1 MB default
         .with_state(app_state)
@@ -1145,6 +1151,53 @@ mod tests {
             .unwrap();
 
         assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+    }
+
+    /// Issue #961: responses smaller than the configured floor must bypass
+    /// compression even when the client advertises gzip support, while
+    /// large responses are still compressed.
+    #[tokio::test]
+    async fn compression_settings_bypass_small_responses() {
+        std::env::set_var("COMPRESSION_MIN_SIZE_BYTES", "512");
+
+        let settings = crate::compression_config::CompressionSettings::from_env();
+        let app = Router::new()
+            .route("/small", axum::routing::get(|| async { "ok" }))
+            .route("/large", axum::routing::get(|| async { "A".repeat(2000) }))
+            .layer(settings.layer());
+
+        let small = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/small")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            small.headers().get(header::CONTENT_ENCODING).is_none(),
+            "small responses must bypass compression"
+        );
+
+        let large = app
+            .oneshot(
+                Request::builder()
+                    .uri("/large")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            large.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+
+        std::env::remove_var("COMPRESSION_MIN_SIZE_BYTES");
     }
 
     /// Build a minimal router with GovernorLayer using SmartIpKeyExtractor so tests

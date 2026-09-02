@@ -54,6 +54,53 @@ impl ApiClient {
             .with_context(|| format!("GET {url}"))
     }
 
+    /// POST a JSON body and deserialize the response.
+    pub fn post<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .json(body)
+            .send()
+            .with_context(|| format!("POST {url}"))?;
+
+        self.parse(resp, &url)
+    }
+
+    /// POST with no request body, deserializing the response.
+    pub fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .send()
+            .with_context(|| format!("POST {url}"))?;
+
+        self.parse(resp, &url)
+    }
+
+    /// Send a DELETE request. Returns `Ok(())` on any 2xx response — most
+    /// delete endpoints reply with an empty body or a small status object
+    /// we don't need to parse.
+    pub fn delete(&self, path: &str) -> Result<()> {
+        let url = format!("{}{}", self.base_url, path);
+        let resp = self
+            .inner
+            .delete(&url)
+            .header("x-api-key", &self.api_key)
+            .send()
+            .with_context(|| format!("DELETE {url}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            anyhow::bail!("HTTP {status}: {body}");
+        }
+        Ok(())
+    }
+
     fn parse<T: DeserializeOwned>(&self, resp: Response, url: &str) -> Result<T> {
         let status = resp.status();
         let body = resp.text().with_context(|| format!("reading body from {url}"))?;

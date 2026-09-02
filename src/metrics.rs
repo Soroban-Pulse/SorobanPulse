@@ -855,6 +855,34 @@ pub fn record_decompression_failure() {
     m::counter!("soroban_pulse_decompression_failures_total").increment(1);
 }
 
+// ── Issue #961: HTTP response compression metrics ───────────────────────────
+//
+// Distinct from `record_compression_ratio` above, which tracks storage-level
+// event archival compression. These track the `tower_http::CompressionLayer`
+// middleware that compresses outgoing HTTP responses, so operators can see
+// what fraction of traffic is actually being compressed vs. bypassed (small
+// responses, non-negotiating clients, excluded content types like SSE).
+
+/// Record whether a single HTTP response left the compression layer
+/// compressed (`Content-Encoding` present) or was passed through untouched.
+pub fn record_http_compression_outcome(compressed: bool) {
+    if compressed {
+        m::counter!("soroban_pulse_http_compression_applied_total").increment(1);
+    } else {
+        m::counter!("soroban_pulse_http_compression_bypassed_total").increment(1);
+    }
+}
+
+// ── Issue #962: pagination strategy metrics ─────────────────────────────────
+
+/// Record which pagination strategy a `/v1/events` request used, so
+/// operators can see the offset-vs-cursor adoption split and correlate it
+/// with p99 latency on deep pages.
+pub fn record_pagination_strategy(cursor: bool) {
+    let strategy = if cursor { "cursor" } else { "offset" };
+    m::counter!("soroban_pulse_pagination_requests_total", "strategy" => strategy).increment(1);
+}
+
 // ── SSE ring buffer metrics ──────────────────────────────────────────────────
 
 /// Record the number of events replayed to a reconnecting SSE client.

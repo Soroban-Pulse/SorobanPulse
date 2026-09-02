@@ -57,12 +57,34 @@
       {
         "command": "sorobanpulse.openSettings",
         "title": "Soroban Pulse: Open Settings"
+      },
+      {
+        "command": "sorobanpulse.setApiKey",
+        "title": "Soroban Pulse: Set API Key"
+      },
+      {
+        "command": "sorobanpulse.setAdminApiKey",
+        "title": "Soroban Pulse: Set Admin API Key"
+      },
+      {
+        "command": "sorobanpulse.clearApiKeys",
+        "title": "Soroban Pulse: Clear Stored API Keys"
+      },
+      {
+        "command": "sorobanpulse.testWebhook",
+        "title": "Soroban Pulse: Test Webhook",
+        "icon": "$(radio-tower)"
       }
     ],
     "menus": {
       "view/title": [
         {
           "command": "sorobanpulse.refreshExplorer",
+          "when": "view == sorobanpulse.apiExplorer",
+          "group": "navigation"
+        },
+        {
+          "command": "sorobanpulse.testWebhook",
           "when": "view == sorobanpulse.apiExplorer",
           "group": "navigation"
         }
@@ -90,7 +112,7 @@
         "sorobanpulse.apiKey": {
           "type": "string",
           "default": "",
-          "description": "API key sent as the x-api-key header."
+          "description": "API key sent as the x-api-key header. Prefer 'Soroban Pulse: Set API Key' instead, which stores it in SecretStorage rather than this plaintext setting; this is kept only as a fallback for existing configs."
         },
         "sorobanpulse.adminApiKey": {
           "type": "string",

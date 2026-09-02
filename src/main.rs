@@ -8,6 +8,7 @@
 mod audit_logging;
 mod bloom_filter;
 mod compliance_report;
+mod compression_config;
 mod config;
 mod config_validation;
 mod content_filter;
