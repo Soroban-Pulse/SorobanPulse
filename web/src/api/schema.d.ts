@@ -293,14 +293,22 @@ export interface operations {
         page?: number | null;
         /** @description Results per page, 1–100 (default: 20) */
         limit?: number | null;
+        /** @description Opaque cursor for keyset pagination */
+        cursor?: string | null;
         /** @description Use exact COUNT(*) instead of approximate */
         exact_count?: boolean | null;
         /** @description Filter by event type: contract, diagnostic, system */
         event_type?: components["schemas"]["EventType"] | null;
+        /** @description Filter by contract ID */
+        contract_id?: string | null;
         /** @description Return events at or after this ledger */
         from_ledger?: number | null;
         /** @description Return events at or before this ledger */
         to_ledger?: number | null;
+        /** @description Filter by first topic symbol */
+        topic_sym?: string | null;
+        /** @description Full-text search query for event_data */
+        search?: string | null;
         /** @description Filter events by ledger hash */
         ledger_hash?: string | null;
         /** @description Filter events by anonymized status (admin only) */

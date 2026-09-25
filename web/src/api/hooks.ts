@@ -110,6 +110,51 @@ export function useEvents(
   });
 }
 
+/**
+ * Cursor-paginated infinite query for /v1/events.
+ * Use this for the Event Explorer "Load more" / infinite-scroll pattern.
+ *
+ * @example
+ * ```tsx
+ * const { data, fetchNextPage, hasNextPage, isFetchingNextPage } =
+ *   useInfiniteEvents({ event_type: "contract", limit: 25 });
+ * const events = data?.pages.flatMap(p => p.data) ?? [];
+ * ```
+ */
+export function useInfiniteEvents(
+  params: Omit<GetEventsParams, "cursor" | "page"> = {},
+  options?: Partial<
+    UseInfiniteQueryOptions<
+      PaginatedResponse,
+      ApiError,
+      InfiniteData<PaginatedResponse>,
+      PaginatedResponse,
+      ReturnType<typeof queryKeys.events>,
+      string | null
+    >
+  >,
+) {
+  return useInfiniteQuery<
+    PaginatedResponse,
+    ApiError,
+    InfiniteData<PaginatedResponse>,
+    ReturnType<typeof queryKeys.events>,
+    string | null
+  >({
+    queryKey: queryKeys.events(params),
+    initialPageParam: null,
+    getNextPageParam: (lastPage) => lastPage.next_cursor ?? null,
+    queryFn: async ({ pageParam }) => {
+      const { data } = await apiClient.GET("/v1/events", {
+        params: { query: { ...params, cursor: pageParam } },
+      });
+      return data as PaginatedResponse;
+    },
+    staleTime: 5_000,
+    ...options,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // /v1/events/contract/{contract_id}  — cursor-based infinite scroll
 // ---------------------------------------------------------------------------
@@ -222,6 +267,36 @@ export function useEventsByTx(
       return data as Event[];
     },
     staleTime: 60_000, // tx data is immutable once confirmed
+    ...options,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// /v1/events/tx/{tx_hash}/related
+// ---------------------------------------------------------------------------
+
+/**
+ * Related events for a transaction (cross-contract call graph).
+ * Disabled when txHash is empty so callers can render before data arrives.
+ */
+export function useRelatedEvents(
+  txHash: string,
+  depth = 1,
+  options?: Partial<UseQueryOptions<Event[], ApiError>>,
+) {
+  return useQuery<Event[], ApiError>({
+    queryKey: ["events", "tx", txHash, "related", depth] as const,
+    queryFn: async () => {
+      const { data } = await apiClient.GET("/v1/events/tx/{tx_hash}/related", {
+        params: {
+          path: { tx_hash: txHash },
+          query: { depth },
+        },
+      });
+      return data as Event[];
+    },
+    enabled: !!txHash,
+    staleTime: 60_000,
     ...options,
   });
 }
