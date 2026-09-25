@@ -22,7 +22,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Database
-sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "uuid", "chrono", "json", "macros"] }
 diesel = { version = "2.1", features = ["postgres", "uuid", "chrono", "serde_json"], optional = true }
 
 # Cryptography - Classical
@@ -110,6 +110,21 @@ linkerd = ["tonic", "prost"]
 
 # Observability features
 full-observability = ["tracing-opentelemetry", "opentelemetry-jaeger"]
+
+[lints.clippy]
+# Lint policy — replaces the crate-level #![deny]/#![allow] that used to live
+# in src/main.rs. Keeping it here makes the configuration visible and applies
+# consistently to both the library and binary targets.
+all = "deny"
+pedantic = "deny"
+# AppError, AppState, etc. — repeating the module name is idiomatic in Rust.
+module_name_repetitions = "allow"
+# Internal service; these are not public library APIs.
+missing_errors_doc = "allow"
+# Panics only occur on misconfiguration at startup.
+missing_panics_doc = "allow"
+# Used sparingly in test modules only.
+wildcard_imports = "allow"
 
 [profile.release]
 opt-level = 3

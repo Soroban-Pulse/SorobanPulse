@@ -1,0 +1,49 @@
+{
+  "name": "soroban-pulse-dashboard",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.build.json && vite build",
+    "preview": "vite preview",
+    "gen:api": "openapi-typescript ../openapi.json -o src/api/schema.d.ts",
+    "check:api": "node scripts/check-api-up-to-date.mjs",
+    "lint": "eslint src --max-warnings 0",
+    "lint:fix": "eslint src --max-warnings 0 --fix",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.56.2",
+    "openapi-fetch": "0.12.2",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "react-router-dom": "6.26.2"
+  },
+  "devDependencies": {
+    "@tanstack/react-query-devtools": "5.56.2",
+    "@testing-library/jest-dom": "6.5.0",
+    "@testing-library/react": "16.0.1",
+    "@testing-library/user-event": "14.5.2",
+    "@types/react": "18.3.5",
+    "@types/react-dom": "18.3.0",
+    "@typescript-eslint/eslint-plugin": "8.5.0",
+    "@typescript-eslint/parser": "8.5.0",
+    "@vitejs/plugin-react": "4.3.1",
+    "@vitest/coverage-v8": "2.1.1",
+    "eslint": "9.10.0",
+    "eslint-plugin-react-hooks": "4.6.2",
+    "eslint-plugin-react-refresh": "0.4.12",
+    "jsdom": "25.0.0",
+    "openapi-typescript": "7.4.1",
+    "prettier": "3.3.3",
+    "typescript": "5.6.2",
+    "vite": "5.4.3",
+    "vitest": "2.1.1"
+  }
+}

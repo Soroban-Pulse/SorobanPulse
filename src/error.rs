@@ -279,6 +279,8 @@ pub enum AppError {
     Forbidden(String),
 
     #[error("Internal error: {0}")]
+    // Reserved for surfacing raw internal errors in tests and future integrations;
+    // not constructed in production paths today.
     #[allow(dead_code)]
     Internal(String),
 

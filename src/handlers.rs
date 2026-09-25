@@ -754,7 +754,7 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
 
     let indexer_paused = state.indexer_state.is_paused.load(Ordering::Relaxed);
 
-    let total_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+    let total_events: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM events")
         .fetch_one(&state.pool)
         .await
         .unwrap_or(0);
@@ -2850,8 +2850,9 @@ pub async fn get_events(
                     .await?;
             (count, false)
         } else {
-            let count = sqlx::query_scalar::<_, i64>(
-                "SELECT reltuples::bigint FROM pg_class WHERE relname = 'events'",
+            // query_scalar! gives compile-time SQL verification via the .sqlx offline cache.
+            let count = sqlx::query_scalar!(
+                "SELECT reltuples::bigint AS estimate FROM pg_class WHERE relname = 'events'",
             )
             .fetch_one(&state.read_pool)
             .await?;
@@ -3746,9 +3747,9 @@ pub async fn get_events_by_contract(
             cached
         } else {
             crate::metrics::update_contract_count_cache_hit_ratio(0, 1);
+            // query_scalar! gives compile-time SQL verification via the .sqlx offline cache.
             let count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE contract_id = $1")
-                    .bind(&contract_id)
+                sqlx::query_scalar!("SELECT COUNT(*) FROM events WHERE contract_id = $1", &contract_id as &str)
                     .fetch_one(&state.pool)
                     .await?;
             state
@@ -12498,7 +12499,8 @@ pub async fn verify_ledger_hash_chain(
 pub async fn compression_stats(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+    // query_scalar! gives compile-time SQL verification via the .sqlx offline cache.
+    let total: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM events")
         .fetch_one(&state.pool)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;

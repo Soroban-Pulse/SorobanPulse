@@ -1,10 +1,3 @@
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(
-    clippy::module_name_repetitions, // e.g. AppError, AppState — idiomatic in Rust
-    clippy::missing_errors_doc,      // internal handlers; not a public library
-    clippy::missing_panics_doc,      // panics only on misconfiguration at startup
-    clippy::wildcard_imports,        // used sparingly in test modules only
-)]
 mod audit_logging;
 mod bloom_filter;
 mod compliance_report;
@@ -94,37 +87,13 @@ mod event_aggregation;
 mod anomaly_detection;
 mod push_notification;
 mod connection_pool;
-mod pool_management;
 mod adaptive_pool;
 mod slo_tracker;
-mod statistics_management;
-mod notification_admin;
-mod push_preload;
-mod financial_accuracy;
-mod webhook_template;
-mod event_aggregation;
-mod anomaly_detection;
-
-// These modules were already part of the library target (see src/lib.rs) but
-// missing here, leaving `crate::pool_management` and friends unresolved in
-// handlers.rs when compiling the `soroban-pulse` binary. `clippy::pedantic`
-// is scoped off since these files were never linted against it before.
-#[allow(clippy::pedantic)]
 mod anonymization;
-#[allow(clippy::pedantic)]
 mod event_compression;
-#[allow(clippy::pedantic)]
 mod health_check;
-#[allow(clippy::pedantic)]
 mod ledger_hashes;
-#[allow(clippy::pedantic)]
 mod networks;
-#[allow(clippy::pedantic)]
-mod pool_management;
-#[allow(clippy::pedantic)]
-mod push_preload;
-#[allow(clippy::pedantic)]
-mod statistics_management;
 
 #[cfg(feature = "archive")]
 mod archiver;

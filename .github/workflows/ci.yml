@@ -89,7 +89,40 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - run: cargo clippy -- -D warnings
+      # Build with the committed .sqlx cache so query macros are verified without a live DB.
+      - run: SQLX_OFFLINE=true cargo clippy -- -D warnings
+
+  sqlx-prepare-check:
+    name: sqlx prepare --check
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features native-tls,postgres --locked
+      - name: Run migrations
+        run: sqlx migrate run
+      - name: Check .sqlx cache is up to date
+        # Fails with a non-zero exit code if any query-<hash>.json is missing or
+        # if the live schema no longer matches what was committed to .sqlx/.
+        run: cargo sqlx prepare --check
 
   test:
     name: Test (rust ${{ matrix.rust }}, pg ${{ matrix.postgres }})
@@ -394,6 +427,29 @@ jobs:
         run: helm template soroban-pulse helm/soroban-pulse | grep -v "DATABASE_URL\|API_KEY\|SMTP_PASSWORD"
       - name: Render template (existingSecret)
         run: helm template soroban-pulse helm/soroban-pulse --set existingSecret=my-secret
+
+  check-api-types:
+    name: Dashboard API types up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+      # Install only prod+dev deps needed for code generation (no Rust required)
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+      # Regenerate schema.d.ts and fail if it differs from the committed copy
+      - name: Check schema.d.ts is up to date
+        run: node scripts/check-api-up-to-date.mjs
+        working-directory: web
+      # TypeScript compile-check so a drift in openapi.json → TS error surfaces here
+      - name: Typecheck dashboard
+        run: npm run typecheck
+        working-directory: web
 
   openapi:
     name: OpenAPI Spec Validation

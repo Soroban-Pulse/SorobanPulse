@@ -93,6 +93,17 @@ zipkin-up: ## Start Zipkin container
 zipkin-down: ## Stop Zipkin container
 	docker stop zipkin || true && docker rm zipkin || true
 
+web-dev: ## Install web dependencies and start the dashboard dev server
+	cd web && npm ci && npm run dev
+
+web-build: ## Build the web dashboard for production
+	cd web && npm ci && npm run build
+
+web-lint: ## Lint and type-check the web dashboard
+	cd web && npm ci && npm run lint && npm run typecheck
+
+.PHONY: web-dev web-build web-lint
+
 fuzz: ## Run fuzz tests locally (60 seconds each)
 	@command -v cargo-fuzz >/dev/null 2>&1 || cargo install cargo-fuzz
 	cd fuzz && cargo fuzz run fuzz_validate_contract_id -- -max_total_time=60

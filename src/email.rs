@@ -293,6 +293,9 @@ pub struct EmailNotifier {
 }
 
 impl EmailNotifier {
+    // EmailNotifier requires all SMTP, addressing, filtering, retry, and
+    // scheduling parameters at construction time; splitting into a builder
+    // would be a larger refactor tracked separately.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         smtp_host: String,

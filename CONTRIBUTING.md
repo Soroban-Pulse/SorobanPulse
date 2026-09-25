@@ -92,6 +92,84 @@ Not:
 20260527000000_add_webhook_failures_table.sql  # ❌ Duplicate timestamp!
 ```
 
+## Working with Compile-Time SQL (`sqlx` macros)
+
+Hot-path queries use `sqlx::query_scalar!` and `sqlx::query_as!` macros so that
+typos and schema drift are caught at **compile time** instead of at runtime.
+
+### How it works
+
+sqlx checks macro queries against a committed `.sqlx/` cache directory so that
+**you do not need a live database just to build or run `cargo clippy`**.  
+The cache is a set of `query-<sha256>.json` files — one per macro call — that
+record the SQL text, parameter types, and column types Postgres returned when
+`cargo sqlx prepare` last ran.
+
+```
+.sqlx/
+  query-26d64aa4….json   # get_events_by_contract
+  query-4a4bf0cf….json   # get_events_by_tx
+  query-c1326d8f….json   # store_event INSERT
+  query-f73bfc8e….json   # count by contract_id
+  query-4da09329….json   # approximate event count
+  query-a11236f1….json   # exact event count
+```
+
+### Building without a database
+
+The `SQLX_OFFLINE=true` environment variable tells sqlx to use only the
+committed cache and skip any connection attempt.  CI's `clippy` job sets this
+flag automatically.  You can do the same locally:
+
+```bash
+SQLX_OFFLINE=true cargo build
+SQLX_OFFLINE=true cargo clippy -- -D warnings
+```
+
+### Updating the cache after changing a query
+
+Whenever you add a new macro call or change the SQL text inside an existing one
+you must regenerate the cache so CI doesn't fail:
+
+1. Start a local Postgres instance (Docker is the easiest path):
+
+```bash
+make test-db   # starts a throwaway container and runs migrations
+```
+
+   Or, if you already have Postgres running:
+
+```bash
+export DATABASE_URL=postgres://<user>:<password>@localhost/<dbname>
+sqlx migrate run   # make sure the schema is up to date
+```
+
+2. Regenerate the cache:
+
+```bash
+cargo sqlx prepare
+```
+
+   This updates `.sqlx/` in-place.  For a workspace-wide regeneration use
+   `cargo sqlx prepare --workspace`.
+
+3. Commit the updated `.sqlx/` files together with your source change:
+
+```bash
+git add .sqlx/
+git commit -m "chore(db): update sqlx offline cache"
+```
+
+### CI enforcement
+
+The `sqlx-prepare-check` CI job runs `cargo sqlx prepare --check` against a
+live Postgres 15 container on every push and pull request.  It exits non-zero
+if the committed `.sqlx/` cache is stale — i.e., a query was changed without
+regenerating the cache, or the database schema drifted from what the cache
+describes.
+
+**You do not need a database to build** — only to change queries.
+
 ## Fuzzing
 
 Fuzz targets live in `fuzz/fuzz_targets/` and cover the primary input-validation boundary:

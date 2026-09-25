@@ -793,6 +793,8 @@ pub struct RpcResponse<T> {
 
 #[derive(Debug, Deserialize)]
 pub struct RpcError {
+    // Required by the JSON-RPC wire format; not read in application logic but
+    // must be present for correct deserialization of error responses.
     #[allow(dead_code)]
     pub code: i64,
     pub message: String,
