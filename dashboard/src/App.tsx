@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { RequireAuth } from "./auth/RequireAuth";
 import { LoginPage } from "./pages/LoginPage";
+import { OnboardingPage } from "./pages/OnboardingPage";
 import { StatusDashboard } from "./pages/StatusDashboard";
 import { SubscriptionsPage } from "./pages/SubscriptionsPage";
 import { WebhooksPage } from "./pages/WebhooksPage";
@@ -13,6 +14,14 @@ export function App() {
       <main className="app-content">
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/onboarding"
+            element={
+              <RequireAuth>
+                <OnboardingPage />
+              </RequireAuth>
+            }
+          />
           <Route
             path="/"
             element={

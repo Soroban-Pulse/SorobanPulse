@@ -26,6 +26,17 @@ export interface WebhookDelivery {
   deliveredAt: string;
 }
 
+export interface MetaResponse {
+  serverUrl: string;
+  networks: string[];
+  defaultNetwork: string;
+  hasSubscriptions: boolean;
+  hasServers: boolean;
+  systemStatus: "healthy" | "degraded" | "down";
+  version: string;
+  onboardingComplete: boolean;
+}
+
 function authHeaders(): Record<string, string> {
   const raw = localStorage.getItem("sorobanpulse.dashboard.auth");
   const token = raw ? JSON.parse(raw).token : null;
@@ -44,4 +55,5 @@ export const dashboardApi = {
   listSubscriptions: () => get<SubscriptionSummary[]>("/subscriptions"),
   listWebhookDeliveries: (subscriptionId: string) =>
     get<WebhookDelivery[]>(`/subscriptions/${subscriptionId}/deliveries`),
+  getMeta: () => get<MetaResponse>("/v1/meta"),
 };

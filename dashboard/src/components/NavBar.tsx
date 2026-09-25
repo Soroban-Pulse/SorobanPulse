@@ -10,6 +10,7 @@ export function NavBar() {
       {user && (
         <div className="navbar-links">
           <Link to="/">Status</Link>
+          <Link to="/onboarding">Onboarding</Link>
           <Link to="/subscriptions">Subscriptions</Link>
           <Link to="/webhooks">Webhooks</Link>
           <button onClick={logout}>Sign out</button>
