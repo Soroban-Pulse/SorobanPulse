@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tracing::warn;
@@ -150,6 +153,177 @@ impl RetryPolicy {
 
         Err(last_error.unwrap())
     }
+
+    /// Executes `operation`, recording attempt counts and outcomes into `metrics`
+    /// keyed by `policy_name` for later inspection via the retry status dashboard.
+    pub async fn execute_with_retry_metrics<F, Fut, T, E>(
+        &self,
+        policy_name: &str,
+        metrics: &RetryMetrics,
+        mut operation: F,
+    ) -> Result<T, E>
+    where
+        F: FnMut(u32) -> Fut,
+        Fut: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        let mut last_error = None;
+
+        for attempt in 1..=self.max_attempts {
+            metrics.record_attempt(policy_name);
+            match operation(attempt).await {
+                Ok(result) => {
+                    metrics.record_success(policy_name, attempt);
+                    return Ok(result);
+                }
+                Err(error) => {
+                    if attempt < self.max_attempts {
+                        let backoff = self.calculate_backoff(attempt);
+                        metrics.record_retry(policy_name, backoff);
+                        warn!(
+                            attempt = attempt,
+                            max_attempts = self.max_attempts,
+                            backoff_ms = backoff.as_millis(),
+                            error = %error,
+                            "Operation failed, retrying after backoff"
+                        );
+                        sleep(backoff).await;
+                    } else {
+                        metrics.record_exhausted(policy_name);
+                    }
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        Err(last_error.unwrap())
+    }
+}
+
+/// Named, reusable retry policies. Allows selecting a policy by identifier
+/// (e.g. from configuration) rather than constructing one inline.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RetryPolicyRegistry {
+    policies: HashMap<String, RetryPolicy>,
+}
+
+impl RetryPolicyRegistry {
+    pub fn with_defaults() -> Self {
+        let mut policies = HashMap::new();
+        policies.insert("webhook".to_string(), RetryPolicy::webhook_default());
+        policies.insert("email".to_string(), RetryPolicy::email_default());
+        policies.insert("sms".to_string(), RetryPolicy::sms_default());
+        Self { policies }
+    }
+
+    pub fn register(&mut self, name: impl Into<String>, policy: RetryPolicy) {
+        self.policies.insert(name.into(), policy);
+    }
+
+    pub fn get(&self, name: &str) -> Option<&RetryPolicy> {
+        self.policies.get(name)
+    }
+}
+
+/// Per-attempt counters for a single named retry policy.
+#[derive(Debug, Default)]
+struct PolicyCounters {
+    attempts: AtomicU64,
+    successes: AtomicU64,
+    retries: AtomicU64,
+    exhausted: AtomicU64,
+    total_backoff_ms: AtomicU64,
+}
+
+/// Aggregated retry metrics across all named policies, suitable for backing
+/// a retry status dashboard.
+#[derive(Debug, Default)]
+pub struct RetryMetrics {
+    counters: std::sync::Mutex<HashMap<String, Arc<PolicyCounters>>>,
+}
+
+impl RetryMetrics {
+    pub fn shared() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn counters_for(&self, policy_name: &str) -> Arc<PolicyCounters> {
+        let mut guard = self.counters.lock().unwrap();
+        guard
+            .entry(policy_name.to_string())
+            .or_insert_with(|| Arc::new(PolicyCounters::default()))
+            .clone()
+    }
+
+    pub fn record_attempt(&self, policy_name: &str) {
+        self.counters_for(policy_name)
+            .attempts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_success(&self, policy_name: &str, _attempt: u32) {
+        self.counters_for(policy_name)
+            .successes
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_retry(&self, policy_name: &str, backoff: Duration) {
+        let counters = self.counters_for(policy_name);
+        counters.retries.fetch_add(1, Ordering::Relaxed);
+        counters
+            .total_backoff_ms
+            .fetch_add(backoff.as_millis() as u64, Ordering::Relaxed);
+    }
+
+    pub fn record_exhausted(&self, policy_name: &str) {
+        self.counters_for(policy_name)
+            .exhausted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Builds a snapshot of all tracked policies for a retry status dashboard.
+    pub fn dashboard_snapshot(&self) -> Vec<RetryDashboardEntry> {
+        let guard = self.counters.lock().unwrap();
+        guard
+            .iter()
+            .map(|(name, counters)| {
+                let attempts = counters.attempts.load(Ordering::Relaxed);
+                let successes = counters.successes.load(Ordering::Relaxed);
+                let retries = counters.retries.load(Ordering::Relaxed);
+                let exhausted = counters.exhausted.load(Ordering::Relaxed);
+                let total_backoff_ms = counters.total_backoff_ms.load(Ordering::Relaxed);
+                RetryDashboardEntry {
+                    policy_name: name.clone(),
+                    attempts,
+                    successes,
+                    retries,
+                    exhausted,
+                    success_rate: if attempts == 0 {
+                        0.0
+                    } else {
+                        successes as f64 / attempts as f64
+                    },
+                    avg_backoff_ms: if retries == 0 {
+                        0.0
+                    } else {
+                        total_backoff_ms as f64 / retries as f64
+                    },
+                }
+            })
+            .collect()
+    }
+}
+
+/// A single row in the retry status dashboard, summarizing one named policy.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetryDashboardEntry {
+    pub policy_name: String,
+    pub attempts: u64,
+    pub successes: u64,
+    pub retries: u64,
+    pub exhausted: u64,
+    pub success_rate: f64,
+    pub avg_backoff_ms: f64,
 }
 
 #[cfg(test)]
@@ -288,5 +462,112 @@ mod tests {
         let backoff = 1000u64;
         let jittered = RetryPolicy::apply_jitter(backoff);
         assert!(jittered <= backoff, "Jittered value should not exceed base");
+    }
+
+    #[test]
+    fn test_registry_has_default_policies() {
+        let registry = RetryPolicyRegistry::with_defaults();
+        assert!(registry.get("webhook").is_some());
+        assert!(registry.get("email").is_some());
+        assert!(registry.get("sms").is_some());
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_registry_register_custom_policy() {
+        let mut registry = RetryPolicyRegistry::with_defaults();
+        registry.register(
+            "custom",
+            RetryPolicy {
+                max_attempts: 10,
+                ..RetryPolicy::default()
+            },
+        );
+        assert_eq!(registry.get("custom").unwrap().max_attempts, 10);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_metrics_records_success() {
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            initial_backoff_ms: 1,
+            backoff_multiplier: 1.0,
+            max_backoff_ms: 1,
+            strategy: Some(RetryStrategy::Fixed),
+            use_jitter: false,
+        };
+        let metrics = RetryMetrics::default();
+        let mut call_count = 0;
+
+        let result: Result<&str, &str> = policy
+            .execute_with_retry_metrics("webhook", &metrics, |_attempt| {
+                call_count += 1;
+                async move {
+                    if call_count < 2 {
+                        Err("temporary error")
+                    } else {
+                        Ok("success")
+                    }
+                }
+            })
+            .await;
+
+        assert_eq!(result, Ok("success"));
+        let snapshot = metrics.dashboard_snapshot();
+        let entry = snapshot.iter().find(|e| e.policy_name == "webhook").unwrap();
+        assert_eq!(entry.attempts, 2);
+        assert_eq!(entry.successes, 1);
+        assert_eq!(entry.retries, 1);
+    }
+
+    #[tokio::test]
+    async fn test_execute_with_retry_metrics_records_exhaustion() {
+        let policy = RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            backoff_multiplier: 1.0,
+            max_backoff_ms: 1,
+            strategy: Some(RetryStrategy::Fixed),
+            use_jitter: false,
+        };
+        let metrics = RetryMetrics::default();
+
+        let result: Result<&str, &str> = policy
+            .execute_with_retry_metrics("email", &metrics, |_attempt| async move {
+                Err("persistent error")
+            })
+            .await;
+
+        assert_eq!(result, Err("persistent error"));
+        let snapshot = metrics.dashboard_snapshot();
+        let entry = snapshot.iter().find(|e| e.policy_name == "email").unwrap();
+        assert_eq!(entry.exhausted, 1);
+        assert_eq!(entry.success_rate, 0.0);
+    }
+
+    #[test]
+    fn test_dashboard_snapshot_success_rate() {
+        let metrics = RetryMetrics::default();
+        metrics.record_attempt("sms");
+        metrics.record_attempt("sms");
+        metrics.record_success("sms", 2);
+        let snapshot = metrics.dashboard_snapshot();
+        let entry = snapshot.iter().find(|e| e.policy_name == "sms").unwrap();
+        assert_eq!(entry.success_rate, 0.5);
+    }
+
+    #[test]
+    fn test_max_attempts_respected_across_strategies() {
+        for strategy in [RetryStrategy::Exponential, RetryStrategy::Linear, RetryStrategy::Fixed] {
+            let policy = RetryPolicy {
+                max_attempts: 4,
+                initial_backoff_ms: 10,
+                backoff_multiplier: 2.0,
+                max_backoff_ms: 100,
+                strategy: Some(strategy),
+                use_jitter: false,
+            };
+            assert!(policy.calculate_backoff(4) <= Duration::from_millis(100));
+        }
     }
 }

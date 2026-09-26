@@ -574,3 +574,349 @@ pub async fn delete_telegram_integration(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// PagerDuty integration — Issue #951
+// ---------------------------------------------------------------------------
+
+/// Request body for creating or updating a PagerDuty integration.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PagerDutyIntegrationRequest {
+    /// Events API v2 routing key (required).
+    pub routing_key: String,
+    /// Human-readable service name shown in incidents.
+    pub service_name: Option<String>,
+    /// REST API key used for schedule / escalation policy lookups (optional).
+    pub api_key: Option<String>,
+    /// PagerDuty escalation policy ID to attach to new incidents (optional).
+    pub escalation_policy_id: Option<String>,
+    /// Contract IDs that should trigger incidents. Empty list = all.
+    pub contract_filter: Option<Vec<String>>,
+    /// Event types that trigger incidents. Empty list = all.
+    pub event_type_filter: Option<Vec<String>>,
+    /// JSON object mapping event type → severity level.
+    pub severity_mapping: Option<serde_json::Value>,
+    /// Auto-resolve stale open incidents.
+    pub auto_resolve: Option<bool>,
+    /// Minutes before an incident without new events is auto-resolved.
+    pub auto_resolve_threshold_min: Option<i32>,
+}
+
+/// Request body for acknowledging an incident.
+#[derive(Debug, Deserialize)]
+pub struct AcknowledgeIncidentRequest {
+    pub dedup_key: String,
+    pub acknowledged_by: Option<String>,
+}
+
+/// Request body for resolving an incident.
+#[derive(Debug, Deserialize)]
+pub struct ResolveIncidentRequest {
+    pub dedup_key: String,
+}
+
+/// Setup (create or update) a PagerDuty integration for a subscription.
+pub async fn setup_pagerduty_integration(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+    Json(req): Json<PagerDutyIntegrationRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let id = Uuid::new_v4();
+
+    let service_name = req.service_name.unwrap_or_else(|| "Soroban Pulse".to_string());
+    let contract_filter: Vec<String> = req.contract_filter.unwrap_or_default();
+    let event_type_filter: Vec<String> = req.event_type_filter.unwrap_or_default();
+    let severity_mapping = req.severity_mapping.unwrap_or_else(|| {
+        serde_json::json!({"contract": "error", "diagnostic": "warning", "system": "info"})
+    });
+    let auto_resolve = req.auto_resolve.unwrap_or(true);
+    let auto_resolve_threshold_min = req.auto_resolve_threshold_min.unwrap_or(30);
+
+    let result = sqlx::query(
+        "INSERT INTO pagerduty_integrations (
+             id, subscription_id, routing_key, service_name, api_key,
+             escalation_policy_id, contract_filter, event_type_filter,
+             severity_mapping, auto_resolve, auto_resolve_threshold_min
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (subscription_id) DO UPDATE SET
+             routing_key              = EXCLUDED.routing_key,
+             service_name             = EXCLUDED.service_name,
+             api_key                  = EXCLUDED.api_key,
+             escalation_policy_id     = EXCLUDED.escalation_policy_id,
+             contract_filter          = EXCLUDED.contract_filter,
+             event_type_filter        = EXCLUDED.event_type_filter,
+             severity_mapping         = EXCLUDED.severity_mapping,
+             auto_resolve             = EXCLUDED.auto_resolve,
+             auto_resolve_threshold_min = EXCLUDED.auto_resolve_threshold_min,
+             updated_at               = CURRENT_TIMESTAMP",
+    )
+    .bind(&id)
+    .bind(&subscription_id)
+    .bind(&req.routing_key)
+    .bind(&service_name)
+    .bind(&req.api_key)
+    .bind(&req.escalation_policy_id)
+    .bind(&contract_filter)
+    .bind(&event_type_filter)
+    .bind(&severity_mapping)
+    .bind(auto_resolve)
+    .bind(auto_resolve_threshold_min)
+    .execute(&pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            info!(
+                subscription_id = %subscription_id,
+                service_name    = %service_name,
+                "PagerDuty integration configured"
+            );
+            Ok((
+                StatusCode::CREATED,
+                Json(IntegrationResponse {
+                    id,
+                    integration_type: "pagerduty".to_string(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                }),
+            ))
+        }
+        Err(e) => {
+            error!(error = %e, subscription_id = %subscription_id, "Failed to configure PagerDuty integration");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to configure PagerDuty integration: {}", e),
+            ))
+        }
+    }
+}
+
+/// Retrieve PagerDuty integration details for a subscription.
+pub async fn get_pagerduty_integration(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let result = sqlx::query_as::<_, (Uuid, String, Option<String>, bool, i32)>(
+        "SELECT id, service_name, escalation_policy_id, auto_resolve, auto_resolve_threshold_min
+         FROM pagerduty_integrations
+         WHERE subscription_id = $1",
+    )
+    .bind(&subscription_id)
+    .fetch_optional(&pool)
+    .await;
+
+    match result {
+        Ok(Some((id, service_name, escalation_policy_id, auto_resolve, threshold))) => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "id":                       id,
+                "integration_type":         "pagerduty",
+                "service_name":             service_name,
+                "escalation_policy_id":     escalation_policy_id,
+                "auto_resolve":             auto_resolve,
+                "auto_resolve_threshold_min": threshold,
+            })),
+        )),
+        Ok(None) => Err((StatusCode::NOT_FOUND, "PagerDuty integration not found".to_string())),
+        Err(e) => {
+            error!(error = %e, "Failed to fetch PagerDuty integration");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to fetch integration".to_string(),
+            ))
+        }
+    }
+}
+
+/// Delete the PagerDuty integration for a subscription.
+pub async fn delete_pagerduty_integration(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+) -> Result<StatusCode, (StatusCode, String)> {
+    let result =
+        sqlx::query("DELETE FROM pagerduty_integrations WHERE subscription_id = $1")
+            .bind(&subscription_id)
+            .execute(&pool)
+            .await;
+
+    match result {
+        Ok(r) if r.rows_affected() > 0 => {
+            info!(subscription_id = %subscription_id, "PagerDuty integration deleted");
+            Ok(StatusCode::NO_CONTENT)
+        }
+        Ok(_) => Err((StatusCode::NOT_FOUND, "Integration not found".to_string())),
+        Err(e) => {
+            error!(error = %e, "Failed to delete PagerDuty integration");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to delete integration".to_string(),
+            ))
+        }
+    }
+}
+
+/// Acknowledge an open incident via the PagerDuty Events API.
+///
+/// The routing key is resolved from the subscription's integration row.
+pub async fn acknowledge_pagerduty_incident(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+    Json(req): Json<AcknowledgeIncidentRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Fetch routing key from the integration row
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT routing_key FROM pagerduty_integrations WHERE subscription_id = $1",
+    )
+    .bind(&subscription_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Failed to fetch PagerDuty routing key");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to fetch integration".to_string(),
+        )
+    })?;
+
+    let (routing_key,) = row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "PagerDuty integration not configured for this subscription".to_string(),
+        )
+    })?;
+
+    let mut config = crate::pagerduty::PagerDutyConfig::default();
+    config.routing_key = routing_key;
+    let client = crate::pagerduty::PagerDutyClient::new(config);
+
+    client
+        .acknowledge_incident(
+            &req.dedup_key,
+            req.acknowledged_by.as_deref(),
+            Some(&pool),
+        )
+        .await
+        .map_err(|e| {
+            error!(error = %e, dedup_key = %req.dedup_key, "Acknowledge failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("PagerDuty acknowledge failed: {}", e),
+            )
+        })?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status":    "acknowledged",
+            "dedup_key": req.dedup_key,
+        })),
+    ))
+}
+
+/// Resolve an incident via the PagerDuty Events API.
+pub async fn resolve_pagerduty_incident(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+    Json(req): Json<ResolveIncidentRequest>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT routing_key FROM pagerduty_integrations WHERE subscription_id = $1",
+    )
+    .bind(&subscription_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Failed to fetch PagerDuty routing key");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to fetch integration".to_string(),
+        )
+    })?;
+
+    let (routing_key,) = row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            "PagerDuty integration not configured for this subscription".to_string(),
+        )
+    })?;
+
+    let mut config = crate::pagerduty::PagerDutyConfig::default();
+    config.routing_key = routing_key;
+    let client = crate::pagerduty::PagerDutyClient::new(config);
+
+    client
+        .resolve_incident(&req.dedup_key, Some(&pool))
+        .await
+        .map_err(|e| {
+            error!(error = %e, dedup_key = %req.dedup_key, "Resolve failed");
+            (
+                StatusCode::BAD_GATEWAY,
+                format!("PagerDuty resolve failed: {}", e),
+            )
+        })?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "status":    "resolved",
+            "dedup_key": req.dedup_key,
+        })),
+    ))
+}
+
+/// List open incidents for a subscription.
+pub async fn list_pagerduty_incidents(
+    State(pool): State<PgPool>,
+    Path(subscription_id): Path<Uuid>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let incidents = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
+        "SELECT pi.id, pi.dedup_key, pi.incident_key, pi.contract_id,
+                pi.event_type, pi.status, pi.acknowledged_by, pi.created_at
+         FROM pagerduty_incidents pi
+         JOIN pagerduty_integrations pdi ON pdi.id = pi.integration_id
+         WHERE pdi.subscription_id = $1
+         ORDER BY pi.created_at DESC
+         LIMIT 100",
+    )
+    .bind(&subscription_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Failed to list PagerDuty incidents");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to list incidents".to_string(),
+        )
+    })?;
+
+    let items: Vec<serde_json::Value> = incidents
+        .into_iter()
+        .map(
+            |(id, dedup_key, incident_key, contract_id, event_type, status, acked_by, created_at)| {
+                json!({
+                    "id":              id,
+                    "dedup_key":       dedup_key,
+                    "incident_key":    incident_key,
+                    "contract_id":     contract_id,
+                    "event_type":      event_type,
+                    "status":          status,
+                    "acknowledged_by": acked_by,
+                    "created_at":      created_at,
+                })
+            },
+        )
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!({ "incidents": items }))))
+}

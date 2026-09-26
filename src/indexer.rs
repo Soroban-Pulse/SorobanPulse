@@ -509,6 +509,13 @@ impl<R: RpcClient> Indexer<R> {
     }
 
     async fn run_loop(&self) {
+        crate::resources::spawn_sync(self.pool.clone(), self.config.stellar_rpc_url.clone());
+        crate::rpc_meta::spawn_monitor(
+            self.pool.clone(),
+            self.config.stellar_rpc_url.clone(),
+            self.indexer_state.clone(),
+            self.config.start_ledger,
+        );
         let mut current_ledger = self.config.start_ledger;
         let mut consecutive_db_errors = 0u32;
         let mut rpc_backoff_ms = 1000u64; // Start with 1 second backoff

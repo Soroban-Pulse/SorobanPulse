@@ -70,7 +70,46 @@
         ],
         "responses": {
           "200": {
-            "description": "Paginated list of indexed contract IDs"
+            "description": "Paginated list of indexed contract IDs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/ContractSummary"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "page": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64"
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                      "event_count": 4213,
+                      "latest_ledger": 1234567
+                    }
+                  ],
+                  "total": 1,
+                  "page": 1,
+                  "limit": 20
+                }
+              }
+            }
           }
         }
       }
@@ -159,7 +198,8 @@
               "type": "string",
               "nullable": true
             }
-          },
+          }
+          ,
           {
             "name": "anonymized",
             "in": "query",
@@ -168,6 +208,29 @@
             "schema": {
               "type": "boolean",
               "nullable": true
+            }
+          }
+          ,
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort order: asc (oldest first) or desc (newest first, default)",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "enum": ["asc", "desc"]
+            }
+          },
+          {
+            "name": "sort_by",
+            "in": "query",
+            "description": "Sort column: ledger (default), timestamp, or created_at",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "enum": ["ledger", "timestamp", "created_at"]
             }
           },
           {
@@ -178,7 +241,8 @@
             "schema": {
               "type": "string",
               "nullable": true
-            }
+            },
+            "example": "2026-08-01T00:00:00Z"
           },
           {
             "name": "to_timestamp",
@@ -188,36 +252,8 @@
             "schema": {
               "type": "string",
               "nullable": true
-            }
-          "/v1/events/export": {
-            "get": {
-              "tags": ["events"],
-              "operationId": "export_events",
-              "parameters": [
-                { "name": "format", "in": "query", "description": "Output format: csv (default), parquet, or jsonl", "required": false, "schema": { "type": "string", "nullable": true } },
-                { "name": "event_type", "in": "query", "description": "Filter by event type", "required": false, "schema": { "type": "string", "nullable": true } },
-                { "name": "from_ledger", "in": "query", "description": "Return events at or after this ledger", "required": false, "schema": { "type": "integer", "format": "int64", "nullable": true } },
-                { "name": "to_ledger", "in": "query", "description": "Return events at or before this ledger", "required": false, "schema": { "type": "integer", "format": "int64", "nullable": true } },
-                { "name": "contract_id", "in": "query", "description": "Filter by contract ID", "required": false, "schema": { "type": "string", "nullable": true } },
-                { "name": "field_map", "in": "query", "description": "Optional JSON object mapping source field names to target output names", "required": false, "schema": { "type": "string", "nullable": true } }
-              ],
-              "responses": {
-                "200": { "description": "Exported events" },
-                "400": { "description": "Invalid query parameters or unsupported format" },
-                "401": { "description": "API key required" }
-              }
-            }
-          },
-          },
-          {
-            "name": "sort",
-            "in": "query",
-            "description": "Sort order: asc (oldest first) or desc (newest first, default)",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "nullable": true
-            }
+            },
+            "example": "2026-08-20T00:00:00Z"
           },
           {
             "name": "topic_sym",
@@ -227,7 +263,8 @@
             "schema": {
               "type": "string",
               "nullable": true
-            }
+            },
+            "example": "transfer"
           },
           {
             "name": "search",
@@ -237,15 +274,181 @@
             "schema": {
               "type": "string",
               "nullable": true
-            }
+            },
+            "example": "transfer"
           }
         ],
         "responses": {
           "200": {
-            "description": "Paginated list of events"
+            "description": "Paginated list of events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Event"
+                      }
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "page": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "limit": {
+                      "type": "integer",
+                      "format": "int64"
+                    },
+                    "approximate": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": "5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f",
+                      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                      "event_type": "contract",
+                      "tx_hash": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+                      "ledger": 1234567,
+                      "timestamp": "2026-08-20T12:00:00Z",
+                      "event_data": {
+                        "topics": ["transfer"],
+                        "value": "1000000000"
+                      },
+                      "created_at": "2026-08-20T12:00:01Z"
+                    }
+                  ],
+                  "total": 1,
+                  "page": 1,
+                  "limit": 20,
+                  "approximate": true
+                }
+              }
+            }
           },
           "400": {
-            "description": "Invalid query parameters"
+            "description": "Invalid query parameters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "error": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "unknown event_type: bogus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/events/export": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Export events in bulk as CSV, Parquet, or JSONL.",
+        "operationId": "export_events",
+        "parameters": [
+          {
+            "name": "format",
+            "in": "query",
+            "description": "Output format: csv (default), parquet, or jsonl",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "enum": ["csv", "parquet", "jsonl"]
+            },
+            "example": "jsonl"
+          },
+          {
+            "name": "event_type",
+            "in": "query",
+            "description": "Filter by event type",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            },
+            "example": "contract"
+          },
+          {
+            "name": "from_ledger",
+            "in": "query",
+            "description": "Return events at or after this ledger",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            },
+            "example": 1000000
+          },
+          {
+            "name": "to_ledger",
+            "in": "query",
+            "description": "Return events at or before this ledger",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "nullable": true
+            },
+            "example": 1001000
+          },
+          {
+            "name": "contract_id",
+            "in": "query",
+            "description": "Filter by contract ID",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            },
+            "example": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+          },
+          {
+            "name": "field_map",
+            "in": "query",
+            "description": "Optional JSON object mapping source field names to target output names",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true
+            },
+            "example": "{\"contract_id\":\"contract\"}"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exported events",
+            "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "{\"id\":\"5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f\",\"contract_id\":\"CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4\",\"ledger\":1234567}\n"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid query parameters or unsupported format"
+          },
+          "401": {
+            "description": "API key required"
           }
         }
       }
@@ -345,10 +548,83 @@
         ],
         "responses": {
           "200": {
-            "description": "Events for the given contract"
+            "description": "Events for the given contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Event"
+                      }
+                    },
+                    "next_cursor": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": "5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f",
+                      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                      "event_type": "contract",
+                      "tx_hash": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+                      "ledger": 1234567,
+                      "timestamp": "2026-08-20T12:00:00Z",
+                      "event_data": {
+                        "topics": ["transfer"],
+                        "value": "1000000000"
+                      },
+                      "created_at": "2026-08-20T12:00:01Z"
+                    }
+                  ],
+                  "next_cursor": "eyJsZWRnZXIiOjEyMzQ1Njh9"
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid contract_id format or ledger range"
+          }
+        }
+      }
+    },
+    "/v1/events/contract/{contract_id}/stream": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Stream new events for a specific contract in real time via Server-Sent Events.",
+        "operationId": "stream_events_by_contract",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "path",
+            "description": "Stellar contract ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of contract events (text/event-stream)",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "data: {\"id\":\"5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f\",\"contract_id\":\"CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4\",\"event_type\":\"contract\",\"ledger\":1234567}\n\nevent: ping\ndata: 2026-08-20T12:00:15Z\n\n"
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid contract_id format"
           }
         }
       }
@@ -359,12 +635,13 @@
           "events"
         ],
         "summary": "Stream new events in real time via Server-Sent Events.",
+        "description": "This endpoint is less preferred for contract-specific streaming; use\n`/v1/events/contract/{contract_id}/stream` instead.",
         "operationId": "stream_events",
         "parameters": [
           {
             "name": "contract_id",
             "in": "query",
-            "description": "Filter by contract ID",
+            "description": "Filter by contract ID (less preferred)",
             "required": false,
             "schema": {
               "type": "string",
@@ -374,7 +651,15 @@
         ],
         "responses": {
           "200": {
-            "description": "SSE stream of new events (text/event-stream)"
+            "description": "SSE stream of new events (text/event-stream)",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                },
+                "example": "data: {\"id\":\"5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f\",\"contract_id\":\"CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4\",\"event_type\":\"contract\",\"ledger\":1234567}\n\nevent: ping\ndata: 2026-08-20T12:00:15Z\n\n"
+              }
+            }
           },
           "400": {
             "description": "Invalid contract_id format"
@@ -401,7 +686,27 @@
         ],
         "responses": {
           "200": {
-            "description": "Registered ABI"
+            "description": "Registered ABI",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object"
+                  }
+                },
+                "example": [
+                  {
+                    "name": "transfer",
+                    "inputs": [
+                      {"name": "from", "type": "Address"},
+                      {"name": "to", "type": "Address"},
+                      {"name": "amount", "type": "i128"}
+                    ]
+                  }
+                ]
+              }
+            }
           },
           "404": {
             "description": "ABI not found"
@@ -428,14 +733,44 @@
           "description": "ABI JSON array",
           "content": {
             "application/json": {
-              "schema": {}
+              "schema": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "example": [
+                {
+                  "name": "transfer",
+                  "inputs": [
+                    {"name": "from", "type": "Address"},
+                    {"name": "to", "type": "Address"},
+                    {"name": "amount", "type": "i128"}
+                  ]
+                }
+              ]
             }
           },
           "required": true
         },
         "responses": {
           "200": {
-            "description": "ABI registered and existing events queued for decoding"
+            "description": "ABI registered and existing events queued for decoding",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {"type": "string"},
+                    "queued_for_decoding": {"type": "integer", "format": "int64"}
+                  }
+                },
+                "example": {
+                  "status": "registered",
+                  "queued_for_decoding": 42
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid contract_id or ABI"
@@ -503,7 +838,26 @@
         ],
         "responses": {
           "200": {
-            "description": "Array of {date, event_count, unique_tx_count} objects"
+            "description": "Array of {date, event_count, unique_tx_count} objects",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "date": {"type": "string", "format": "date"},
+                      "event_count": {"type": "integer", "format": "int64"},
+                      "unique_tx_count": {"type": "integer", "format": "int64"}
+                    }
+                  }
+                },
+                "example": [
+                  {"date": "2026-08-19", "event_count": 812, "unique_tx_count": 340},
+                  {"date": "2026-08-20", "event_count": 947, "unique_tx_count": 401}
+                ]
+              }
+            }
           },
           "400": {
             "description": "Invalid contract_id, bucket, or date range"
@@ -543,7 +897,36 @@
         ],
         "responses": {
           "200": {
-            "description": "Events from transactions referenced by event_data"
+            "description": "Events from transactions referenced by event_data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Event"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": "5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f",
+                      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                      "event_type": "contract",
+                      "tx_hash": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+                      "ledger": 1234567,
+                      "timestamp": "2026-08-20T12:00:00Z",
+                      "event_data": {"topics": ["transfer"], "value": "1000000000"},
+                      "created_at": "2026-08-20T12:00:01Z"
+                    }
+                  ]
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid tx_hash or depth"
@@ -561,7 +944,7 @@
           {
             "name": "tx_hash",
             "in": "path",
-            "description": "Transaction hash (64 hex chars, case-insensitive — normalized to lowercase)",
+            "description": "Transaction hash (64 lowercase hex chars)",
             "required": true,
             "schema": {
               "type": "string"
@@ -570,7 +953,36 @@
         ],
         "responses": {
           "200": {
-            "description": "Events for the given transaction (empty array if none)"
+            "description": "Events for the given transaction (empty array if none)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Event"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "data": [
+                    {
+                      "id": "5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f",
+                      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                      "event_type": "contract",
+                      "tx_hash": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+                      "ledger": 1234567,
+                      "timestamp": "2026-08-20T12:00:00Z",
+                      "event_data": {"topics": ["transfer"], "value": "1000000000"},
+                      "created_at": "2026-08-20T12:00:01Z"
+                    }
+                  ]
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid tx_hash format"
@@ -589,6 +1001,12 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/BatchTxRequest"
+              },
+              "example": {
+                "hashes": [
+                  "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+                  "2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c"
+                ]
               }
             }
           },
@@ -596,7 +1014,35 @@
         },
         "responses": {
           "200": {
-            "description": "Map of tx_hash -> events for all requested hashes"
+            "description": "Map of tx_hash -> events for all requested hashes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/Event"
+                    }
+                  }
+                },
+                "example": {
+                  "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b": [
+                    {
+                      "id": "5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f",
+                      "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                      "event_type": "contract",
+                      "tx_hash": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+                      "ledger": 1234567,
+                      "timestamp": "2026-08-20T12:00:00Z",
+                      "event_data": {"topics": ["transfer"], "value": "1000000000"},
+                      "created_at": "2026-08-20T12:00:01Z"
+                    }
+                  ],
+                  "2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c": []
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid hashes or too many hashes"
@@ -635,6 +1081,11 @@
             "type": "integer",
             "format": "int64"
           }
+        },
+        "example": {
+          "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+          "event_count": 4213,
+          "latest_ledger": 1234567
         }
       },
       "Event": {
@@ -654,34 +1105,54 @@
             "type": "string"
           },
           "created_at": {
-            "$ref": "#/components/schemas/DateTime"
+            "type": "string",
+            "format": "date-time"
           },
           "event_data": {},
           "event_type": {
             "$ref": "#/components/schemas/EventType"
           },
           "id": {
-            "$ref": "#/components/schemas/Uuid"
+            "type": "string",
+            "format": "uuid"
           },
           "ledger": {
             "type": "integer",
             "format": "int64"
           },
           "timestamp": {
-            "$ref": "#/components/schemas/DateTime"
+            "type": "string",
+            "format": "date-time"
           },
           "tx_hash": {
             "type": "string"
           }
+        },
+        "example": {
+          "id": "5b1b1f6e-2b3a-4b3e-8e2a-1a2b3c4d5e6f",
+          "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+          "event_type": "contract",
+          "tx_hash": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b",
+          "ledger": 1234567,
+          "timestamp": "2026-08-20T12:00:00Z",
+          "event_data": {
+            "topics": ["transfer"],
+            "value": "1000000000"
+          },
+          "created_at": "2026-08-20T12:00:01Z"
         }
+      },
+      "EventType": {
+        "type": "string",
+        "enum": [
+          "contract",
+          "diagnostic",
+          "system"
+        ]
       },
       "PaginationParams": {
         "type": "object",
         "properties": {
-          "contract_id": {
-            "type": "string",
-            "nullable": true
-          },
           "cursor": {
             "type": "string",
             "nullable": true
@@ -717,39 +1188,41 @@
             "format": "int64",
             "nullable": true
           },
-          "sort": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/SortOrder"
-              }
-            ],
-            "nullable": true
-          },
           "to_ledger": {
             "type": "integer",
             "format": "int64",
             "nullable": true
           },
-          "topic_sym": {
-            "type": "string",
-            "description": "Filter by first topic symbol (uses topic_0_sym generated column index).",
-            "nullable": true
-          },
-          "search": {
-            "type": "string",
-            "description": "Full-text search query for event_data (searches all string values in the JSON).",
-            "nullable": true
-          },
-          "from_timestamp": {
-            "type": "string",
-            "description": "Filter events at or after this timestamp (ISO 8601 format).",
-            "nullable": true
-          },
-          "to_timestamp": {
-            "type": "string",
-            "description": "Filter events at or before this timestamp (ISO 8601 format).",
-            "nullable": true
-          }
+           "sort": {
+             "type": "string",
+             "nullable": true,
+             "enum": ["asc", "desc"]
+           },
+           "sort_by": {
+             "type": "string",
+             "nullable": true,
+             "enum": ["ledger", "timestamp", "created_at"]
+           },
+           "topic_sym": {
+             "type": "string",
+             "description": "Filter by first topic symbol (uses topic_0_sym generated column index).",
+             "nullable": true
+           },
+           "search": {
+             "type": "string",
+             "description": "Full-text search query for event_data (searches all string values in the JSON).",
+             "nullable": true
+           },
+           "from_timestamp": {
+             "type": "string",
+             "description": "Filter events at or after this timestamp (ISO 8601 format).",
+             "nullable": true
+           },
+           "to_timestamp": {
+             "type": "string",
+             "description": "Filter events at or before this timestamp (ISO 8601 format).",
+             "nullable": true
+           }
         }
       },
       "BatchTxRequest": {
@@ -765,6 +1238,11 @@
             },
             "description": "List of transaction hashes to look up (max 100)."
           }
+        },
+        "example": {
+          "hashes": [
+            "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b"
+          ]
         }
       }
     }

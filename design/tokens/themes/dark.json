@@ -1,0 +1,191 @@
+{
+  "color": {
+    "bg": {
+      "canvas": {
+        "value": "{color.neutral.950}"
+      },
+      "surface": {
+        "value": "{color.neutral.900}"
+      },
+      "raised": {
+        "value": "{color.neutral.850}"
+      },
+      "subtle": {
+        "value": "{color.neutral.800}"
+      },
+      "hover": {
+        "value": "{color.neutral.800}"
+      },
+      "selected": {
+        "value": "{color.violet.950}"
+      },
+      "inverse": {
+        "value": "{color.neutral.50}"
+      },
+      "overlay": {
+        "value": "rgba(0, 0, 0, 0.6)"
+      }
+    },
+    "text": {
+      "primary": {
+        "value": "{color.neutral.50}"
+      },
+      "secondary": {
+        "value": "{color.neutral.300}"
+      },
+      "muted": {
+        "value": "{color.neutral.400}"
+      },
+      "inverse": {
+        "value": "{color.neutral.900}"
+      },
+      "on-accent": {
+        "value": "{color.neutral.0}"
+      },
+      "link": {
+        "value": "{color.violet.300}"
+      }
+    },
+    "border": {
+      "default": {
+        "value": "{color.neutral.700}"
+      },
+      "strong": {
+        "value": "{color.neutral.600}"
+      },
+      "subtle": {
+        "value": "{color.neutral.800}"
+      }
+    },
+    "accent": {
+      "default": {
+        "value": "{color.violet.500}"
+      },
+      "hover": {
+        "value": "{color.violet.400}"
+      },
+      "active": {
+        "value": "{color.violet.300}"
+      },
+      "subtle": {
+        "value": "{color.violet.950}"
+      },
+      "fg": {
+        "value": "{color.violet.300}"
+      }
+    },
+    "focus": {
+      "ring": {
+        "value": "{color.violet.300}"
+      }
+    },
+    "success": {
+      "fg": {
+        "value": "{color.green.300}"
+      },
+      "bg": {
+        "value": "{color.green.900}"
+      },
+      "border": {
+        "value": "{color.green.400}"
+      },
+      "solid": {
+        "value": "{color.green.400}"
+      }
+    },
+    "warn": {
+      "fg": {
+        "value": "{color.amber.300}"
+      },
+      "bg": {
+        "value": "{color.amber.900}"
+      },
+      "border": {
+        "value": "{color.amber.400}"
+      },
+      "solid": {
+        "value": "{color.amber.400}"
+      }
+    },
+    "error": {
+      "fg": {
+        "value": "{color.red.300}"
+      },
+      "bg": {
+        "value": "{color.red.900}"
+      },
+      "border": {
+        "value": "{color.red.400}"
+      },
+      "solid": {
+        "value": "{color.red.400}"
+      }
+    },
+    "info": {
+      "fg": {
+        "value": "{color.blue.300}"
+      },
+      "bg": {
+        "value": "{color.blue.900}"
+      },
+      "border": {
+        "value": "{color.blue.400}"
+      },
+      "solid": {
+        "value": "{color.blue.400}"
+      }
+    },
+    "event": {
+      "contract": {
+        "value": "{color.violet.300}"
+      },
+      "system": {
+        "value": "{color.cyan.300}"
+      },
+      "diagnostic": {
+        "value": "{color.amber.300}"
+      }
+    },
+    "code": {
+      "bg": {
+        "value": "{color.neutral.950}"
+      },
+      "key": {
+        "value": "{color.violet.300}"
+      },
+      "string": {
+        "value": "{color.green.300}"
+      },
+      "number": {
+        "value": "{color.blue.300}"
+      },
+      "literal": {
+        "value": "{color.amber.300}"
+      }
+    }
+  },
+  "elevation": {
+    "0": {
+      "value": "none"
+    },
+    "1": {
+      "value": "0 1px 2px rgba(0, 0, 0, 0.4)",
+      "comment": "Cards, table headers"
+    },
+    "2": {
+      "value": "0 2px 6px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04)",
+      "comment": "Dropdowns, popovers"
+    },
+    "3": {
+      "value": "0 8px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06)",
+      "comment": "Toasts"
+    },
+    "4": {
+      "value": "0 16px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.06)",
+      "comment": "Drawers, modals"
+    }
+  },
+  "color-scheme": {
+    "value": "dark"
+  }
+}

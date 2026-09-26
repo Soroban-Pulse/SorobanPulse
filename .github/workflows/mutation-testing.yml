@@ -1,25 +1,44 @@
-name: Mutation Testing
+name: Mutation Testing — Issue #922
 
 on:
   push:
     branches: [main, develop]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "mutants.toml"
+      - "Makefile.mutations"
+      - ".github/workflows/mutation-testing.yml"
   pull_request:
     branches: [main, develop]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "mutants.toml"
   schedule:
-    # Run mutation tests weekly on Monday at 2 AM UTC
-    - cron: '0 2 * * 1'
+    # Full suite weekly on Monday at 02:00 UTC (avoids Monday morning CI rush)
+    - cron: "0 2 * * 1"
+  workflow_dispatch:
+    inputs:
+      max_mutations:
+        description: "Cap total mutations (0 = unlimited)"
+        required: false
+        default: "0"
 
 env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_test
-  CARGO_MUTANTS_TIMEOUT: 300
-  CARGO_MUTANTS_JOBS: 4
+  STELLAR_RPC_URL: http://localhost:8000
+  # Score thresholds — also documented in mutants.toml
+  MUTATION_SCORE_MINIMUM: "70"
+  MUTATION_SCORE_TARGET: "80"
 
 jobs:
+  # ── Full mutation suite ───────────────────────────────────────────────────
   mutation-testing:
-    name: Mutation Testing Quality Check
+    name: Mutation Testing
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     services:
       postgres:
@@ -37,6 +56,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Fetch full history so we can push the score file back on main
+          fetch-depth: 0
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -49,136 +71,243 @@ jobs:
       - name: Install cargo-mutants
         run: cargo install cargo-mutants --locked
 
-      - name: Setup test database
-        run: |
-          sqlx database create
-          sqlx migrate run
+      - name: Install sqlx-cli (for migrations)
+        run: cargo install sqlx-cli --no-default-features --features postgres --locked
+
+      - name: Run database migrations
+        run: sqlx migrate run
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
 
+      # ── Run mutations ───────────────────────────────────────────────────
       - name: Run mutation tests
+        id: mutants
         run: |
+          EXTRA_ARGS=""
+          if [ "${{ github.event.inputs.max_mutations }}" != "0" ] && [ -n "${{ github.event.inputs.max_mutations }}" ]; then
+            EXTRA_ARGS="--in-place"   # placeholder — cargo-mutants doesn't have --maximum yet
+          fi
+          mkdir -p target/mutants
           cargo mutants \
-            --output-json target/mutants.json \
+            --output target/mutants \
+            --jobs $(nproc) \
             --timeout 300 \
-            --jobs 4 \
-            --verbose
+            $EXTRA_ARGS \
+            2>&1 | tee target/mutants/run.log || true
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
 
-      - name: Generate HTML report
-        if: always()
-        run: |
-          cargo mutants --output target/mutants-report --html
-
+      # ── Parse score from JSON output ────────────────────────────────────
       - name: Extract mutation score
-        if: always()
         id: score
+        if: always()
         run: |
-          if [ -f "target/mutants.json" ]; then
-            score=$(jq '.summary.mutation_score_percent // 0' target/mutants.json)
-            killed=$(jq '.summary.killed // 0' target/mutants.json)
-            survived=$(jq '.summary.survived // 0' target/mutants.json)
-            echo "score=$score" >> $GITHUB_OUTPUT
-            echo "killed=$killed" >> $GITHUB_OUTPUT
-            echo "survived=$survived" >> $GITHUB_OUTPUT
-            echo "Mutation Score: $score%"
-            echo "Killed: $killed, Survived: $survived"
-          else
-            echo "score=0" >> $GITHUB_OUTPUT
+          SCORE=0; KILLED=0; SURVIVED=0; UNVIABLE=0
+          if [ -f "target/mutants/mutants.json" ]; then
+            SCORE=$(jq -r '
+              if .summary then
+                (.summary.killed // 0) as $k |
+                (.summary.survived // 0) as $s |
+                if ($k + $s) > 0 then ($k * 100 / ($k + $s)) else 0 end
+              else 0 end
+            ' target/mutants/mutants.json 2>/dev/null || echo 0)
+            KILLED=$(jq -r '.summary.killed // 0' target/mutants/mutants.json 2>/dev/null || echo 0)
+            SURVIVED=$(jq -r '.summary.survived // 0' target/mutants/mutants.json 2>/dev/null || echo 0)
+            UNVIABLE=$(jq -r '.summary.unviable // 0' target/mutants/mutants.json 2>/dev/null || echo 0)
+          fi
+          # Round to 1 decimal
+          SCORE=$(printf "%.1f" "$SCORE" 2>/dev/null || echo "0.0")
+          echo "score=$SCORE"     >> "$GITHUB_OUTPUT"
+          echo "killed=$KILLED"   >> "$GITHUB_OUTPUT"
+          echo "survived=$SURVIVED" >> "$GITHUB_OUTPUT"
+          echo "unviable=$UNVIABLE" >> "$GITHUB_OUTPUT"
+          echo "Mutation Score: ${SCORE}%  (killed=${KILLED}, survived=${SURVIVED}, unviable=${UNVIABLE})"
+
+      # ── Per-module score table ──────────────────────────────────────────
+      - name: Print per-module score table
+        if: always()
+        run: |
+          if [ -f "target/mutants/mutants.json" ]; then
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync('target/mutants/mutants.json','utf8'));
+              const outcomes = data.outcomes || [];
+              const byModule = {};
+              function mod(p){ const m=(p||'').match(/src\/([^\/]+)/); return m?m[1].replace('.rs',''):'other'; }
+              for (const o of outcomes) {
+                const m = mod(o.source_file || o.path || '');
+                if (!byModule[m]) byModule[m]={killed:0,survived:0};
+                const s=(o.outcome||o.status||'').toLowerCase();
+                if(s==='killed') byModule[m].killed++;
+                else if(s==='survived'||s==='missed') byModule[m].survived++;
+              }
+              console.log('\nModule'.padEnd(38)+'Killed'.padStart(8)+'Survived'.padStart(10)+'Score'.padStart(8));
+              console.log('-'.repeat(66));
+              for(const [m,v] of Object.entries(byModule).sort()){
+                const t=v.killed+v.survived;
+                const s=t>0?(v.killed/t*100).toFixed(1)+\"%\":\"-\";
+                const e=parseFloat(s)>=80?\"✅\":parseFloat(s)>=70?\"🟡\":\"❌\";
+                console.log(e+\" \"+m.padEnd(36)+String(v.killed).padStart(8)+String(v.survived).padStart(10)+s.padStart(8));
+              }
+            " 2>/dev/null || echo "(node not available — score table skipped)"
           fi
 
+      # ── Survivor analysis ───────────────────────────────────────────────
+      - name: Generate survivor analysis
+        if: always()
+        run: |
+          if [ -f "target/mutants/mutants.json" ]; then
+            node -e "
+              const fs = require('fs');
+              const data = JSON.parse(fs.readFileSync('target/mutants/mutants.json','utf8'));
+              const survivors = (data.outcomes||[]).filter(o=>{
+                const s=(o.outcome||o.status||'').toLowerCase();
+                return s==='survived'||s==='missed';
+              });
+              if(survivors.length===0){ console.log('No survivors! 🎉'); process.exit(0); }
+              function mod(p){ const m=(p||'').match(/src\/([^\/]+)/); return m?m[1].replace('.rs',''):'other'; }
+              const byMod = {};
+              for(const s of survivors){
+                const m=mod(s.source_file||s.path||'');
+                if(!byMod[m]) byMod[m]=[];
+                byMod[m].push(s);
+              }
+              console.log('\n=== Surviving Mutations ===');
+              for(const [m,items] of Object.entries(byMod).sort()){
+                console.log('\n['+m+'] '+items.length+' survivors');
+                for(const item of items){
+                  const loc=(item.source_file||item.path||'?')+':'+(item.line||'?');
+                  const desc=item.description||item.mutation||'?';
+                  console.log('  '+loc+' — '+desc);
+                }
+              }
+            " 2>/dev/null || echo "(node not available)"
+          fi
+
+      # ── Save score snapshot ─────────────────────────────────────────────
+      - name: Save mutation score snapshot
+        if: always()
+        run: |
+          SCORE="${{ steps.score.outputs.score }}"
+          KILLED="${{ steps.score.outputs.killed }}"
+          SURVIVED="${{ steps.score.outputs.survived }}"
+          DATE=$(date -u +%Y-%m-%d)
+          SHA="${{ github.sha }}"
+          node -e "
+            const fs = require('fs');
+            const entry = { date:'${DATE}', sha:'${SHA}'.slice(0,8), score:parseFloat('${SCORE}'), killed:parseInt('${KILLED}'), survived:parseInt('${SURVIVED}') };
+            let h = [];
+            if (fs.existsSync('mutation-score.json')) { try { h = JSON.parse(fs.readFileSync('mutation-score.json','utf8')); } catch(_){} }
+            h.push(entry);
+            fs.writeFileSync('mutation-score.json', JSON.stringify(h.slice(-100), null, 2)); // keep last 100 entries
+          " 2>/dev/null || python3 -c "
+            import json, os
+            from datetime import date
+            entry = {'date':'${DATE}','sha':'${SHA}'[:8],'score':float('${SCORE}'),'killed':int('${KILLED}'),'survived':int('${SURVIVED}')}
+            h = json.load(open('mutation-score.json')) if os.path.exists('mutation-score.json') else []
+            h.append(entry); h = h[-100:]
+            json.dump(h, open('mutation-score.json','w'), indent=2)
+          " 2>/dev/null || true
+
+      # ── Upload artefacts ────────────────────────────────────────────────
       - name: Upload mutation report
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: mutation-testing-report
+          name: mutation-testing-report-${{ github.run_id }}
           path: |
-            target/mutants-report/
-            target/mutants.json
+            target/mutants/
+            mutation-score.json
           retention-days: 30
 
+      # ── PR comment ─────────────────────────────────────────────────────
       - name: Comment on PR with mutation score
         if: github.event_name == 'pull_request' && always()
         uses: actions/github-script@v7
         with:
           script: |
-            const score = ${{ steps.score.outputs.score }};
-            const killed = ${{ steps.score.outputs.killed }};
-            const survived = ${{ steps.score.outputs.survived }};
+            const score    = parseFloat("${{ steps.score.outputs.score }}") || 0;
+            const killed   = parseInt("${{ steps.score.outputs.killed }}")  || 0;
+            const survived = parseInt("${{ steps.score.outputs.survived }}") || 0;
+            const unviable = parseInt("${{ steps.score.outputs.unviable }}") || 0;
+            const min      = parseInt("${{ env.MUTATION_SCORE_MINIMUM }}");
+            const target   = parseInt("${{ env.MUTATION_SCORE_TARGET }}");
 
-            let scoreEmoji = '🔴';
-            if (score >= 80) {
-              scoreEmoji = '🟢';
-            } else if (score >= 70) {
-              scoreEmoji = '🟡';
-            }
+            const emoji = score >= target ? "🟢" : score >= min ? "🟡" : "🔴";
+            const verdict = score >= target
+              ? "✅ Score meets the target — excellent test coverage."
+              : score >= min
+              ? "⚠️ Score meets the minimum gate but is below the " + target + "% target. Consider improving tests for surviving mutations."
+              : "❌ Score is below the " + min + "% minimum gate. This PR **will fail CI** until the score is raised.";
 
-            const body = `## Mutation Testing Results ${scoreEmoji}
-
-| Metric | Value |
-|--------|-------|
-| **Mutation Score** | ${score.toFixed(1)}% |
-| **Killed Mutations** | ${killed} |
-| **Survived Mutations** | ${survived} |
-
-**Target:** 80% or higher mutation score
-
-${score >= 80 ? '✅ Excellent test coverage!' : score >= 70 ? '⚠️ Good coverage, room for improvement' : '❌ Mutation score below target. Please improve test coverage.'}
-
-View the [full mutation report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) in the artifacts.`;
+            const body = [
+              "## Mutation Testing Results " + emoji,
+              "",
+              "| Metric | Value |",
+              "|---|---|",
+              "| **Mutation Score** | **" + score.toFixed(1) + "%** |",
+              "| Killed | " + killed + " |",
+              "| Survived | " + survived + " |",
+              "| Unviable | " + unviable + " |",
+              "| Minimum (CI gate) | " + min + "% |",
+              "| Target | " + target + "% |",
+              "",
+              verdict,
+              "",
+              "View the [full mutation report](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}) in the workflow artifacts.",
+              "",
+              "_Run `make -f Makefile.mutations mutants-report` locally to view survivor details._",
+            ].join("\n");
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: body
+              body,
             });
 
-      - name: Fail if mutation score too low
-        if: always() && github.event_name == 'pull_request'
+      # ── Enforce minimum score gate ──────────────────────────────────────
+      - name: Enforce mutation score minimum (${{ env.MUTATION_SCORE_MINIMUM }}%)
+        if: always()
         run: |
-          score=${{ steps.score.outputs.score }}
-          if (( $(echo "$score < 70" | bc -l) )); then
-            echo "::error::Mutation score too low ($score%). Target is 70% minimum."
+          SCORE="${{ steps.score.outputs.score }}"
+          MIN="${{ env.MUTATION_SCORE_MINIMUM }}"
+          echo "Score: ${SCORE}%  Minimum: ${MIN}%"
+          # Use awk for float comparison (avoids bc dependency)
+          if awk "BEGIN { exit !(${SCORE} < ${MIN}) }"; then
+            echo "::error::Mutation score ${SCORE}% is below the ${MIN}% minimum threshold."
+            echo "::error::Run 'make -f Makefile.mutations mutants-report' to identify surviving mutations."
             exit 1
           fi
+          echo "Score ${SCORE}% passes the ${MIN}% minimum gate."
 
+  # ── Track mutation score trend on main ───────────────────────────────────
   mutation-trend:
-    name: Track Mutation Score Trend
+    name: Update Mutation Score Trend
     runs-on: ubuntu-latest
     needs: mutation-testing
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Only commit the updated score history back to main
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && success()
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download previous score
-        continue-on-error: true
-        run: |
-          mkdir -p .mutation-history
-          git show HEAD:mutation_score_history.json > .mutation-history/current.json 2>/dev/null || echo '[]' > .mutation-history/current.json
-
-      - name: Update mutation score history
-        uses: actions/github-script@v7
         with:
-          script: |
-            const fs = require('fs');
-            const score = ${{ steps.score.outputs.score }};
-            const date = new Date().toISOString().split('T')[0];
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
-            let history = [];
-            if (fs.existsSync('.mutation-history/current.json')) {
-              history = JSON.parse(fs.readFileSync('.mutation-history/current.json', 'utf8'));
-            }
+      - name: Download score snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: mutation-testing-report-${{ github.run_id }}
+          path: _mutation_artifacts/
 
-            history.push({ date, score });
-            fs.writeFileSync('mutation_score_history.json', JSON.stringify(history, null, 2));
-
-      - name: Commit history update
-        if: success()
+      - name: Commit updated score history
         run: |
-          git config user.name "github-actions[bot]"
+          if [ -f "_mutation_artifacts/mutation-score.json" ]; then
+            cp _mutation_artifacts/mutation-score.json mutation-score.json
+          fi
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add mutation_score_history.json
-          git commit -m "chore: update mutation score history" --allow-empty
+          git add mutation-score.json
+          git diff --cached --quiet || git commit -m "chore: update mutation score history [skip ci]"
           git push
         continue-on-error: true

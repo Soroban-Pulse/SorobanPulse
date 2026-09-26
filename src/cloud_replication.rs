@@ -3,6 +3,8 @@
 //! Manages event replication across multiple cloud providers with configurable
 //! consistency modes (strong, eventual, best-effort) and automatic failover
 //! when a provider is unreachable.
+//!
+//! See docs/adr/0002-multi-replica-indexing.md for the design rationale.
 
 use crate::cloud_provider::{
     CloudEventPublisher, CloudProvider, CloudPublishError,

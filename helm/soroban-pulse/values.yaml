@@ -61,6 +61,14 @@ env:
   CONTRACT_COUNT_CACHE_SIZE: "1000"
   CONTRACT_COUNT_CACHE_TTL_SECS: "30"
 
+# Issue #1112: built-in web dashboard served by the backend at /ui.
+dashboard:
+  # Serve the dashboard bundled in the image (sets SERVE_DASHBOARD).
+  enabled: true
+  # Extra API origins the dashboard may call (appended to its CSP connect-src).
+  # Leave empty when the dashboard only talks to this deployment.
+  connectSrc: []
+
 # Sensitive values — injected into a Kubernetes Secret.
 # For production, prefer existingSecret (see helm/soroban-pulse/README.md).
 # Never commit real credentials here; pass them via --set or a values override

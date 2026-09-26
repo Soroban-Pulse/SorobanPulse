@@ -113,3 +113,26 @@ terraform/**/terraform.tfstate.backup
 # Never commit actual tfvars (may contain secrets)
 terraform.tfvars
 **/terraform.tfvars
+
+# Test parallelization cache
+.test-cache/
+test-results/
+*.test-result.json
+
+# DSL compiled artifacts
+*.dsl.compiled
+
+# Batch operation temp files
+batch-*.tmp
+
+# Filter DSL schema cache
+filter_dsl_schema_cache.json
+
+# Parallel test worker databases (local dev)
+test_schemas/
+
+# Test parallelization temp output
+tests/parallel_output/
+
+# jsonschema generated artefacts
+*.jsonschema.out

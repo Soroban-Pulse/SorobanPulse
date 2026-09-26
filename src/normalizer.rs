@@ -195,6 +195,172 @@ pub async fn load_rules(pool: &PgPool, contract_id: &str) -> Vec<NormalizationRu
     .unwrap_or_default()
 }
 
+// ---------------------------------------------------------------------
+// Schema mapping configuration
+// ---------------------------------------------------------------------
+
+/// Expected JSON type for a field in the normalized schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldType {
+    String,
+    Number,
+    Bool,
+    Object,
+    Array,
+    Any,
+}
+
+impl FieldType {
+    fn matches(&self, value: &Value) -> bool {
+        match self {
+            FieldType::String => value.is_string(),
+            FieldType::Number => value.is_number(),
+            FieldType::Bool => value.is_boolean(),
+            FieldType::Object => value.is_object(),
+            FieldType::Array => value.is_array(),
+            FieldType::Any => true,
+        }
+    }
+}
+
+/// A single field definition in a normalized schema: where the field lives
+/// (JSON Pointer) and what type it must resolve to after normalization.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchemaField {
+    pub pointer: String,
+    pub field_type: FieldType,
+    pub required: bool,
+}
+
+/// Declarative mapping describing the shape event data must conform to
+/// once normalization rules have been applied. This is the "consistent
+/// schema" that normalized events are validated against.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct NormalizedSchema {
+    pub name: String,
+    pub fields: Vec<SchemaField>,
+}
+
+impl NormalizedSchema {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self { name: name.into(), fields: Vec::new() }
+    }
+
+    pub fn with_field(mut self, pointer: impl Into<String>, field_type: FieldType, required: bool) -> Self {
+        self.fields.push(SchemaField { pointer: pointer.into(), field_type, required });
+        self
+    }
+}
+
+/// A single schema validation failure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaViolation {
+    pub pointer: String,
+    pub reason: String,
+}
+
+/// Validates a normalized JSON value against a `NormalizedSchema`,
+/// returning any violations found (empty means the value is valid).
+pub fn validate_schema(schema: &NormalizedSchema, value: &Value) -> Vec<SchemaViolation> {
+    let mut violations = Vec::new();
+    for field in &schema.fields {
+        match pointer_get(value, &field.pointer) {
+            Some(v) if !v.is_null() => {
+                if !field.field_type.matches(&v) {
+                    violations.push(SchemaViolation {
+                        pointer: field.pointer.clone(),
+                        reason: format!("expected {:?}, got {v}", field.field_type),
+                    });
+                }
+            }
+            _ => {
+                if field.required {
+                    violations.push(SchemaViolation {
+                        pointer: field.pointer.clone(),
+                        reason: "required field missing".to_string(),
+                    });
+                }
+            }
+        }
+    }
+    violations
+}
+
+// ---------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------
+
+/// Running counters for normalization outcomes, intended to be exposed
+/// via `src/metrics.rs`.
+#[derive(Debug, Clone, Default)]
+pub struct NormalizationMetrics {
+    pub attempted: u64,
+    pub succeeded: u64,
+    pub rolled_back: u64,
+    pub skipped: u64,
+}
+
+impl NormalizationMetrics {
+    pub fn success_rate(&self) -> f64 {
+        if self.attempted == 0 {
+            return 1.0;
+        }
+        self.succeeded as f64 / self.attempted as f64
+    }
+}
+
+// ---------------------------------------------------------------------
+// Validated normalization with rollback
+// ---------------------------------------------------------------------
+
+/// Result of a validated normalization attempt.
+#[derive(Debug, Clone)]
+pub enum NormalizationOutcome {
+    /// Normalization applied and the result passed schema validation.
+    Applied(Value),
+    /// Normalization rules produced a value that failed schema validation;
+    /// the original, pre-normalization data was kept instead.
+    RolledBack { original: Value, violations: Vec<SchemaViolation> },
+    /// No rules applied (empty rule set or empty/null input).
+    Skipped,
+}
+
+/// Applies normalization rules and validates the result against the given
+/// schema. If validation fails, the transformation is rolled back and the
+/// original event data is returned instead, so a bad rule can never
+/// corrupt stored event data. Updates `metrics` as a side effect.
+pub fn normalize_with_validation(
+    rules: &[NormalizationRule],
+    event_data: &Value,
+    schema: &NormalizedSchema,
+    metrics: &mut NormalizationMetrics,
+) -> NormalizationOutcome {
+    metrics.attempted += 1;
+
+    let normalized = match normalize(rules, event_data) {
+        Some(v) => v,
+        None => {
+            metrics.skipped += 1;
+            return NormalizationOutcome::Skipped;
+        }
+    };
+
+    let violations = validate_schema(schema, &normalized);
+    if violations.is_empty() {
+        metrics.succeeded += 1;
+        NormalizationOutcome::Applied(normalized)
+    } else {
+        metrics.rolled_back += 1;
+        tracing::warn!(
+            schema = %schema.name,
+            violation_count = violations.len(),
+            "normalization result failed schema validation, rolling back to original data"
+        );
+        NormalizationOutcome::RolledBack { original: event_data.clone(), violations }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +494,85 @@ mod tests {
         // Should not panic, just return the data as-is
         let result = normalize(&rules, &data);
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn schema_validation_passes_for_conforming_value() {
+        let schema = NormalizedSchema::new("transfer")
+            .with_field("/amount", FieldType::Number, true)
+            .with_field("/from", FieldType::String, true);
+        let value = json!({"amount": 1.5, "from": "GABC"});
+        assert!(validate_schema(&schema, &value).is_empty());
+    }
+
+    #[test]
+    fn schema_validation_flags_missing_required_field() {
+        let schema = NormalizedSchema::new("transfer").with_field("/amount", FieldType::Number, true);
+        let value = json!({});
+        let violations = validate_schema(&schema, &value);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].pointer, "/amount");
+    }
+
+    #[test]
+    fn schema_validation_flags_wrong_type() {
+        let schema = NormalizedSchema::new("transfer").with_field("/amount", FieldType::Number, true);
+        let value = json!({"amount": "not-a-number"});
+        let violations = validate_schema(&schema, &value);
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn normalize_with_validation_applies_when_schema_passes() {
+        let rules = vec![rule("/amount", "divide_by_decimals", json!({"decimals": 2}))];
+        let schema = NormalizedSchema::new("s").with_field("/amount", FieldType::Number, true);
+        let mut metrics = NormalizationMetrics::default();
+        let data = json!({"amount": 100});
+
+        let outcome = normalize_with_validation(&rules, &data, &schema, &mut metrics);
+        match outcome {
+            NormalizationOutcome::Applied(v) => assert_eq!(v["amount"], 1.0),
+            other => panic!("expected Applied, got {other:?}"),
+        }
+        assert_eq!(metrics.succeeded, 1);
+        assert_eq!(metrics.attempted, 1);
+    }
+
+    #[test]
+    fn normalize_with_validation_rolls_back_on_schema_failure() {
+        // base64_decode turns the numeric-looking string into text, which
+        // violates a schema expecting a Number at that pointer.
+        let rules = vec![rule("/amount", "base64_decode", json!({}))];
+        let schema = NormalizedSchema::new("s").with_field("/amount", FieldType::Number, true);
+        let mut metrics = NormalizationMetrics::default();
+        let data = json!({"amount": "aGVsbG8="});
+
+        let outcome = normalize_with_validation(&rules, &data, &schema, &mut metrics);
+        match outcome {
+            NormalizationOutcome::RolledBack { original, violations } => {
+                assert_eq!(original, data);
+                assert!(!violations.is_empty());
+            }
+            other => panic!("expected RolledBack, got {other:?}"),
+        }
+        assert_eq!(metrics.rolled_back, 1);
+        assert_eq!(metrics.succeeded, 0);
+    }
+
+    #[test]
+    fn normalize_with_validation_skips_empty_rules() {
+        let schema = NormalizedSchema::new("s");
+        let mut metrics = NormalizationMetrics::default();
+        let outcome = normalize_with_validation(&[], &json!({"a": 1}), &schema, &mut metrics);
+        assert!(matches!(outcome, NormalizationOutcome::Skipped));
+        assert_eq!(metrics.skipped, 1);
+    }
+
+    #[test]
+    fn metrics_success_rate_computed_correctly() {
+        let mut metrics = NormalizationMetrics::default();
+        metrics.attempted = 4;
+        metrics.succeeded = 3;
+        assert_eq!(metrics.success_rate(), 0.75);
     }
 }

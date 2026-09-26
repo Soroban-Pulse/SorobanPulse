@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/brand/logo-horizontal.svg" alt="SorobanPulse" width="360"></p>
+
 # Soroban Pulse
 
 A lightweight Rust backend service that indexes Soroban smart contract events on the Stellar network and exposes them via a REST API.
@@ -46,12 +48,19 @@ See [docs/schema.md](docs/schema.md) for a detailed description of the database 
 ## Documentation
 
 - [Developer onboarding guide](docs/onboarding.md) — start here if you're new: a day-1 checklist and fixes for the most common first-build issues.
+- [Development environment setup](docs/development-setup.md) — OS-specific setup, IDE/editor configuration, pre-commit hooks, debugging tools, and performance profiling.
 - [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
 - [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
-- [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, common patterns, and anti-patterns.
+- [SDK integration guide](docs/sdk-integration-guide.md) — using the TypeScript, Python, and Go SDKs: auth, subscriptions, streaming, and error handling.
+- [SDK development guide](docs/sdk-development.md) — building and extending the SDKs themselves: architecture, per-language tutorials, and webhook verification.
+- [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, performance benchmarks, monitoring, common patterns, and anti-patterns.
+- [Troubleshooting decision tree](docs/troubleshooting-guide.md) — symptom-first navigation into the detailed [troubleshooting guide](docs/troubleshooting.md) and runbooks.
 - [Contract event schemas](docs/contract-event-schemas.md) documents Stellar contract event patterns, XDR encoding, event data types, examples, and validation rules.
 - [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.
 - [Data retention policy](docs/data-retention.md) explains default retention periods, archival, GDPR procedures, deletion workflows, and audit trail retention.
+- [Web dashboard](docs/dashboard.md) — the built-in UI served at `/ui` (`SERVE_DASHBOARD=true`), its caching and Content-Security-Policy.
+- [Embeddable feed widget](packages/feed-widget/README.md) — the `<soroban-pulse-feed>` web component for showing contract activity on your own site, including CORS and API-key guidance.
+- [Design system](docs/design/design-system.md) — design tokens, component specs and usage guidelines. Brand assets are in [docs/assets/brand](docs/assets/brand/README.md).
 
 ## Setup
 
@@ -137,6 +146,7 @@ The project employs a comprehensive testing strategy across multiple dimensions:
 - **Property-Based Tests**: Discover edge cases with `proptest` — see [docs/property-testing.md](docs/property-testing.md)
 - **Mutation Testing**: Evaluate test coverage quality with `cargo-mutants` — see [docs/mutation-testing.md](docs/mutation-testing.md)
 - **API Contract Tests**: Verify client-server API compatibility — see [docs/contract-testing.md](docs/contract-testing.md)
+- **Security Tests**: OWASP Top 10, auth bypass, crypto verification, regression tests — see [docs/security-testing.md](docs/security-testing.md)
 
 Run tests locally:
 ```bash
@@ -152,6 +162,20 @@ make -f Makefile.mutations mutants
 
 # Contract tests (verify API compatibility)
 cargo test --test contract_tests
+
+# Security tests (OWASP, auth bypass, crypto, regression — no DB needed)
+make security-tests
+
+# Full security suite (tests + dependency audit + secrets scan)
+make security
+```
+
+### Web UI
+
+A React front end with an event explorer, global search, status page, admin console and light/dark themes lives in [`frontend/`](frontend/README.md):
+
+```bash
+cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
 ## API

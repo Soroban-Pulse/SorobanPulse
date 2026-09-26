@@ -220,6 +220,16 @@ pub struct Config {
     /// Per-API-key rate limit: max requests per day (Issue #669).
     /// Set via RATE_LIMIT_KEY_PER_DAY env var.
     pub rate_limit_key_per_day: Option<u32>,
+    /// Per-API-key rate limit: max requests per rolling 30-day window (Issue #941).
+    /// Set via RATE_LIMIT_KEY_PER_MONTH env var.
+    pub rate_limit_key_per_month: Option<u32>,
+    /// IP addresses/CIDR blocks to block (Issue #942). Comma-separated,
+    /// IPv4 or IPv6. Set via IP_DENYLIST env var. Empty disables enforcement.
+    pub ip_denylist: Vec<String>,
+    /// IP addresses/CIDR blocks to exclusively allow (Issue #942).
+    /// Comma-separated, IPv4 or IPv6. Set via IP_ALLOWLIST env var. Empty
+    /// disables enforcement (every IP allowed).
+    pub ip_allowlist: Vec<String>,
     pub indexer_lag_warn_threshold: u64,
     pub indexer_stall_timeout_secs: u64,
     pub db_statement_timeout_ms: u64,
@@ -438,6 +448,18 @@ pub struct Config {
     /// Disabled by default. Set ENABLE_PUSH_PRELOAD=true to opt in.
     pub enable_push_preload: bool,
 
+    // Issue #1112: built-in web dashboard
+    /// Serve the web dashboard (web/dist) at /ui. Requires the `dashboard`
+    /// cargo feature. Set SERVE_DASHBOARD=true to opt in.
+    pub serve_dashboard: bool,
+    /// Directory containing the built dashboard (index.html + assets/).
+    /// Defaults to `web/dist`. Set via DASHBOARD_DIR.
+    pub dashboard_dir: String,
+    /// Extra origins the dashboard may call, appended to the `connect-src`
+    /// directive of its Content-Security-Policy (comma-separated
+    /// DASHBOARD_CONNECT_SRC). Same-origin API calls are always allowed.
+    pub dashboard_connect_src: Vec<String>,
+
     // Issue #705: Kafka event publishing
     /// Comma-separated list of Kafka broker addresses (e.g., "localhost:9092,localhost:9093").
     /// When set, events are published to Kafka topic specified by kafka_topic.
@@ -504,6 +526,9 @@ impl Default for Config {
             rate_limit_key_per_minute: None,
             rate_limit_key_per_hour: None,
             rate_limit_key_per_day: None,
+            rate_limit_key_per_month: None,
+            ip_denylist: Vec::new(),
+            ip_allowlist: Vec::new(),
             indexer_lag_warn_threshold: 100,
             indexer_stall_timeout_secs: 60,
             db_statement_timeout_ms: 5000,
@@ -629,6 +654,9 @@ impl Default for Config {
             query_cache_ttl_secs: crate::query_cache::DEFAULT_TTL_SECS,
             query_cache_max_capacity: crate::query_cache::DEFAULT_MAX_CAPACITY,
             enable_push_preload: false,
+            serve_dashboard: false,
+            dashboard_dir: "web/dist".to_string(),
+            dashboard_connect_src: Vec::new(),
             kafka_brokers: None,
             kafka_topic: None,
             kafka_batch_size: 16384,
@@ -1008,6 +1036,12 @@ impl Config {
             ));
         }
 
+        // Issue #938: fail fast on malformed origins instead of letting
+        // build_cors() silently drop them from the CORS layer.
+        for msg in crate::middleware::validate_cors_origins(&allowed_origins) {
+            errors.push(format!("  {msg}"));
+        }
+
         let database_url = resolve_database_url_checked(&mut errors);
 
         let stellar_rpc_url = {
@@ -1096,6 +1130,23 @@ impl Config {
         let rate_limit_key_per_day = env_or_file("RATE_LIMIT_KEY_PER_DAY", &file)
             .and_then(|v| parse_int::<u32>("RATE_LIMIT_KEY_PER_DAY", &v, "100000", &mut errors))
             .filter(|&n| n > 0);
+
+        // Issue #941: monthly quota pool, on top of the existing minute/hour/day tiers.
+        let rate_limit_key_per_month = env_or_file("RATE_LIMIT_KEY_PER_MONTH", &file)
+            .and_then(|v| parse_int::<u32>("RATE_LIMIT_KEY_PER_MONTH", &v, "1000000", &mut errors))
+            .filter(|&n| n > 0);
+
+        // Issue #942: IP allow/deny lists (comma-separated IPs and/or CIDR blocks).
+        let ip_denylist: Vec<String> = env_or_file_or("IP_DENYLIST", &file, "")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let ip_allowlist: Vec<String> = env_or_file_or("IP_ALLOWLIST", &file, "")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
         let indexer_lag_warn_threshold = parse_int::<u64>(
             "INDEXER_LAG_WARN_THRESHOLD",
@@ -1360,6 +1411,9 @@ impl Config {
             rate_limit_key_per_minute,
             rate_limit_key_per_hour,
             rate_limit_key_per_day,
+            rate_limit_key_per_month,
+            ip_denylist,
+            ip_allowlist,
             indexer_lag_warn_threshold,
             indexer_stall_timeout_secs,
             db_statement_timeout_ms,
@@ -1679,6 +1733,18 @@ impl Config {
             enable_push_preload: env_or_file("ENABLE_PUSH_PRELOAD", &file)
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
                 .unwrap_or(false),
+            serve_dashboard: env_or_file("SERVE_DASHBOARD", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+                .unwrap_or(false),
+            dashboard_dir: env_or_file_or("DASHBOARD_DIR", &file, "web/dist"),
+            dashboard_connect_src: env_or_file("DASHBOARD_CONNECT_SRC", &file)
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             // Issue #705: Kafka event publishing
             kafka_brokers: env_or_file("KAFKA_BROKERS", &file),
             kafka_topic: env_or_file("KAFKA_TOPIC", &file),

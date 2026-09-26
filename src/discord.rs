@@ -5,7 +5,10 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{metrics, models::SorobanEvent};
+use crate::{
+    metrics,
+    models::{Event, EventType},
+};
 
 /// Discord webhook configuration
 #[derive(Debug, Clone)]
@@ -13,6 +16,13 @@ pub struct DiscordConfig {
     pub webhook_url: String,
     pub bot_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Bot token for the Discord Bot API (channel messages, role mentions).
+    /// Webhooks alone can't mention roles by ID reliably across guilds
+    /// without the bot's `MENTION_EVERYONE`/allowed_mentions permission
+    /// context, so role mentions go through this instead of the webhook URL.
+    pub bot_token: Option<String>,
+    /// Discord channel/guild-text-channel ID, required for bot-API sends.
+    pub channel_id: Option<String>,
 }
 
 /// Discord API client for webhook-based notifications
@@ -21,6 +31,23 @@ pub struct DiscordClient {
     webhook_url: String,
     bot_name: Option<String>,
     avatar_url: Option<String>,
+    bot_token: Option<String>,
+    channel_id: Option<String>,
+}
+
+/// Prefixes `content` with `<@&role_id>` mentions for each of `role_ids`,
+/// space-joined. Pulled out of `send_message_with_role_mentions` so the
+/// formatting is independently testable without a live HTTP call.
+fn prefix_with_role_mentions(content: &str, role_ids: &[&str]) -> String {
+    if role_ids.is_empty() {
+        return content.to_string();
+    }
+    let mention_text = role_ids
+        .iter()
+        .map(|role| format!("<@&{}>", role))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{} {}", mention_text, content)
 }
 
 impl DiscordClient {
@@ -35,20 +62,24 @@ impl DiscordClient {
             webhook_url: config.webhook_url,
             bot_name: config.bot_name,
             avatar_url: config.avatar_url,
+            bot_token: config.bot_token,
+            channel_id: config.channel_id,
         }
     }
 
-    /// Send a formatted message to Discord using embeds
+    /// Send a formatted message to Discord using embeds. `thread_id`, when
+    /// set, posts into an existing thread — passed as the `thread_id` query
+    /// parameter on the webhook execute URL, per Discord's webhook API
+    /// (NOT a JSON body field, which Discord silently ignores).
     pub async fn send_event_notification(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
         thread_id: Option<String>,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let color = match event.event_type.as_str() {
-            "contract" => 3447003, // Blue
-            "diagnostic" => 10181046, // Orange
-            "system" => 15158332, // Red
-            _ => 9807270, // Gray
+        let color = match event.event_type {
+            EventType::Contract => 3447003,   // Blue
+            EventType::Diagnostic => 10181046, // Orange
+            EventType::System => 15158332,     // Red
         };
 
         let mut embed = json!({
@@ -83,7 +114,7 @@ impl DiscordClient {
         });
 
         // Add event data as a code block if available
-        if !event.event_data.is_empty() {
+        if !event.event_data.is_null() {
             if let Ok(data_str) = serde_json::to_string_pretty(&event.event_data) {
                 embed["fields"].as_array_mut().map(|fields| {
                     fields.push(json!({
@@ -107,23 +138,22 @@ impl DiscordClient {
             payload["avatar_url"] = json!(avatar);
         }
 
-        // Add thread ID if specified
-        if let Some(thread) = thread_id {
-            payload["thread_id"] = json!(thread);
+        // Discord posts into a thread via a `?thread_id=` query parameter on
+        // the webhook execute URL, not a JSON body field (the body field is
+        // silently ignored by Discord's API).
+        let mut request = self.client.post(&self.webhook_url);
+        if let Some(thread) = &thread_id {
+            request = request.query(&[("thread_id", thread.as_str())]);
         }
 
-        let response = self
-            .client
-            .post(&self.webhook_url)
-            .json(&payload)
-            .send()
-            .await?;
+        let response = request.json(&payload).send().await?;
 
         if response.status().is_success() {
             let message_id = Uuid::new_v4().to_string();
             info!(
                 webhook_url = %self.webhook_url,
                 message_id = %message_id,
+                thread_id = ?thread_id,
                 contract_id = %event.contract_id,
                 "Discord notification sent"
             );
@@ -142,7 +172,7 @@ impl DiscordClient {
 
     /// Send a simple text message to Discord
     pub async fn send_message(&self, content: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let payload = json!({
+        let mut payload = json!({
             "content": content
         });
 
@@ -177,10 +207,55 @@ impl DiscordClient {
         }
     }
 
+    /// Send a message via the Discord Bot API (not a webhook), with role
+    /// mentions. Requires `bot_token` and `channel_id` to be configured.
+    pub async fn send_message_with_role_mentions(
+        &self,
+        content: &str,
+        role_ids: Vec<&str>,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let bot_token = self.bot_token.as_ref().ok_or("No bot token configured")?;
+        let channel_id = self.channel_id.as_ref().ok_or("No channel ID configured")?;
+
+        let text = prefix_with_role_mentions(content, &role_ids);
+
+        // Discord requires roles to be explicitly whitelisted in
+        // `allowed_mentions` — a bare `<@&id>` in `content` alone is not
+        // pinged unless the role ID is also listed here.
+        let payload = json!({
+            "content": text,
+            "allowed_mentions": { "roles": role_ids }
+        });
+
+        let response = self
+            .client
+            .post(format!("https://discord.com/api/v10/channels/{}/messages", channel_id))
+            .header("Authorization", format!("Bot {}", bot_token))
+            .json(&payload)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let body: Value = response.json().await?;
+            let message_id = body
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or("No message id in response")?;
+
+            info!(channel_id = %channel_id, message_id = %message_id, "Discord message sent via bot with role mentions");
+            Ok(message_id)
+        } else {
+            let error_body = response.text().await.unwrap_or_default();
+            error!(status = %response.status(), body = %error_body, "Failed to send Discord bot message");
+            Err(format!("Discord API error: {}", error_body).into())
+        }
+    }
+
     /// Send event to Discord with retry logic
     pub async fn send_with_retry(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
         max_retries: u32,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut backoff_ms = 1000u64;
@@ -225,7 +300,7 @@ impl DiscordClient {
 /// Deliver an event to Discord with retry logic
 pub async fn deliver_discord(
     client: &DiscordClient,
-    event: SorobanEvent,
+    event: Event,
 ) {
     if let Err(e) = client.send_with_retry(&event, 3).await {
         error!(
@@ -247,6 +322,8 @@ mod tests {
             webhook_url: "https://discord.com/api/webhooks/test".to_string(),
             bot_name: Some("Soroban Bot".to_string()),
             avatar_url: Some("https://example.com/avatar.png".to_string()),
+            bot_token: None,
+            channel_id: None,
         };
 
         let client = DiscordClient::new(config);
@@ -260,9 +337,32 @@ mod tests {
             webhook_url: "https://discord.com/api/webhooks/test".to_string(),
             bot_name: None,
             avatar_url: None,
+            bot_token: None,
+            channel_id: None,
         };
 
         assert_eq!(config.webhook_url, "https://discord.com/api/webhooks/test");
         assert!(config.bot_name.is_none());
+    }
+
+    #[test]
+    fn test_prefix_with_role_mentions_no_roles() {
+        assert_eq!(prefix_with_role_mentions("Deploy complete", &[]), "Deploy complete");
+    }
+
+    #[test]
+    fn test_prefix_with_role_mentions_single_role() {
+        assert_eq!(
+            prefix_with_role_mentions("Deploy complete", &["123456"]),
+            "<@&123456> Deploy complete"
+        );
+    }
+
+    #[test]
+    fn test_prefix_with_role_mentions_multiple_roles() {
+        assert_eq!(
+            prefix_with_role_mentions("Incident opened", &["111", "222"]),
+            "<@&111> <@&222> Incident opened"
+        );
     }
 }

@@ -1,0 +1,42 @@
+{
+  "name": "@soroban-pulse/feed-widget",
+  "version": "0.1.0",
+  "description": "Drop-in <soroban-pulse-feed> web component showing recent (and live) events for a Soroban contract.",
+  "type": "module",
+  "license": "MIT",
+  "author": "SorobanPulse Team",
+  "homepage": "https://github.com/Soroban-Pulse/SorobanPulse/tree/main/packages/feed-widget#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Soroban-Pulse/SorobanPulse.git",
+    "directory": "packages/feed-widget"
+  },
+  "bugs": "https://github.com/Soroban-Pulse/SorobanPulse/issues",
+  "keywords": ["soroban", "stellar", "web-component", "custom-element", "events", "widget"],
+  "main": "./dist/feed-widget.js",
+  "module": "./dist/feed-widget.js",
+  "types": "./dist/feed-widget.d.ts",
+  "unpkg": "./dist/feed-widget.iife.js",
+  "jsdelivr": "./dist/feed-widget.iife.js",
+  "exports": {
+    ".": {
+      "types": "./dist/feed-widget.d.ts",
+      "import": "./dist/feed-widget.js"
+    },
+    "./iife": "./dist/feed-widget.iife.js",
+    "./package.json": "./package.json"
+  },
+  "sideEffects": true,
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "node build.mjs",
+    "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

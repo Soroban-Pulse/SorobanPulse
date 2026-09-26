@@ -6,7 +6,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-use crate::{metrics, models::SorobanEvent};
+use crate::{metrics, models::Event};
 
 /// Telegram Bot configuration
 #[derive(Debug, Clone)]
@@ -41,7 +41,7 @@ impl TelegramClient {
     /// Send a formatted message to Telegram
     pub async fn send_event_notification(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let message = format!(
             "🔔 *Soroban Event Notification*\n\n\
@@ -275,7 +275,7 @@ impl TelegramClient {
     /// Send event to Telegram with retry logic
     pub async fn send_with_retry(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
         max_retries: u32,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut backoff_ms = 1000u64;
@@ -309,7 +309,7 @@ impl TelegramClient {
 /// Deliver an event to Telegram with retry logic
 pub async fn deliver_telegram(
     client: &TelegramClient,
-    event: SorobanEvent,
+    event: Event,
 ) {
     if let Err(e) = client.send_with_retry(&event, 3).await {
         error!(

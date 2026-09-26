@@ -5,6 +5,8 @@ A "start here" guide that ties together the setup instructions in the
 the [Architecture Guide](architecture.md) into one path for a new contributor's
 first day.
 
+For deeper environment configuration beyond this day-1 checklist — OS-specific setup, IDE/editor configuration, debugging tools, and performance profiling — see [Development Environment Setup](development-setup.md).
+
 ## Before you start
 
 - **Rust** (stable toolchain — this project does not pin a specific version via

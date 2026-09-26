@@ -8,3 +8,7 @@ data:
   {{- range $key, $value := .Values.env }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
+  SERVE_DASHBOARD: {{ .Values.dashboard.enabled | toString | quote }}
+  {{- with .Values.dashboard.connectSrc }}
+  DASHBOARD_CONNECT_SRC: {{ join "," . | quote }}
+  {{- end }}

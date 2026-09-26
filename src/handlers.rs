@@ -790,7 +790,14 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         "indexer_status": indexer_status,
         "indexer_mode": indexer_mode,
         "indexer_paused": indexer_paused,
+        "rpc_version": crate::rpc_meta::current_version(),
+        "gaps": crate::rpc_meta::list_gaps(&state.pool).await,
     }))
+}
+
+/// GET /v1/admin/indexer/gaps
+pub async fn get_indexer_gaps(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "gaps": crate::rpc_meta::list_gaps(&state.pool).await }))
 }
 
 /// Returns aggregate statistics about indexed events.
@@ -1985,7 +1992,7 @@ fn accepts_ndjson(headers: &axum::http::HeaderMap) -> bool {
 }
 
 /// Extract client IP from X-Forwarded-For or X-Real-IP headers, falling back to "unknown".
-fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -2166,6 +2173,7 @@ pub async fn get_events(
     let sort_col = sort_by.as_sql_col();
 
     // Cursor-based path
+    crate::metrics::record_pagination_strategy(params.cursor.is_some());
     if let Some(ref cursor_str) = params.cursor {
         let (cursor_tag, cursor_val_text, cursor_id) = decode_cursor_tagged(cursor_str)?;
         if cursor_tag != sort_by.as_tag() {
@@ -11477,9 +11485,13 @@ pub async fn create_notification_channel(
     if req.name.trim().is_empty() {
         return Err(AppError::Validation("name is required".to_string()));
     }
-    if !matches!(req.channel_type.as_str(), "webhook" | "email" | "sms") {
+    if !matches!(
+        req.channel_type.as_str(),
+        "webhook" | "email" | "sms" | "slack" | "discord" | "telegram" | "pagerduty" | "github"
+    ) {
         return Err(AppError::Validation(
-            "channel_type must be one of: webhook, email, sms".to_string(),
+            "channel_type must be one of: webhook, email, sms, slack, discord, telegram, pagerduty, github"
+                .to_string(),
         ));
     }
 
@@ -15103,6 +15115,7 @@ pub async fn get_rate_limit_status(
         state.config.rate_limit_key_per_minute,
         state.config.rate_limit_key_per_hour,
         state.config.rate_limit_key_per_day,
+        state.config.rate_limit_key_per_month,
     );
 
     // Get status (no counter increment)
@@ -15244,3 +15257,255 @@ pub async fn cleanup_export_files(
         "removed_jobs": removed,
     })))
 }
+
+/// Get cross-chain trace for a transaction
+/// Issue #682: Implement cross-chain event correlation
+#[utoipa::path(
+    get,
+    path = "/v1/cross-chain/trace/{tx_hash}",
+    tag = "cross-chain",
+    params(
+        ("tx_hash" = String, Path, description = "Transaction hash to trace")
+    ),
+    responses(
+        (status = 200, description = "Cross-chain trace", body = serde_json::Value),
+        (status = 404, description = "No trace found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_cross_chain_trace(
+    State(state): State<AppState>,
+    Path(tx_hash): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    // Query all events related to this transaction
+    let events = sqlx::query_as::<_, (String, String, String, String, String, i32, String)>(
+        "SELECT id, contract_id, event_type, tx_hash, topic, ledger, ledger_close_time FROM events WHERE tx_hash = $1 ORDER BY ledger"
+    )
+    .bind(&tx_hash)
+    .fetch_all(&state.read_pool)
+    .await
+    .map_err(|_| AppError::NotFound)?;
+
+    if events.is_empty() {
+        return Err(AppError::NotFound);
+    }
+
+    // Build cross-chain trace
+    let root_tx = crate::cross_chain_correlation::TransactionId::new("soroban-mainnet", tx_hash.clone());
+    let mut builder = crate::cross_chain_correlation::CrossChainTraceBuilder::new(root_tx);
+
+    for (event_id, contract_id, event_type, _, _, ledger, ledger_close_time) in events {
+        let trace_event = crate::cross_chain_correlation::TraceEvent {
+            event_id,
+            chain: "soroban-mainnet".to_string(),
+            contract_id,
+            event_type,
+            tx_hash: tx_hash.clone(),
+            ledger: ledger as u64,
+            ledger_close_time: ledger_close_time.parse().unwrap_or_else(|_| chrono::Utc::now()),
+            depth: 0,
+            confidence: 1.0,
+        };
+        builder = builder.add_event(trace_event);
+    }
+
+    let trace = builder.build().ok_or(AppError::NotFound)?;
+
+    Ok(Json(json!({
+        "id": trace.id,
+        "root_transaction": {
+            "chain": trace.root_transaction.chain,
+            "tx_hash": trace.root_transaction.tx_hash
+        },
+        "events_count": trace.events.len(),
+        "correlations_count": trace.correlations.len(),
+        "chain_sequence": trace.chain_sequence,
+        "overall_confidence": trace.overall_confidence,
+        "created_at": trace.created_at,
+        "events": trace.events.iter().map(|e| json!({
+            "event_id": e.event_id,
+            "chain": e.chain,
+            "contract_id": e.contract_id,
+            "event_type": e.event_type,
+            "ledger": e.ledger,
+            "confidence": e.confidence
+        })).collect::<Vec<_>>()
+    })))
+}
+
+/// Get causality analysis between two events
+/// Issue #682: Implement cross-chain event correlation
+#[utoipa::path(
+    get,
+    path = "/v1/cross-chain/causality",
+    tag = "cross-chain",
+    params(
+        ("event1" = String, Query, description = "First event ID"),
+        ("event2" = String, Query, description = "Second event ID")
+    ),
+    responses(
+        (status = 200, description = "Causality analysis", body = serde_json::Value),
+        (status = 400, description = "Bad request"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn analyze_causality(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, AppError> {
+    let event1_id = params.get("event1")
+        .ok_or(AppError::BadRequest("event1 parameter required".to_string()))?;
+    let event2_id = params.get("event2")
+        .ok_or(AppError::BadRequest("event2 parameter required".to_string()))?;
+
+    // Fetch both events
+    let event1 = sqlx::query_as::<_, (String, String, String, String, i32, String)>(
+        "SELECT id, contract_id, event_type, tx_hash, ledger, ledger_close_time FROM events WHERE id = $1"
+    )
+    .bind(event1_id)
+    .fetch_optional(&state.read_pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let event2 = sqlx::query_as::<_, (String, String, String, String, i32, String)>(
+        "SELECT id, contract_id, event_type, tx_hash, ledger, ledger_close_time FROM events WHERE id = $1"
+    )
+    .bind(event2_id)
+    .fetch_optional(&state.read_pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let engine = crate::cross_chain_correlation::CorrelationEngine::new();
+
+    let trace1 = crate::cross_chain_correlation::TraceEvent {
+        event_id: event1.0,
+        chain: "soroban-mainnet".to_string(),
+        contract_id: event1.1,
+        event_type: event1.2,
+        tx_hash: event1.3,
+        ledger: event1.4 as u64,
+        ledger_close_time: event1.5.parse().unwrap_or_else(|_| chrono::Utc::now()),
+        depth: 0,
+        confidence: 1.0,
+    };
+
+    let trace2 = crate::cross_chain_correlation::TraceEvent {
+        event_id: event2.0,
+        chain: "soroban-mainnet".to_string(),
+        contract_id: event2.1,
+        event_type: event2.2,
+        tx_hash: event2.3,
+        ledger: event2.4 as u64,
+        ledger_close_time: event2.5.parse().unwrap_or_else(|_| chrono::Utc::now()),
+        depth: 1,
+        confidence: 1.0,
+    };
+
+    let similarity = engine.calculate_similarity(&trace1, &trace2);
+    let causality = engine.detect_causality(&trace1, &trace2);
+
+    Ok(Json(json!({
+        "event1_id": event1_id,
+        "event2_id": event2_id,
+        "similarity_score": similarity,
+        "causality": causality.map(|c| format!("{:?}", c)),
+        "related": causality.is_some()
+    })))
+}
+++ b/src/main.rs
+mod cross_chain_correlation;
+#[utoipa::path(
+    get,
+    path = "/v1/features",
+    tag = "system",
+    params(
+        ("flag_name" = String, Query, description = "Feature flag name (required)"),
+        ("contract_id" = String, Query, description = "Contract ID for targeting (optional)"),
+        ("user_id" = String, Query, description = "User ID for targeting (optional)"),
+        ("ip_address" = String, Query, description = "IP address for targeting (optional)"),
+        ("region" = String, Query, description = "Region for targeting (optional)"),
+    ),
+    responses(
+        (status = 200, description = "Feature flag status"),
+        (status = 400, description = "Missing required parameters"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn get_feature_flag_status(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    let flag_name = params
+        .get("flag_name")
+        .ok_or_else(|| AppError::BadRequest("Missing required parameter: flag_name".to_string()))?
+        .clone();
+
+    let context = crate::feature_flags::FeatureFlagContext {
+        contract_id: params.get("contract_id").cloned(),
+        user_id: params.get("user_id").cloned(),
+        ip_address: params.get("ip_address").cloned(),
+        region: params.get("region").cloned(),
+    };
+
+    let enabled = crate::feature_flags::is_feature_enabled(&state.pool, &flag_name, &context)
+        .await
+        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
+
+    Ok(Json(json!({
+        "flag_name": flag_name,
+        "enabled": enabled,
+        "context": {
+            "contract_id": context.contract_id,
+            "user_id": context.user_id,
+            "ip_address": context.ip_address,
+            "region": context.region,
+        }
+    })))
+}
+++ b/src/metrics.rs
+// ── Issue #630: Resource utilization metrics ────────────────────────────────
+
+/// Update file descriptor count gauge
+pub fn update_fd_count(count: u64) {
+    m::gauge!("soroban_pulse_fd_count").set(count as f64);
+}
+
+/// Update disk I/O read bytes gauge
+pub fn update_disk_read_bytes(bytes: u64) {
+/// Webhook that receives email bounce notifications from SendGrid, AWS SES
+/// (including SNS-wrapped notifications) and Mailgun (Issue #484). Bounced
+/// addresses are persisted so future notifications skip them.
+#[utoipa::path(
+    post,
+    path = "/v1/notifications/email/bounce",
+    tag = "system",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Bounce payload processed", body = serde_json::Value),
+    )
+)]
+pub async fn email_bounce_webhook(
+    State(state): State<AppState>,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    let recipients = crate::email::extract_bounced_recipients(&payload);
+    let mut recorded = 0usize;
+    for recipient in &recipients {
+        match crate::email::record_bounce(&state.pool, recipient).await {
+            Ok(()) => {
+                crate::metrics::record_email_bounce();
+                recorded += 1;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, email = %recipient.email, "Failed to record email bounce");
+            }
+        }
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "received": recipients.len(), "recorded": recorded })),
+    )
+}
+

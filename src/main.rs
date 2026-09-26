@@ -1,12 +1,16 @@
 mod audit_logging;
 mod bloom_filter;
 mod compliance_report;
+mod compression_config;
 mod config;
+mod dashboard;
+mod config_validation;
 mod content_filter;
 mod cross_chain_correlation;
 mod cursor_expiry_handler;
 mod db;
 mod advisory_lock;
+mod query_streaming;
 mod serialization_cache;
 mod streaming_response;
 mod dedup;
@@ -17,6 +21,8 @@ mod error;
 mod event_hubs;
 mod graceful_shutdown;
 mod handlers;
+mod idempotency;
+mod log_analysis_tool;
 mod index_monitor;
 mod indexer;
 mod kafka;
@@ -24,48 +30,20 @@ mod kinesis;
 #[cfg(feature = "lua")]
 mod lua_transform;
 mod metrics;
+mod prometheus_remote_write;
+mod eventbridge;
 mod middleware;
 mod models;
 mod normalizer;
 mod notification_dedup;
 
+use soroban_pulse::{audit_logging, bloom_filter, compliance_report, compression_config, config, config_validation, content_filter, cross_chain_correlation, cursor_expiry_handler, db, advisory_lock, query_streaming, serialization_cache, streaming_response, dedup, distributed_tracing, email, encryption, error, event_hubs, graceful_shutdown, handlers, idempotency, log_analysis_tool, index_monitor, indexer, kafka, kinesis, metrics, prometheus_remote_write, eventbridge, middleware, models, normalizer, notification_dedup, warehouse, pruner, pubsub, queue_publisher, rate_limiter, reencrypt, resource_metrics, routes, rpc_client, schema_validator, sqs, stats_refresh, subscriptions, webhook, webhook_verification, notification_rate_limit, notification_formatter, pagerduty, github, discord, slack, teams, telegram, notification_channel, notification_delivery, integration_handlers, retry_policy, sms, aggregation, saved_queries, abi, oncall, xdr_validation, replica_monitor, feature_flags, event_dedup_replicas, bulk_export, sse_ring_buffer, query_cache, query_plan_cache, query_optimizer, partition_manager, query_builder, adaptive_pool, notification_admin, financial_accuracy, webhook_template, event_aggregation, anomaly_detection, push_notification, connection_pool, slo_tracker, anonymization, event_compression, health_check, ledger_hashes, networks, zero_trust, pool_management, push_preload, statistics_management, cloud_provider, cloud_replication, deployment_orchestrator};
+#[cfg(feature = "lua")]
+use soroban_pulse::lua_transform;
 #[cfg(feature = "parquet")]
-mod parquet_export;
-
-mod pruner;
-mod pubsub;
-mod queue_publisher;
-mod rate_limiter;
-mod reencrypt;
-mod resource_metrics;
-mod routes;
-mod rpc_client;
-mod schema_validator;
-mod sqs;
-mod stats_refresh;
-mod subscriptions;
-mod webhook;
-mod webhook_verification;
-mod notification_rate_limit;
-mod notification_formatter;
-mod pagerduty;
-mod github;
-mod discord;
-mod slack;
-mod telegram;
-mod notification_channel;
-mod integration_handlers;
-mod retry_policy;
-mod sms;
-mod aggregation;
-mod saved_queries;
-mod abi;
-mod oncall;
-mod xdr_validation;
-mod replica_monitor;
-mod feature_flags;
+use soroban_pulse::parquet_export;
 #[cfg(feature = "graphql")]
-mod graphql;
+use soroban_pulse::graphql;
 #[cfg(feature = "graphql")]
 mod graphql_subscriptions;
 mod event_dedup_replicas;
@@ -87,7 +65,6 @@ mod event_aggregation;
 mod anomaly_detection;
 mod push_notification;
 mod connection_pool;
-mod adaptive_pool;
 mod slo_tracker;
 mod anonymization;
 mod event_compression;
@@ -95,12 +72,10 @@ mod health_check;
 mod ledger_hashes;
 mod networks;
 
+#[cfg(feature = "graphql")]
+use soroban_pulse::graphql_subscriptions;
 #[cfg(feature = "archive")]
-mod archiver;
-
-mod cloud_provider;
-mod cloud_replication;
-mod deployment_orchestrator;
+use soroban_pulse::archiver;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -157,6 +132,19 @@ async fn main() -> anyhow::Result<()> {
     metrics::spawn_memory_collector();
 
     let config = config::Config::from_env();
+
+    // Issue #997: Validate the fully-loaded configuration before doing anything else.
+    {
+        let report = config_validation::validate(&config);
+        report.log();
+        if !report.is_ok() {
+            eprintln!(
+                "Configuration validation failed with {} error(s) — aborting startup.",
+                report.errors.len()
+            );
+            std::process::exit(1);
+        }
+    }
 
     info!(
         rpc_url = %config.stellar_rpc_url,
@@ -435,6 +423,12 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(subscriptions::run_email_delivery_worker(email_pool));
     }
 
+    // Issue #1057: Auto-fetch contract specs (gated by AUTO_FETCH_CONTRACT_SPECS).
+    tokio::spawn(soroban_pulse::contract_specs::run_worker(pool.clone(), config.stellar_rpc_url.clone()));
+
+    // Issue #1058: Track contract WASM versions and emit contract_upgraded events.
+    tokio::spawn(soroban_pulse::contract_versions::run_worker(pool.clone(), config.stellar_rpc_url.clone(), event_tx.clone()));
+
     // Issue #620: Spawn push notification delivery worker.
     {
         let push_pool = pool.clone();
@@ -566,7 +560,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "kafka")]
     if let (Some(brokers), Some(topic)) = (&config.kafka_brokers, &config.kafka_topic) {
-        match crate::kafka::RdKafkaProducer::new(
+        match soroban_pulse::kafka::RdKafkaProducer::new(
             brokers,
             config.kafka_batch_size,
             config.kafka_linger_ms,

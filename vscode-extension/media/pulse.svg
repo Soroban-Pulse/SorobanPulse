@@ -1,3 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+  <ellipse cx="12" cy="12" rx="9.5" ry="4" transform="rotate(-24 12 12)" stroke-width="1" stroke-opacity="0.6"/>
+  <polyline points="2 12.75 7 12.75 9 7.5 12 17.5 14.25 10.25 15.75 12.75 22 12.75" stroke-width="2"/>
+  <circle cx="19.5" cy="6" r="1.4" fill="currentColor" stroke="none"/>
 </svg>

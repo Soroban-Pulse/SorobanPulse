@@ -3,6 +3,7 @@ import * as https from 'https';
 import * as http from 'http';
 import { URL } from 'url';
 import { ApiEndpoint, RequestConfig, ResponseData, WebviewMessage } from './types';
+import { getApiKey, getAdminApiKey } from './apiKeyManager';
 
 // ---------------------------------------------------------------------------
 // Panel manager — single reusable panel instance
@@ -14,9 +15,11 @@ export class RequestTesterPanel {
 
     private readonly _panel: vscode.WebviewPanel;
     private readonly _extensionUri: vscode.Uri;
+    private readonly _context: vscode.ExtensionContext;
     private _disposables: vscode.Disposable[] = [];
 
-    static open(extensionUri: vscode.Uri, endpoint?: ApiEndpoint): void {
+    static open(context: vscode.ExtensionContext, endpoint?: ApiEndpoint): void {
+        const extensionUri = context.extensionUri;
         const column = vscode.window.activeTextEditor?.viewColumn ?? vscode.ViewColumn.One;
 
         if (RequestTesterPanel.currentPanel) {
@@ -38,16 +41,17 @@ export class RequestTesterPanel {
             }
         );
 
-        RequestTesterPanel.currentPanel = new RequestTesterPanel(panel, extensionUri, endpoint);
+        RequestTesterPanel.currentPanel = new RequestTesterPanel(panel, context, endpoint);
     }
 
     private constructor(
         panel: vscode.WebviewPanel,
-        extensionUri: vscode.Uri,
+        context: vscode.ExtensionContext,
         endpoint?: ApiEndpoint
     ) {
         this._panel = panel;
-        this._extensionUri = extensionUri;
+        this._extensionUri = context.extensionUri;
+        this._context = context;
 
         this._panel.webview.html = this._buildHtml();
 
@@ -67,11 +71,15 @@ export class RequestTesterPanel {
         }
     }
 
-    private _loadEndpoint(endpoint: ApiEndpoint): void {
+    private async _loadEndpoint(endpoint: ApiEndpoint): Promise<void> {
         const config = vscode.workspace.getConfiguration('sorobanpulse');
         const baseUrl = config.get<string>('baseUrl', 'http://localhost:3000');
-        const apiKey = config.get<string>('apiKey', '');
-        const adminApiKey = config.get<string>('adminApiKey', '');
+        // Issue #963: prefer keys saved via "Soroban Pulse: Set API Key"
+        // (SecretStorage) over the plaintext setting.
+        const [apiKey, adminApiKey] = await Promise.all([
+            getApiKey(this._context),
+            getAdminApiKey(this._context),
+        ]);
 
         this._panel.webview.postMessage({
             type: 'loadEndpoint',
@@ -217,7 +225,7 @@ export class RequestTesterPanel {
 // HTTP client (Node built-ins only — no external deps)
 // ---------------------------------------------------------------------------
 
-function makeRequest(config: RequestConfig, timeoutMs: number): Promise<ResponseData> {
+export function makeRequest(config: RequestConfig, timeoutMs: number): Promise<ResponseData> {
     return new Promise((resolve, reject) => {
         let url: URL;
         try {

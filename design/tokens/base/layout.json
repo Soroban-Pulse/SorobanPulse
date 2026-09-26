@@ -1,0 +1,38 @@
+{
+  "space": {
+    "0": { "value": "0" },
+    "0-5": { "value": "0.125rem", "comment": "2px" },
+    "1": { "value": "0.25rem", "comment": "4px" },
+    "2": { "value": "0.5rem", "comment": "8px" },
+    "3": { "value": "0.75rem", "comment": "12px" },
+    "4": { "value": "1rem", "comment": "16px" },
+    "5": { "value": "1.25rem", "comment": "20px" },
+    "6": { "value": "1.5rem", "comment": "24px" },
+    "8": { "value": "2rem", "comment": "32px" },
+    "10": { "value": "2.5rem", "comment": "40px" },
+    "12": { "value": "3rem", "comment": "48px" },
+    "16": { "value": "4rem", "comment": "64px" }
+  },
+  "radius": {
+    "none": { "value": "0" },
+    "sm": { "value": "4px", "comment": "Badges, checkboxes, inline code" },
+    "md": { "value": "6px", "comment": "Buttons, inputs, selects" },
+    "lg": { "value": "10px", "comment": "Cards, toasts, code blocks" },
+    "xl": { "value": "16px", "comment": "Drawers, modals" },
+    "full": { "value": "9999px", "comment": "Pills, avatars, status dots" }
+  },
+  "size": {
+    "control": {
+      "sm": { "value": "1.75rem", "comment": "28px" },
+      "md": { "value": "2.25rem", "comment": "36px" },
+      "lg": { "value": "2.75rem", "comment": "44px — minimum touch target" }
+    },
+    "drawer": { "value": "32rem" },
+    "content-max": { "value": "80rem" }
+  },
+  "z": {
+    "sticky": { "value": "10" },
+    "drawer": { "value": "40" },
+    "toast": { "value": "50" }
+  }
+}

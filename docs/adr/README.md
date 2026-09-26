@@ -7,8 +7,13 @@ Architecture Decision Records (ADRs) capture decisions that affect SorobanPulse�
 | ADR | Decision | Status |
 |---|---|---|
 | [0001 — ADR system](0001-adr-system.md) | Use numbered Markdown ADRs as the canonical decision log | Accepted |
+| [0002 — Multi-replica indexing](0002-multi-replica-indexing.md) | Single-writer indexing with monitored, optionally cross-region read replicas | Accepted |
+| [0003 — Webhook retry strategy](0003-webhook-retry-strategy.md) | Layered retry policy, per-endpoint backoff, and circuit breaking for webhook delivery | Accepted |
+| [0004 — Event compression](0004-event-compression.md) | Optional application-level gzip compression for stored event data | Accepted |
 
 New decisions must be added to this table and linked from the relevant code or documentation. Use the next available four-digit number; never renumber an existing ADR.
+
+Regenerate a status overview of all ADRs (title, status, date) at any time with `scripts/adr-summary.sh`.
 
 ## When to write an ADR
 
@@ -33,6 +38,8 @@ An ADR begins as **Proposed**, becomes **Accepted** after the maintainers approv
 - Security, reliability, cost, and operational consequences are explicit.
 - Public ABI, storage, migration, and rollback impacts are identified.
 - The record links to the current implementation and runbooks.
+
+See [review-guidelines.md](review-guidelines.md) for the full reviewer guide, including examples of vague versus specific decisions, how to handle reviewer disagreement, and when to request splitting an ADR.
 
 ## Naming
 

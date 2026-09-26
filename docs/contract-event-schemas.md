@@ -197,3 +197,13 @@ Use these rules when publishing or validating decoded contract events:
 ## Versioning
 
 The event schema is tied to the Soroban protocol version. Breaking changes are announced in `CHANGELOG.md` and the `schema_version` column in the database tracks the protocol version in effect when each event was stored.
+
+## SEP-41 token transfers
+
+`GET /v1/tokens/{contract_id}/transfers` returns decoded SEP-41 events
+(`transfer`, `mint`, `burn`, `clawback`, `approve`, `set_admin`,
+`set_authorized`) from the `token_transfers` table. Query parameters: `from`,
+`to`, `min_amount` (exact i128 decimal), `cursor` (`<ledger>:<event_id>` from
+`next_cursor`) and `limit`. Amounts are decimal strings. Unknown events are not
+decoded and remain unchanged in `events`. `POST /v1/admin/token-transfers/backfill`
+decodes already-indexed events.

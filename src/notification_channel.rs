@@ -7,7 +7,7 @@
 /// directly on each client; this trait covers the shared "send an event"
 /// path described in `docs/notification-channels.md`.
 use crate::discord::DiscordClient;
-use crate::models::SorobanEvent;
+use crate::models::Event;
 use crate::telegram::TelegramClient;
 
 #[async_trait::async_trait]
@@ -19,7 +19,7 @@ pub trait NotificationChannel: Send + Sync {
     /// provider-specific message identifier on success.
     async fn send_event_notification(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
 }
 
@@ -31,7 +31,7 @@ impl NotificationChannel for DiscordClient {
 
     async fn send_event_notification(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         DiscordClient::send_event_notification(self, event, None).await
     }
@@ -45,7 +45,7 @@ impl NotificationChannel for TelegramClient {
 
     async fn send_event_notification(
         &self,
-        event: &SorobanEvent,
+        event: &Event,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         TelegramClient::send_event_notification(self, event).await
     }

@@ -120,6 +120,22 @@ extraEnv:
 
 The deployment uses a rolling-update strategy, a non-root runtime security context, a disabled service-account token mount, configurable scheduling constraints, and a configurable ServiceAccount with cloud-identity annotations. Set `serviceAccount.create: false` and provide `serviceAccount.name` when your platform provisions the workload identity externally. Set `existingSecret` in production so credentials come from an external secret manager rather than chart values.
 
+## Web dashboard
+
+The image bundles the web dashboard and serves it at `/ui` on the service port. It is on by default:
+
+| Value | Default | Description |
+|---|---|---|
+| `dashboard.enabled` | `true` | Sets `SERVE_DASHBOARD`. Set `false` to serve the API only. |
+| `dashboard.connectSrc` | `[]` | Extra API origins the dashboard may call (added to its CSP `connect-src`). |
+
+```bash
+helm upgrade --install pulse ./helm/soroban-pulse --set dashboard.enabled=false
+```
+
+The dashboard shell is public (no API key needed to load it). Its data requests go through the normal
+authenticated API, so users enter an API key in the dashboard's **Settings** tab when `API_KEY` is set.
+
 ## Installation
 
 ```bash

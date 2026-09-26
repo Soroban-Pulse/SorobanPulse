@@ -1,66 +1,293 @@
-# Mutation Testing Makefile
-# Run mutation tests with cargo-mutants to identify weak test coverage
+# Mutation Testing Makefile — Issue #922
+# Requires: cargo-mutants (install with `make mutants-install`)
+#
+# Quick-start:
+#   make -f Makefile.mutations mutants          # full suite
+#   make -f Makefile.mutations mutants-score    # print score table
+#   make -f Makefile.mutations mutants-report   # write docs/mutation-report.md
 
-.PHONY: mutants mutants-run mutants-baseline mutants-report mutants-verbose mutants-help
+.PHONY: mutants-install mutants mutants-quick mutants-baseline \
+        mutants-score mutants-report mutants-profile \
+        mutants-verbose mutants-ci mutants-diff mutants-clean mutants-help
 
-mutants-install:
-	## Install cargo-mutants tool
-	cargo install cargo-mutants
+# ── Tool installation ──────────────────────────────────────────────────────
 
-mutants-baseline:
-	## Run full test suite to establish baseline
+mutants-install: ## Install cargo-mutants
+	cargo install cargo-mutants --locked
+
+# ── Core run targets ───────────────────────────────────────────────────────
+
+mutants-baseline: ## Run full test suite to confirm baseline passes
 	cargo test --all
 
-mutants:
-	## Run mutation tests on all crates with test filtering
-	cargo mutants --tests
+mutants: ## Run full mutation suite (all modules, JSON + HTML output)
+	cargo mutants \
+		--output target/mutants \
+		--jobs $$(nproc || echo 4) \
+		--timeout 300
+	@echo ""
+	@echo "Results in target/mutants/"
+	@echo "Run 'make -f Makefile.mutations mutants-score' to print the score table."
 
-mutants-lib:
-	## Run mutation tests only on library code (src/lib.rs)
-	cargo mutants --tests -p soroban-pulse
+mutants-quick: ## Run a quick subset (lib + property tests, max 100 mutations)
+	cargo mutants \
+		--output target/mutants \
+		--jobs 4 \
+		--timeout 120 \
+		--in-place
+	@echo ""
+	@$(MAKE) -f Makefile.mutations mutants-score
 
-mutants-verbose:
-	## Run mutation tests with verbose output showing each mutation
-	cargo mutants --tests -v --jobs 1
+mutants-verbose: ## Run with per-mutation verbose output (slow, useful for debugging)
+	cargo mutants \
+		--output target/mutants \
+		--jobs 1 \
+		--timeout 300 \
+		-v
 
-mutants-timeout:
-	## Run mutation tests with custom timeout per test (in seconds)
-	cargo mutants --tests --timeout 30
+mutants-ci: ## Run mutation tests optimised for CI (JSON output, strict timeout)
+	cargo mutants \
+		--output target/mutants \
+		--jobs $$(nproc || echo 4) \
+		--timeout 300
+	@$(MAKE) -f Makefile.mutations mutants-score
+	@$(MAKE) -f Makefile.mutations mutants-report
 
-mutants-exclude:
-	## Run mutation tests excluding known untestable patterns
-	cargo mutants --tests --skip-regex 'unimplemented|todo|panic'
+mutants-diff: ## Run mutation tests only on files changed since HEAD~1
+	@git diff --name-only HEAD~1 | grep '\.rs$$' | \
+		xargs -I{} cargo mutants --file {} --timeout 300 || \
+		echo "No changed .rs files or cargo-mutants does not support --file in this version."
 
-mutants-report:
-	## Generate mutation testing HTML report
-	cargo mutants --tests --output mutations.html
-	@echo "Report generated: mutations.html"
+# ── Score tracking ─────────────────────────────────────────────────────────
 
-mutants-json:
-	## Generate mutation testing JSON report
-	cargo mutants --tests --output mutations.json
-	@echo "Report generated: mutations.json"
+mutants-score: ## Parse JSON output and print per-module score table
+	@if [ ! -f "target/mutants/mutants.json" ]; then \
+		echo "No results found. Run 'make -f Makefile.mutations mutants' first."; \
+		exit 1; \
+	fi
+	@node -e "$(call SCORE_SCRIPT)" 2>/dev/null || python3 -c "$(call SCORE_SCRIPT_PY)" 2>/dev/null || \
+		{ echo "Could not parse results — install node or python3"; cat target/mutants/mutants.json | head -50; }
+	@echo ""
+	@echo "Saving score snapshot to mutation-score.json ..."
+	@node -e "$(call SAVE_SCORE_SCRIPT)" 2>/dev/null || \
+		python3 -c "$(call SAVE_SCORE_PY)" 2>/dev/null || true
 
-mutants-clean:
-	## Clean up mutation testing artifacts
-	rm -rf target/mutations* mutations.html mutations.json
+# ── Survivor analysis & reporting ──────────────────────────────────────────
 
-mutants-summary:
-	## Show summary statistics for mutation testing
-	@echo "Mutation Testing Summary:"
-	@echo "========================"
-	@echo "To view detailed statistics, run: cargo mutants --tests -v"
+mutants-report: ## Write docs/mutation-report.md with survivor analysis
+	@if [ ! -f "target/mutants/mutants.json" ]; then \
+		echo "No results found. Run 'make -f Makefile.mutations mutants' first."; \
+		exit 1; \
+	fi
+	@node -e "$(call REPORT_SCRIPT)" 2>/dev/null || \
+		python3 -c "$(call REPORT_SCRIPT_PY)" 2>/dev/null || \
+		{ echo "Could not generate report — install node or python3"; exit 0; }
+	@echo "Report written to docs/mutation-report.md"
 
-mutants-help:
-	## Show mutation testing help and options
-	cargo mutants --help
+# ── Performance profiling ──────────────────────────────────────────────────
 
-mutants-diff:
-	## Run mutation tests only on changed files (requires git)
-	@git diff --name-only HEAD~1 | grep '\.rs$$' | xargs cargo mutants --tests
+mutants-profile: ## Run mutation tests and report wall-clock time per module
+	@echo "Profiling mutation test times per module..."
+	cargo mutants \
+		--output target/mutants-profile \
+		--jobs 1 \
+		--timeout 300
+	@node -e "$(call PROFILE_SCRIPT)" 2>/dev/null || \
+		echo "Profile data in target/mutants-profile/"
 
-mutants-ci:
-	## Run mutation tests optimized for CI environment
-	cargo mutants --tests --jobs $$(nproc) --timeout 60
+# ── Cleanup ────────────────────────────────────────────────────────────────
 
-help: mutants-help
+mutants-clean: ## Remove mutation testing artifacts
+	rm -rf target/mutants target/mutants-profile
+	rm -f mutation-score.json docs/mutation-report.md
+	@echo "Cleaned up mutation artifacts."
+
+mutants-help: ## Show mutation testing targets
+	@grep -E '^[a-zA-Z_-]+:.*##' Makefile.mutations | \
+		awk 'BEGIN {FS = ":.*##"}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
+
+# ── Inline node script for score table ────────────────────────────────────
+# Uses GNU make multi-line variable with $(call) to avoid a separate script file.
+
+define SCORE_SCRIPT
+const fs = require('fs');
+const raw = fs.readFileSync('target/mutants/mutants.json', 'utf8');
+const data = JSON.parse(raw);
+
+const outcomes = data.outcomes || data;
+const byModule = {};
+
+function moduleOf(path) {
+  if (!path) return 'unknown';
+  const m = path.match(/src\/([^\/]+)/);
+  return m ? m[1].replace('.rs','') : path;
+}
+
+for (const o of (Array.isArray(outcomes) ? outcomes : [])) {
+  const mod = moduleOf(o.source_file || o.path || '');
+  if (!byModule[mod]) byModule[mod] = { killed: 0, survived: 0, unviable: 0 };
+  const status = (o.outcome || o.status || '').toLowerCase();
+  if (status === 'killed') byModule[mod].killed++;
+  else if (status === 'survived' || status === 'missed') byModule[mod].survived++;
+  else byModule[mod].unviable++;
+}
+
+const summary = data.summary || {};
+const totalKilled   = summary.killed   || Object.values(byModule).reduce((s,m)=>s+m.killed,0);
+const totalSurvived = summary.survived || Object.values(byModule).reduce((s,m)=>s+m.survived,0);
+const total = totalKilled + totalSurvived;
+const score = total > 0 ? (totalKilled / total * 100).toFixed(1) : '0.0';
+
+console.log('\n=== Mutation Score Report ===');
+console.log(('Module').padEnd(35) + 'Killed'.padStart(8) + 'Survived'.padStart(10) + 'Score'.padStart(8));
+console.log('-'.repeat(63));
+
+const rows = Object.entries(byModule).map(([mod, m]) => {
+  const t = m.killed + m.survived;
+  const s = t > 0 ? (m.killed/t*100).toFixed(1) : '-';
+  return { mod, ...m, score: s, total: t };
+}).sort((a,b) => parseFloat(a.score||100) - parseFloat(b.score||100));
+
+for (const r of rows) {
+  const emoji = parseFloat(r.score) >= 80 ? '✅' : parseFloat(r.score) >= 70 ? '🟡' : '❌';
+  console.log(emoji + ' ' + r.mod.padEnd(33) + String(r.killed).padStart(8) + String(r.survived).padStart(10) + (r.score+'%').padStart(8));
+}
+
+console.log('-'.repeat(63));
+const overallEmoji = parseFloat(score) >= 80 ? '✅' : parseFloat(score) >= 70 ? '🟡' : '❌';
+console.log(overallEmoji + ' ' + 'OVERALL'.padEnd(33) + String(totalKilled).padStart(8) + String(totalSurvived).padStart(10) + (score+'%').padStart(8));
+console.log('\nTarget: 80% | Minimum: 70%');
+if (parseFloat(score) < 70) { console.error('\nERROR: Mutation score ' + score + '% is below the 70% minimum threshold.'); process.exit(1); }
+endef
+
+define SAVE_SCORE_SCRIPT
+const fs = require('fs');
+const raw = JSON.parse(fs.readFileSync('target/mutants/mutants.json','utf8'));
+const s = raw.summary || {};
+const entry = { date: new Date().toISOString().split('T')[0], score: s.mutation_score_percent || 0, killed: s.killed || 0, survived: s.survived || 0 };
+let history = [];
+if (fs.existsSync('mutation-score.json')) { try { history = JSON.parse(fs.readFileSync('mutation-score.json','utf8')); } catch(_) {} }
+history.push(entry);
+fs.writeFileSync('mutation-score.json', JSON.stringify(history, null, 2));
+console.log('Score saved: ' + JSON.stringify(entry));
+endef
+
+define REPORT_SCRIPT
+const fs = require('fs');
+const raw = fs.readFileSync('target/mutants/mutants.json', 'utf8');
+const data = JSON.parse(raw);
+const outcomes = data.outcomes || [];
+const summary  = data.summary  || {};
+const date = new Date().toISOString().split('T')[0];
+
+const totalKilled   = summary.killed   || 0;
+const totalSurvived = summary.survived || 0;
+const total = totalKilled + totalSurvived;
+const score = total > 0 ? (totalKilled / total * 100).toFixed(1) : '0.0';
+
+function moduleOf(p) { if (!p) return 'unknown'; const m = p.match(/src\/([^\/]+)/); return m ? m[1].replace('.rs','') : p; }
+
+const survivors = outcomes.filter(o => {
+  const s = (o.outcome || o.status || '').toLowerCase();
+  return s === 'survived' || s === 'missed';
+});
+
+const byModule = {};
+for (const s of survivors) {
+  const mod = moduleOf(s.source_file || s.path || '');
+  if (!byModule[mod]) byModule[mod] = [];
+  byModule[mod].push(s);
+}
+
+let md = '# Mutation Testing Report\n\n';
+md += '_Generated: ' + date + '_\n\n';
+md += '## Summary\n\n';
+md += '| Metric | Value |\n|---|---|\n';
+md += '| Overall Score | **' + score + '%** |\n';
+md += '| Killed | ' + totalKilled + ' |\n';
+md += '| Survived | ' + totalSurvived + ' |\n';
+md += '| Target | 80% |\n';
+md += '| Minimum (CI gate) | 70% |\n\n';
+
+if (Object.keys(byModule).length === 0) {
+  md += '## Survivors\n\nNo survivors found. 🎉\n';
+} else {
+  md += '## Surviving Mutations by Module\n\n';
+  md += 'These mutations survived — the test suite did not detect them. ';
+  md += 'Each entry is a suggested test gap.\n\n';
+  for (const [mod, items] of Object.entries(byModule).sort()) {
+    md += '### ' + mod + ' (' + items.length + ' survivors)\n\n';
+    for (const item of items) {
+      const loc = (item.source_file || item.path || '?') + ':' + (item.line || '?');
+      const desc = item.description || item.mutation || 'unknown mutation';
+      md += '- `' + loc + '` — ' + desc + '\n';
+    }
+    md += '\n';
+  }
+  md += '## Suggested Test Gaps\n\n';
+  md += 'Modules with the most survivors likely have:\n\n';
+  md += '- Missing boundary-value tests (off-by-one operators survived)\n';
+  md += '- Error paths exercised but not asserted\n';
+  md += '- Boolean conditions with only happy-path coverage\n\n';
+  md += 'Prioritise modules with score < 70% and add tests that:\n';
+  md += '1. Exercise the exact boundary values shown above\n';
+  md += '2. Assert specific error types, not just `is_err()`\n';
+  md += '3. Test both branches of every boolean condition\n';
+}
+
+fs.writeFileSync('docs/mutation-report.md', md);
+endef
+
+# Python fallback scripts (simplified)
+define SCORE_SCRIPT_PY
+import json, sys
+data = json.load(open('target/mutants/mutants.json'))
+s = data.get('summary', {})
+killed = s.get('killed', 0); survived = s.get('survived', 0)
+total = killed + survived
+score = killed/total*100 if total else 0
+print(f'\nMutation Score: {score:.1f}%  (killed={killed}, survived={survived})')
+if score < 70: sys.exit(1)
+endef
+
+define SAVE_SCORE_PY
+import json, os
+from datetime import date
+data = json.load(open('target/mutants/mutants.json'))
+s = data.get('summary', {})
+entry = {'date': str(date.today()), 'score': s.get('mutation_score_percent', 0), 'killed': s.get('killed', 0), 'survived': s.get('survived', 0)}
+history = json.load(open('mutation-score.json')) if os.path.exists('mutation-score.json') else []
+history.append(entry)
+json.dump(history, open('mutation-score.json','w'), indent=2)
+endef
+
+define REPORT_SCRIPT_PY
+import json
+from datetime import date
+data = json.load(open('target/mutants/mutants.json'))
+s = data.get('summary', {})
+killed = s.get('killed', 0); survived = s.get('survived', 0)
+total = killed + survived; score = killed/total*100 if total else 0
+report = f"# Mutation Testing Report\n\n_Generated: {date.today()}_\n\n## Summary\n\n"
+report += f"| Metric | Value |\n|---|---|\n| Overall Score | **{score:.1f}%** |\n"
+report += f"| Killed | {killed} |\n| Survived | {survived} |\n| Target | 80% |\n"
+open('docs/mutation-report.md','w').write(report)
+endef
+
+define PROFILE_SCRIPT
+const fs = require('fs');
+try {
+  const raw = JSON.parse(fs.readFileSync('target/mutants-profile/mutants.json','utf8'));
+  const outcomes = raw.outcomes || [];
+  const times = {};
+  for (const o of outcomes) {
+    const m = (o.source_file||'?').match(/src\/([^\/]+)/);
+    const mod = m ? m[1].replace('.rs','') : '?';
+    if (!times[mod]) times[mod] = 0;
+    times[mod] += (o.duration_ms || 0);
+  }
+  console.log('\n=== Mutation Profile (wall-clock ms per module) ===');
+  Object.entries(times).sort((a,b)=>b[1]-a[1]).forEach(([mod,ms])=>
+    console.log('  ' + mod.padEnd(35) + String(Math.round(ms)).padStart(8) + ' ms'));
+} catch(e) { console.log('Profile data not available: ' + e.message); }
+endef

@@ -49,6 +49,33 @@ Our contract tests cover the following SorobanPulse API endpoints:
 | `/webhooks/{id}/test` | POST | Test webhook | Request format, response status |
 | `/health` | GET | Health check | Status response format |
 
+### A second, broader suite: `tests/pact_contract_tests.rs`
+
+`tests/contract_tests.rs` above is the original issue #556 suite. A second,
+more extensive contract suite lives in
+[`tests/pact_contract_tests.rs`](../tests/pact_contract_tests.rs) (21 tests
+across 6 modules) and covers endpoints and response shapes the first suite
+doesn't:
+
+| Module | Coverage |
+|---|---|
+| `events_api_contracts` | `GET /v1/events` (success, filters, streaming), `GET /v1/events/contract/{id}`, `GET /v1/events/tx/{hash}` |
+| `error_response_contracts` | 400, 401, 403, 404, 429, 500, 503 response shapes |
+| `health_check_contracts` | Liveness probe, readiness probe (ready and DB-down states) |
+| `subscription_api_contracts` | Create/list/delete subscriptions |
+| `api_versioning_contracts` | Versioned endpoint paths, deprecation headers |
+| `ndjson_response_contracts` | Streaming NDJSON response format |
+
+Run it the same way as the primary suite:
+
+```bash
+cargo test --test pact_contract_tests
+```
+
+It is not currently wired into `.github/workflows/contract-testing.yml` (only
+`contract_tests` runs there) — see the [Testing Checklist](#testing-checklist)
+below.
+
 ## Running Contract Tests
 
 ### Run all contract tests
@@ -427,7 +454,7 @@ CONFLICT - resource already exists
 
 Before merging API changes:
 
-- [ ] All contract tests pass
+- [ ] All contract tests pass (`cargo test --test contract_tests` and `cargo test --test pact_contract_tests`)
 - [ ] Provider states are documented
 - [ ] Error responses are consistent
 - [ ] Backward compatibility is maintained

@@ -4,6 +4,7 @@
 //! content filter configs, and test suites from name and channel-type inputs.
 
 pub mod filter;
+pub mod openapi;
 pub mod subscription;
 pub mod tests;
 pub mod webhook;

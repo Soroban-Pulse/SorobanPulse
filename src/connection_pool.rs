@@ -1,10 +1,21 @@
 //! Issue #622: Connection pool metrics and auto-scaling logic.
+//! Issue #995: Connection wait-time tracking and dynamic pool sizing.
 //!
 //! Monitors database connection pool utilization and emits alerts when the
 //! pool approaches exhaustion.  Because `sqlx::PgPool` does not support
 //! runtime resizing, auto-scaling is implemented as a recommendation engine:
 //! it tracks peak utilization and logs actionable tuning advice so operators
 //! can adjust `DB_MAX_CONNECTIONS` / `DB_MIN_CONNECTIONS` at next restart.
+//!
+//! # Issue #995 enhancements
+//! - **Connection wait time tracking**: `acquire_tracked_with_wait` records how
+//!   long callers queue for a pool slot (`soroban_pulse_db_pool_wait_seconds`).
+//! - **Queue depth gauge**: sampled every monitor tick so operators can see
+//!   queueing pressure in real time (`soroban_pulse_db_pool_queue_depth`).
+//! - **Wait-timeout counter**: requests that wait >1 s are counted separately
+//!   (`soroban_pulse_db_pool_wait_timeout_total`).
+//! - **Dynamic sizing guidance**: `suggest_pool_size` computes p99-based min/max
+//!   recommendations that appear in the `/v1/admin/pool` response.
 //!
 //! # Metrics emitted
 //! | Name | Kind | Description |
@@ -14,9 +25,12 @@
 //! | `soroban_pulse_db_pool_max_connections` | Gauge | Configured maximum |
 //! | `soroban_pulse_db_pool_acquire_latency_seconds` | Histogram | Time to get a connection |
 //! | `soroban_pulse_db_pool_exhaustion_alerts_total` | Counter | Times util ≥ 90 % |
+//! | `soroban_pulse_db_pool_wait_seconds` | Histogram | Wait time for a pool slot |
+//! | `soroban_pulse_db_pool_wait_timeout_total` | Counter | Waits exceeding 1 s |
+//! | `soroban_pulse_db_pool_queue_depth` | Gauge | Pending acquisition requests |
 
 use sqlx::PgPool;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
@@ -31,6 +45,14 @@ pub struct PoolStats {
     peak_utilization_milli: AtomicU64,
     /// Total number of exhaustion events (util ≥ 90 %).
     exhaustion_event_count: AtomicU64,
+    /// Issue #995: current number of callers waiting for a pool slot.
+    queue_depth: AtomicUsize,
+    /// Issue #995: total number of waits that exceeded 1 s.
+    wait_timeout_count: AtomicU64,
+    /// Issue #995: sum of all wait times in microseconds (for avg calculation).
+    wait_time_sum_us: AtomicU64,
+    /// Issue #995: total number of tracked acquisitions.
+    wait_sample_count: AtomicU64,
 }
 
 impl PoolStats {
@@ -54,6 +76,107 @@ impl PoolStats {
     pub fn exhaustion_events(&self) -> u64 {
         self.exhaustion_event_count.load(Ordering::Relaxed)
     }
+
+    // ── Issue #995: wait-time helpers ─────────────────────────────────────
+
+    /// Increment the queue depth counter (call before waiting for a connection).
+    pub fn enter_queue(&self) {
+        let depth = self.queue_depth.fetch_add(1, Ordering::Relaxed) + 1;
+        metrics::update_pool_queue_depth(depth);
+    }
+
+    /// Decrement the queue depth counter (call after acquiring a connection).
+    pub fn leave_queue(&self) {
+        let depth = self.queue_depth.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+        metrics::update_pool_queue_depth(depth);
+    }
+
+    /// Record a completed acquisition wait with its elapsed duration.
+    pub fn record_wait(&self, elapsed: Duration) {
+        let us = elapsed.as_micros() as u64;
+        self.wait_time_sum_us.fetch_add(us, Ordering::Relaxed);
+        self.wait_sample_count.fetch_add(1, Ordering::Relaxed);
+        if elapsed.as_secs() >= 1 {
+            self.wait_timeout_count.fetch_add(1, Ordering::Relaxed);
+            metrics::record_pool_wait_timeout();
+        }
+        metrics::record_pool_wait_time(elapsed);
+    }
+
+    /// Returns the average connection wait time in milliseconds, or `None` if no
+    /// samples have been collected yet.
+    pub fn avg_wait_ms(&self) -> Option<f64> {
+        let count = self.wait_sample_count.load(Ordering::Relaxed);
+        if count == 0 {
+            return None;
+        }
+        let sum_us = self.wait_time_sum_us.load(Ordering::Relaxed);
+        Some(sum_us as f64 / count as f64 / 1000.0)
+    }
+
+    /// Returns the total number of acquisitions that waited >1 s.
+    pub fn wait_timeout_count(&self) -> u64 {
+        self.wait_timeout_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns the current queue depth (callers waiting for a slot).
+    pub fn queue_depth(&self) -> usize {
+        self.queue_depth.load(Ordering::Relaxed)
+    }
+
+    // ── Issue #995: dynamic sizing recommendation ─────────────────────────
+
+    /// Compute a recommended `(min_connections, max_connections)` pair based on
+    /// observed peak utilization and current pool settings.
+    ///
+    /// Rules:
+    /// - If peak util > 85 %: recommend raising max by 25 % (capped at `ceiling`).
+    /// - If peak util < 20 %: recommend lowering min to half (floor 1).
+    /// - Otherwise: no change needed.
+    pub fn suggest_pool_size(&self, current_max: u32, ceiling: u32) -> PoolSizeSuggestion {
+        let peak = self.peak_utilization();
+        if peak > 0.85 {
+            let suggested_max = ((current_max as f64 * 1.25) as u32).min(ceiling);
+            PoolSizeSuggestion {
+                suggested_max: Some(suggested_max),
+                suggested_min: None,
+                reason: format!(
+                    "Peak utilization {:.0}% exceeds 85% — raise DB_MAX_CONNECTIONS to {suggested_max}",
+                    peak * 100.0
+                ),
+            }
+        } else if peak < 0.20 && current_max > 2 {
+            let suggested_min = 1u32;
+            PoolSizeSuggestion {
+                suggested_max: None,
+                suggested_min: Some(suggested_min),
+                reason: format!(
+                    "Peak utilization {:.0}% is below 20% — reduce DB_MIN_CONNECTIONS to {suggested_min}",
+                    peak * 100.0
+                ),
+            }
+        } else {
+            PoolSizeSuggestion {
+                suggested_max: None,
+                suggested_min: None,
+                reason: format!(
+                    "Pool sizing looks healthy (peak util {:.0}%)",
+                    peak * 100.0
+                ),
+            }
+        }
+    }
+}
+
+/// Recommendation produced by [`PoolStats::suggest_pool_size`].
+#[derive(Debug, Clone)]
+pub struct PoolSizeSuggestion {
+    /// Suggested new `DB_MAX_CONNECTIONS`, or `None` if no increase is needed.
+    pub suggested_max: Option<u32>,
+    /// Suggested new `DB_MIN_CONNECTIONS`, or `None` if no decrease is needed.
+    pub suggested_min: Option<u32>,
+    /// Human-readable explanation.
+    pub reason: String,
 }
 
 /// Configuration for the pool monitor.
@@ -105,6 +228,9 @@ pub fn spawn_pool_monitor(
             // Emit Prometheus metrics.
             metrics::update_pool_utilization(&pool, max);
 
+            // Issue #995: emit queue depth.
+            metrics::update_pool_queue_depth(stats_clone.queue_depth());
+
             // Track peak.
             stats_clone.update(utilization);
 
@@ -123,9 +249,19 @@ pub fn spawn_pool_monitor(
                 );
             }
 
-            // Periodic tuning advice.
+            // Periodic tuning advice (Issue #995: include wait-time info).
             let peak = stats_clone.peak_utilization();
-            if peak < 0.3 && config.min_connections as f64 > max as f64 * 0.2 {
+            let suggestion = stats_clone.suggest_pool_size(max, max.saturating_mul(4).max(50));
+            if suggestion.suggested_max.is_some() || suggestion.suggested_min.is_some() {
+                info!(
+                    reason = suggestion.reason.as_str(),
+                    suggested_max = ?suggestion.suggested_max,
+                    suggested_min = ?suggestion.suggested_min,
+                    avg_wait_ms = ?stats_clone.avg_wait_ms(),
+                    wait_timeouts = stats_clone.wait_timeout_count(),
+                    "Pool tuning recommendation (Issue #995)"
+                );
+            } else if peak < 0.3 && config.min_connections as f64 > max as f64 * 0.2 {
                 info!(
                     peak_utilization = format!("{:.1}%", peak * 100.0),
                     current_min = config.min_connections,
@@ -149,6 +285,29 @@ pub async fn acquire_tracked(pool: &PgPool) -> Result<sqlx::pool::PoolConnection
     let elapsed = start.elapsed();
     metrics::record_pool_acquire_latency(elapsed);
     Ok(conn)
+}
+
+/// Issue #995: Acquire a connection and record both acquire latency and queue wait time.
+///
+/// Unlike [`acquire_tracked`], this variant also increments/decrements the queue
+/// depth gauge and records the wait time in the shared [`PoolStats`].
+pub async fn acquire_tracked_with_wait(
+    pool: &PgPool,
+    stats: &Arc<PoolStats>,
+) -> Result<sqlx::pool::PoolConnection<sqlx::Postgres>, sqlx::Error> {
+    stats.enter_queue();
+    let start = Instant::now();
+    let result = pool.acquire().await;
+    let elapsed = start.elapsed();
+    stats.leave_queue();
+    match result {
+        Ok(conn) => {
+            stats.record_wait(elapsed);
+            metrics::record_pool_acquire_latency(elapsed);
+            Ok(conn)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Emit a snapshot of pool metrics to the log and as structured fields.
@@ -211,5 +370,89 @@ mod tests {
         // Utilization exactly at threshold should trigger alert.
         assert!(0.9 >= cfg.exhaustion_threshold);
         assert!(0.89 < cfg.exhaustion_threshold);
+    }
+
+    // ── Issue #995: wait-time tracking tests ─────────────────────────────
+
+    #[test]
+    fn queue_depth_increments_and_decrements() {
+        let stats = PoolStats::default();
+        assert_eq!(stats.queue_depth(), 0);
+        stats.enter_queue();
+        stats.enter_queue();
+        assert_eq!(stats.queue_depth(), 2);
+        stats.leave_queue();
+        assert_eq!(stats.queue_depth(), 1);
+        stats.leave_queue();
+        assert_eq!(stats.queue_depth(), 0);
+    }
+
+    #[test]
+    fn queue_depth_does_not_underflow() {
+        let stats = PoolStats::default();
+        // Decrement below zero should saturate to 0.
+        stats.leave_queue();
+        assert_eq!(stats.queue_depth(), 0);
+    }
+
+    #[test]
+    fn avg_wait_ms_none_when_no_samples() {
+        let stats = PoolStats::default();
+        assert!(stats.avg_wait_ms().is_none());
+    }
+
+    #[test]
+    fn avg_wait_ms_computed_correctly() {
+        let stats = PoolStats::default();
+        stats.record_wait(Duration::from_millis(100));
+        stats.record_wait(Duration::from_millis(300));
+        let avg = stats.avg_wait_ms().expect("should have samples");
+        assert!((avg - 200.0).abs() < 1.0, "avg should be ~200 ms, got {avg}");
+    }
+
+    #[test]
+    fn wait_timeout_counted_for_long_waits() {
+        let stats = PoolStats::default();
+        stats.record_wait(Duration::from_millis(500));
+        assert_eq!(stats.wait_timeout_count(), 0);
+        stats.record_wait(Duration::from_secs(2));
+        assert_eq!(stats.wait_timeout_count(), 1);
+    }
+
+    #[test]
+    fn suggest_pool_size_scale_up_when_peak_high() {
+        let stats = PoolStats::default();
+        stats.update(0.90); // peak = 90%
+        let suggestion = stats.suggest_pool_size(10, 100);
+        assert!(suggestion.suggested_max.is_some(), "should suggest scale-up");
+        assert!(suggestion.suggested_max.unwrap() > 10);
+    }
+
+    #[test]
+    fn suggest_pool_size_scale_down_when_peak_low() {
+        let stats = PoolStats::default();
+        stats.update(0.05); // peak = 5%
+        let suggestion = stats.suggest_pool_size(10, 100);
+        assert!(suggestion.suggested_min.is_some(), "should suggest scale-down");
+    }
+
+    #[test]
+    fn suggest_pool_size_no_action_when_healthy() {
+        let stats = PoolStats::default();
+        stats.update(0.50); // peak = 50%
+        let suggestion = stats.suggest_pool_size(10, 100);
+        assert!(suggestion.suggested_max.is_none());
+        assert!(suggestion.suggested_min.is_none());
+    }
+
+    #[test]
+    fn suggest_pool_size_respects_ceiling() {
+        let stats = PoolStats::default();
+        stats.update(0.99);
+        let suggestion = stats.suggest_pool_size(100, 100);
+        // Suggested max must not exceed the ceiling.
+        if let Some(max) = suggestion.suggested_max {
+            assert!(max <= 100);
+        }
     }
 }

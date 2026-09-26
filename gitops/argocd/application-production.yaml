@@ -1,0 +1,61 @@
+# ArgoCD Application for the production environment. Deploys the
+# helm/soroban-pulse chart from this repository's `main` branch into the
+# soroban-pulse-production namespace, with automated sync and self-heal
+# enabled (drift is detected AND auto-corrected — see docs/gitops.md,
+# "Add manual sync with drift detection", for the tradeoffs).
+#
+# Apply once ArgoCD and gitops/argocd/project.yaml are installed:
+#   kubectl apply -n argocd -f gitops/argocd/application-production.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: soroban-pulse-production
+  namespace: argocd
+  # Prevents accidental deletion via `kubectl delete` without also removing
+  # this finalizer's intent — ArgoCD will cascade-delete the deployed
+  # resources when the Application itself is deleted. Remove if that is not
+  # the desired behavior for production.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: soroban-pulse
+
+  source:
+    # Placeholder — replace with the actual repository URL used in your
+    # ArgoCD instance (must match an entry in gitops/argocd/project.yaml's
+    # sourceRepos).
+    repoURL: https://github.com/Soroban-Pulse/SorobanPulse.git
+    targetRevision: main
+    path: helm/soroban-pulse
+    helm:
+      # Production overrides the chart defaults in values.yaml (e.g.
+      # replicaCount, resources, existingSecret) via an environment-specific
+      # values file. No such file exists in this repository yet — see
+      # docs/gitops.md, "Create application manifests repository", for why
+      # this is called out as a prerequisite rather than invented here.
+      valueFiles:
+        - values-production.yaml
+      # Fallback if values-production.yaml is not present: pass the minimum
+      # production-safe overrides inline instead of via a missing file.
+      # parameters:
+      #   - name: existingSecret
+      #     value: soroban-pulse-production-credentials
+      #   - name: replicaCount
+      #     value: "3"
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: soroban-pulse-production
+
+  syncPolicy:
+    automated:
+      prune: true      # remove resources deleted from the chart/values
+      selfHeal: true    # auto-correct drift from manual kubectl/helm changes
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m

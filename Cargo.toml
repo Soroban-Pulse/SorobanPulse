@@ -16,6 +16,7 @@ actix-cors = "0.7"
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
 futures = "0.3"
+async-trait = "0.1"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -29,6 +30,7 @@ diesel = { version = "2.1", features = ["postgres", "uuid", "chrono", "serde_jso
 ed25519-dalek = "2.1"
 sha2 = "0.10"
 hmac = "0.12"
+subtle = "2.6"
 aes-gcm = "0.10"
 
 # Cryptography - Post-Quantum (optional feature)
@@ -45,10 +47,10 @@ time = "0.3"
 # Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-opentelemetry = "0.22"
+tracing-opentelemetry = { version = "0.22", optional = true }
 opentelemetry = { version = "0.21", features = ["trace", "metrics"] }
 opentelemetry-otlp = "0.14"
-opentelemetry-jaeger = "0.20"
+opentelemetry-jaeger = { version = "0.20", optional = true }
 
 # Metrics
 prometheus = "0.13"
@@ -79,19 +81,38 @@ tokio-tungstenite = "0.21"
 bytes = "1.5"
 base64 = "0.21"
 hex = "0.4"
+regex = "1"
+blake3 = "1"
+toml = "0.8"
+secrecy = "0.5"
+rand = "0.8"
+
+# HTTP middleware / static files (the `fs` feature is enabled by `dashboard`)
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-full", "metrics", "request-id", "limit"] }
 
 # Service mesh integration
 tonic = { version = "0.10", optional = true }
 prost = { version = "0.12", optional = true }
+
+# Messaging integrations (optional, enabled per-deployment)
+rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
+google-cloud-pubsub = { version = "0.33", optional = true }
+google-cloud-googleapis = { version = "0.16", optional = true }
+url = { version = "2.5", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 mockall = "0.12"
 wiremock = "0.6"
+insta = "1"
 
 [features]
-default = ["classical-crypto"]
+default = ["classical-crypto", "dashboard"]
+
+# Issue #1112: serve the built web dashboard at /ui (runtime opt-in: SERVE_DASHBOARD=true).
+# Build with --no-default-features --features classical-crypto to drop it.
+dashboard = ["tower-http/fs"]
 
 # Cryptography features
 classical-crypto = []
@@ -110,6 +131,11 @@ linkerd = ["tonic", "prost"]
 
 # Observability features
 full-observability = ["tracing-opentelemetry", "opentelemetry-jaeger"]
+
+# Messaging integrations
+kafka = ["dep:rdkafka"]
+sqs = ["dep:url"]
+pubsub = ["dep:google-cloud-pubsub", "dep:google-cloud-googleapis"]
 
 [lints.clippy]
 # Lint policy — replaces the crate-level #![deny]/#![allow] that used to live
@@ -134,16 +160,6 @@ strip = true
 
 [profile.bench]
 inherits = "release"
-
-[[bench]]
-name = "quantum_crypto"
-harness = false
-required-features = ["quantum-crypto"]
-
-[[bench]]
-name = "hybrid_signatures"
-harness = false
-required-features = ["hybrid-crypto"]
 
 [lib]
 name = "soroban_pulse"

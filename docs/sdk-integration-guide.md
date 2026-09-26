@@ -2,6 +2,8 @@
 
 This guide covers integrating the Soroban Pulse SDKs into your application. SDKs are available for TypeScript/JavaScript, Python, and Go.
 
+Building or extending the SDKs themselves rather than consuming them? See the [SDK Development Guide](sdk-development.md) for architecture, per-language contributor tutorials, and webhook verification internals.
+
 ## Table of Contents
 
 - [Quickstart](#quickstart)

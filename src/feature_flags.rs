@@ -1,4 +1,8 @@
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -205,6 +209,138 @@ fn compute_rollout_hash(flag_name: &str, context: &FeatureFlagContext) -> u64 {
     hasher.finish()
 }
 
+/// A single named variant in an A/B (or A/B/n) test, with a relative weight
+/// used for proportional bucketing. Weights need not sum to 100; they are
+/// normalized at assignment time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlagVariant {
+    pub name: String,
+    pub weight: u32,
+}
+
+/// Deterministically assigns a context to one of the given variants based on
+/// the same hash used for percentage rollout, so a given user/contract always
+/// lands in the same variant for a given flag.
+pub fn assign_variant<'a>(
+    flag_name: &str,
+    context: &FeatureFlagContext,
+    variants: &'a [FlagVariant],
+) -> Option<&'a FlagVariant> {
+    if variants.is_empty() {
+        return None;
+    }
+    let total_weight: u32 = variants.iter().map(|v| v.weight).sum();
+    if total_weight == 0 {
+        return None;
+    }
+
+    let hash = compute_rollout_hash(flag_name, context);
+    let mut bucket = (hash % total_weight as u64) as u32;
+
+    for variant in variants {
+        if bucket < variant.weight {
+            return Some(variant);
+        }
+        bucket -= variant.weight;
+    }
+    variants.last()
+}
+
+/// Per-flag evaluation counters used to power flag metrics/dashboards.
+#[derive(Debug, Default)]
+struct FlagCounters {
+    evaluations: AtomicU64,
+    enabled: AtomicU64,
+    disabled: AtomicU64,
+    variant_assignments: std::sync::Mutex<HashMap<String, u64>>,
+}
+
+/// Tracks how often each feature flag is evaluated, its enabled/disabled
+/// split, and A/B variant distribution.
+#[derive(Debug, Default)]
+pub struct FlagMetrics {
+    counters: std::sync::Mutex<HashMap<String, Arc<FlagCounters>>>,
+}
+
+impl FlagMetrics {
+    pub fn shared() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn counters_for(&self, flag_name: &str) -> Arc<FlagCounters> {
+        let mut guard = self.counters.lock().unwrap();
+        guard
+            .entry(flag_name.to_string())
+            .or_insert_with(|| Arc::new(FlagCounters::default()))
+            .clone()
+    }
+
+    pub fn record_evaluation(&self, flag_name: &str, enabled: bool) {
+        let counters = self.counters_for(flag_name);
+        counters.evaluations.fetch_add(1, Ordering::Relaxed);
+        if enabled {
+            counters.enabled.fetch_add(1, Ordering::Relaxed);
+        } else {
+            counters.disabled.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_variant_assignment(&self, flag_name: &str, variant_name: &str) {
+        let counters = self.counters_for(flag_name);
+        let mut variants = counters.variant_assignments.lock().unwrap();
+        *variants.entry(variant_name.to_string()).or_insert(0) += 1;
+    }
+
+    /// Snapshot of evaluation counts and enabled-rate per flag, for a metrics endpoint.
+    pub fn snapshot(&self) -> Vec<FlagMetricsSnapshot> {
+        let guard = self.counters.lock().unwrap();
+        guard
+            .iter()
+            .map(|(name, counters)| {
+                let evaluations = counters.evaluations.load(Ordering::Relaxed);
+                let enabled = counters.enabled.load(Ordering::Relaxed);
+                let disabled = counters.disabled.load(Ordering::Relaxed);
+                let variants = counters.variant_assignments.lock().unwrap().clone();
+                FlagMetricsSnapshot {
+                    flag_name: name.clone(),
+                    evaluations,
+                    enabled,
+                    disabled,
+                    enabled_rate: if evaluations == 0 {
+                        0.0
+                    } else {
+                        enabled as f64 / evaluations as f64
+                    },
+                    variant_assignments: variants,
+                }
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlagMetricsSnapshot {
+    pub flag_name: String,
+    pub evaluations: u64,
+    pub enabled: u64,
+    pub disabled: u64,
+    pub enabled_rate: f64,
+    pub variant_assignments: HashMap<String, u64>,
+}
+
+/// Same as `is_feature_enabled`, but also records the outcome into `metrics`
+/// so evaluation counts and enabled rates can be exposed on a flag dashboard.
+pub async fn is_feature_enabled_with_metrics(
+    pool: &PgPool,
+    flag_name: &str,
+    context: &FeatureFlagContext,
+    metrics: &FlagMetrics,
+) -> Result<bool, sqlx::Error> {
+    let result = is_feature_enabled(pool, flag_name, context).await?;
+    metrics.record_evaluation(flag_name, result);
+    Ok(result)
+}
+
 pub fn spawn(pool: PgPool, interval_secs: u64, mut shutdown_rx: watch::Receiver<bool>) {
     tokio::spawn(async move {
         let watcher = FeatureFlagWatcher::new(pool);
@@ -305,5 +441,84 @@ mod tests {
         // Should be close to 50% (allow 10% variance)
         let ratio = enabled_count as f64 / total as f64;
         assert!(ratio > 0.4 && ratio < 0.6, "Rollout distribution should be ~50%, got {}", ratio);
+    }
+
+    #[test]
+    fn assign_variant_is_deterministic() {
+        let context = FeatureFlagContext {
+            contract_id: Some("CABC123".to_string()),
+            user_id: None,
+            ip_address: None,
+            region: None,
+        };
+        let variants = vec![
+            FlagVariant { name: "control".into(), weight: 50 },
+            FlagVariant { name: "treatment".into(), weight: 50 },
+        ];
+        let first = assign_variant("ab-flag", &context, &variants).unwrap().name.clone();
+        let second = assign_variant("ab-flag", &context, &variants).unwrap().name.clone();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn assign_variant_returns_none_for_empty_variants() {
+        let context = FeatureFlagContext {
+            contract_id: Some("CABC123".to_string()),
+            user_id: None,
+            ip_address: None,
+            region: None,
+        };
+        assert!(assign_variant("ab-flag", &context, &[]).is_none());
+    }
+
+    #[test]
+    fn assign_variant_distribution_matches_weights() {
+        let variants = vec![
+            FlagVariant { name: "a".into(), weight: 90 },
+            FlagVariant { name: "b".into(), weight: 10 },
+        ];
+        let mut a_count = 0;
+        let total = 1000;
+        for i in 0..total {
+            let context = FeatureFlagContext {
+                contract_id: Some(format!("contract-{}", i)),
+                user_id: None,
+                ip_address: None,
+                region: None,
+            };
+            if assign_variant("weighted-flag", &context, &variants).unwrap().name == "a" {
+                a_count += 1;
+            }
+        }
+        let ratio = a_count as f64 / total as f64;
+        assert!(ratio > 0.8 && ratio < 1.0, "Expected ~90% in variant a, got {}", ratio);
+    }
+
+    #[test]
+    fn flag_metrics_records_evaluations_and_enabled_rate() {
+        let metrics = FlagMetrics::default();
+        metrics.record_evaluation("my-flag", true);
+        metrics.record_evaluation("my-flag", false);
+        metrics.record_evaluation("my-flag", true);
+
+        let snapshot = metrics.snapshot();
+        let entry = snapshot.iter().find(|s| s.flag_name == "my-flag").unwrap();
+        assert_eq!(entry.evaluations, 3);
+        assert_eq!(entry.enabled, 2);
+        assert_eq!(entry.disabled, 1);
+        assert!((entry.enabled_rate - (2.0 / 3.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn flag_metrics_records_variant_assignments() {
+        let metrics = FlagMetrics::default();
+        metrics.record_variant_assignment("ab-flag", "control");
+        metrics.record_variant_assignment("ab-flag", "control");
+        metrics.record_variant_assignment("ab-flag", "treatment");
+
+        let snapshot = metrics.snapshot();
+        let entry = snapshot.iter().find(|s| s.flag_name == "ab-flag").unwrap();
+        assert_eq!(entry.variant_assignments.get("control"), Some(&2));
+        assert_eq!(entry.variant_assignments.get("treatment"), Some(&1));
     }
 }

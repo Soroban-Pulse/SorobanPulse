@@ -34,7 +34,7 @@ pub fn print_events(events: &[SorobanEvent], format: Format) -> Result<()> {
     match format {
         Format::Json  => print_json(events),
         Format::Csv   => print_events_csv(events),
-        Format::Table => print_events_table(events),
+        Format::Table => Ok(print_events_table(events)),
     }
 }
 
@@ -101,7 +101,7 @@ pub fn print_contracts(contracts: &[Contract], format: Format) -> Result<()> {
     match format {
         Format::Json  => print_json(contracts),
         Format::Csv   => print_contracts_csv(contracts),
-        Format::Table => print_contracts_table(contracts),
+        Format::Table => Ok(print_contracts_table(contracts)),
     }
 }
 
@@ -174,7 +174,7 @@ pub fn print_stats(stats: &EventStats, format: Format) -> Result<()> {
 // Generic JSON
 // ---------------------------------------------------------------------------
 
-fn print_json<T: Serialize>(value: &T) -> Result<()> {
+fn print_json<T: Serialize + ?Sized>(value: &T) -> Result<()> {
     let json = serde_json::to_string_pretty(value)?;
     println!("{json}");
     Ok(())

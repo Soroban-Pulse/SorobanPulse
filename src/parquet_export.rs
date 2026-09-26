@@ -1,5 +1,10 @@
 //! Issue #373: Streaming Parquet export with bounded memory usage.
 //! Writes Parquet row groups incrementally as batches are fetched from the database.
+//!
+//! Data warehouse export: rows produced here can additionally be routed to
+//! BigQuery/Snowflake via `crate::warehouse::export_to_warehouse`, reusing
+//! the same `EventRow` batches instead of writing to a local parquet file.
+//! See `docs/data-warehouse.md` for configuration details.
 
 use arrow_array::{
     ArrayRef, Int64Array, RecordBatch, StringArray,

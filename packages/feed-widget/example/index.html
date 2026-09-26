@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SorobanPulse feed widget example</title>
+    <!-- From npm via CDN. Pin an exact version in production. -->
+    <script type="module" src="https://cdn.jsdelivr.net/npm/@soroban-pulse/feed-widget@0.1.0/dist/feed-widget.js"></script>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; }
+      /* Optional theming through CSS custom properties. */
+      soroban-pulse-feed.branded { --sp-feed-accent: #e5007a; --sp-feed-radius: 4px; --sp-feed-max-height: 24rem; }
+    </style>
+  </head>
+  <body>
+    <h1>My dApp</h1>
+
+    <soroban-pulse-feed
+      server="https://pulse.example.com"
+      contract-id="CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+      limit="10"
+      theme="auto"
+      live
+      explorer-url="https://stellar.expert/explorer/public/tx/{tx}"
+    ></soroban-pulse-feed>
+
+    <script type="module">
+      document.querySelector('soroban-pulse-feed').addEventListener('sp-feed-event', (e) => {
+        console.log('new event', e.detail);
+      });
+    </script>
+  </body>
+</html>
