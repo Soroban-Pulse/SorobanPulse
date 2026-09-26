@@ -847,6 +847,73 @@ pub struct GetEventsResult {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct SorobanEvent {
+    /// Stable SSE event ID assigned by the ring buffer (not persisted to DB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
+    #[serde(rename = "contractId")]
+    pub contract_id: String,
+    #[serde(rename = "type")]
+    pub event_type: String,
+    #[serde(rename = "txHash")]
+    pub tx_hash: String,
+    pub ledger: u64,
+    #[serde(rename = "ledgerClosedAt")]
+    pub ledger_closed_at: String,
+    #[serde(rename = "ledgerHash", default)]
+    pub ledger_hash: Option<String>,
+    #[serde(rename = "inSuccessfulContractCall", default = "default_true")]
+    pub in_successful_call: bool,
+    pub value: Value,
+    pub topic: Option<Vec<Value>>,
+    /// Set by the indexer in multi-tenant mode; never serialized to JSON output.
+    #[serde(skip_serializing, default)]
+    pub tenant_id: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Request body for creating a notification channel.
+#[derive(Debug, Deserialize)]
+pub struct CreateChannelRequest {
+    pub name: String,
+    pub channel_type: String,
+    pub config: Value,
+    pub retry_policy: Option<Value>,
+}
+
+/// Request body for updating a notification channel (all fields optional.
+#[derive(Debug, Deserialize, Default)]
+pub struct UpdateChannelRequest {
+    pub name: Option<String>,
+    pub config: Option<Value>,
+    pub retry_policy: Option<Value>,
+}
+
+/// Request body for cloning a channel (optional overrides applied to the copy).
+#[derive(Debug, Deserialize, Default)]
+pub struct CloneChannelRequest {
+    pub name: Option<String>,
+    pub config: Option<Value>,
+    pub retry_policy: Option<Value>,
+}
+
+/// Single channel entry inside an import payload.
+#[derive(Debug, Deserialize)]
+pub struct ImportChannelEntry {
+    pub name: String,
+    pub channel_type: String,
+    pub config: Value,
+    pub retry_policy: Option<Value>,
+}
+
+/// Request body for POST /v1/admin/notifications/channels/import.
+#[derive(Debug, Deserialize)]
+pub struct ImportChannelsRequest {
+    pub channels: Vec<ImportChannelEntry>,
+}
 
 #[cfg(test)]
 mod tests {
@@ -958,4 +1025,386 @@ mod tests {
         assert_eq!(result.latest_ledger, 1234600);
         assert!(result.rpc_cursor.is_none());
     }
+}
+#[derive(Debug, Serialize)]
+pub struct PaginatedResponse<T> {
+    pub data: Vec<T>,
+    pub page: i64,
+    pub limit: i64,
+    pub total: i64,
+    pub has_more: bool,
+}
+
+// ── #511: Notification channel bulk operations ────────────────────────────────
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkChannelRequest {
+    pub channel_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkTagRequest {
+    pub channel_ids: Vec<Uuid>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BulkChannelResult {
+    pub id: Uuid,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct BulkOperationResponse {
+    pub succeeded: i64,
+    pub failed: i64,
+    pub results: Vec<BulkChannelResult>,
+}
+
+// ── #512: Notification system lifecycle webhooks ──────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct SystemWebhookConfig {
+    pub id: Uuid,
+    pub url: String,
+    pub secret: Option<String>,
+    /// Lifecycle event types this webhook subscribes to.
+    /// Supported: channel_created, channel_deleted, channel_failed,
+    ///            delivery_failed, queue_backed_up, or "*" for all.
+    pub events: Vec<String>,
+    pub active: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct CreateSystemWebhookRequest {
+    pub url: String,
+    pub secret: Option<String>,
+    pub events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct LifecycleEvent {
+    pub event_type: String,
+    pub channel_id: Option<Uuid>,
+    pub channel_name: Option<String>,
+    pub message: String,
+    pub occurred_at: DateTime<Utc>,
+    pub metadata: Value,
+}
+
+// ── #513: Notification delivery SLA monitoring ────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct NotificationDelivery {
+    pub id: Uuid,
+    pub channel_id: Uuid,
+    pub channel_name: String,
+    pub event_indexed_at: DateTime<Utc>,
+    pub delivered_at: DateTime<Utc>,
+    pub latency_seconds: f64,
+    pub sla_breached: bool,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RecordDeliveryRequest {
+    pub channel_id: Uuid,
+    pub channel_name: String,
+    pub event_indexed_at: DateTime<Utc>,
+    pub delivered_at: DateTime<Utc>,
+}
+
+// ── #514: Notification capacity planning ─────────────────────────────────────
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct NotificationCapacityResponse {
+    pub current_rate_per_minute: f64,
+    pub projected_rate_per_minute: f64,
+    pub growth_trend_percent: f64,
+    pub channels: Vec<ChannelCapacityInfo>,
+    pub computed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ChannelCapacityInfo {
+    pub channel_id: Uuid,
+    pub channel_name: String,
+    pub current_rate_per_minute: f64,
+    pub estimated_time_to_limit_minutes: Option<f64>,
+    pub recommendations: Vec<String>,
+}
+
+impl<T> PaginatedResponse<T> {
+    pub fn new(data: Vec<T>, page: i64, limit: i64, total: i64) -> Self {
+        let has_more = (page * limit) < total;
+        Self {
+            data,
+            page,
+            limit,
+            total,
+            has_more,
+        }
+    }
+}
+
+// ── Notification Channel models (#507 #508 #509 #510) ───────────────────────
+
+/// A managed notification channel (webhook, email, or SMS).
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct NotificationChannel {
+    pub id: Uuid,
+    pub name: String,
+    pub channel_type: String,
+    pub config: Value,
+    pub retry_policy: Value,
+    #[sqlx(default)]
+    pub description: Option<String>,
+    #[sqlx(default)]
+    pub tags: Vec<String>,
+    /// SHA-256 hex of the creator's API key (#508).
+    #[sqlx(default)]
+    pub owner: Option<String>,
+    #[sqlx(default)]
+    pub status: String,
+    #[sqlx(default)]
+    pub contract_filter: Vec<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateNotificationChannelRequest {
+    pub name: String,
+    pub channel_type: String,
+    pub config: Value,
+    #[serde(default)]
+    pub retry_policy: Option<Value>,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub contract_filter: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct UpdateNotificationChannelRequest {
+    pub name: Option<String>,
+    pub config: Option<Value>,
+    pub retry_policy: Option<Value>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub status: Option<String>,
+    pub contract_filter: Option<Vec<String>>,
+}
+
+/// Query parameters for listing/searching notification channels (#509 #510).
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+pub struct NotificationChannelSearchParams {
+    /// Full-text search on name and description.
+    pub q: Option<String>,
+    pub channel_type: Option<String>,
+    /// Filter by contract_id present in channel's contract_filter list.
+    pub contract_id: Option<String>,
+    pub status: Option<String>,
+    /// Filter by tag (#509).
+    pub tag: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
+impl NotificationChannelSearchParams {
+    pub fn effective_page(&self) -> i64 {
+        self.page.unwrap_or(1).max(1)
+    }
+    pub fn effective_limit(&self) -> i64 {
+        self.page_size.unwrap_or(20).clamp(1, 100)
+    }
+    pub fn offset(&self) -> i64 {
+        (self.effective_page() - 1) * self.effective_limit()
+    }
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct AddTagRequest {
+    pub tag: String,
+}
+
+// ── Channel Group models (#507) ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct NotificationChannelGroup {
+    pub id: Uuid,
+    pub name: String,
+    #[sqlx(default)]
+    pub description: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateChannelGroupRequest {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Channel IDs to include in this group.
+    #[serde(default)]
+    pub channel_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ChannelGroupResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub channel_ids: Vec<Uuid>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+
+// ── Issue #627: Contract existence check ─────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ContractExistsResponse {
+    pub contract_id: String,
+    /// true if the contract has indexed events, false otherwise
+    pub exists: bool,
+    /// "bloom_filter" or "database_query" indicating how the check was performed
+    pub method: String,
+}
+
+// ── Issue #631: Dynamic config reloading ────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ConfigResponse {
+    pub log_level: String,
+    pub rate_limit_per_minute: u32,
+    pub sse_keepalive_secs: u64,
+    pub health_check_timeout_ms: u64,
+    pub db_max_connections: u32,
+    pub indexer_lag_warn_threshold: u64,
+    pub slow_query_threshold_ms: u64,
+    pub features: std::collections::HashMap<String, bool>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct ConfigReloadResponse {
+    pub success: bool,
+    pub message: String,
+    pub updated_fields: Vec<String>,
+}
+
+// ── Issue #692: Connection pool configuration ──────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct PoolConfigRequest {
+    /// Maximum number of connections in the pool
+    pub max_connections: Option<u32>,
+    /// Minimum number of idle connections to maintain
+    pub min_connections: Option<u32>,
+    /// Connection timeout in seconds
+    pub connection_timeout_secs: Option<u64>,
+    /// Idle timeout in seconds
+    pub idle_timeout_secs: Option<u64>,
+    /// Exhaustion threshold (0.0-1.0) for alerts
+    pub exhaustion_threshold: Option<f64>,
+    /// Sample interval in seconds for pool monitoring
+    pub sample_interval_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct PoolConfig {
+    pub max_connections: u32,
+    pub min_connections: u32,
+    pub connection_timeout_secs: u64,
+    pub idle_timeout_secs: u64,
+    pub exhaustion_threshold: f64,
+    pub sample_interval_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct PoolStatistics {
+    /// Current pool size (total connections)
+    pub pool_size: u32,
+    /// Number of idle connections
+    pub idle_connections: u32,
+    /// Number of active connections
+    pub active_connections: u32,
+    /// Maximum allowed connections
+    pub max_connections: u32,
+    /// Current utilization (0.0-1.0)
+    pub utilization: f64,
+    /// Peak utilization since startup
+    pub peak_utilization: f64,
+    /// Number of exhaustion events (≥90% utilization)
+    pub exhaustion_events: u64,
+    /// Average connection acquire latency in milliseconds
+    pub avg_acquire_latency_ms: f64,
+    /// Timestamp of this snapshot
+    pub snapshot_timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct PoolConfigResponse {
+    pub config: PoolConfig,
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct PoolTuningGuide {
+    pub current_config: PoolConfig,
+    pub recommendations: Vec<String>,
+    pub reasoning: String,
+}
+
+// ── Issue #693: Database statistics auto-analysis ──────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct StatisticsReportItem {
+    pub table_name: String,
+    pub last_analyzed: Option<DateTime<Utc>>,
+    pub hours_since_analyze: Option<i32>,
+    pub is_stale: bool,
+    pub row_count: Option<i64>,
+    pub table_size_mb: Option<f64>,
+    pub recent_jobs_count: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct StatisticsAnalysisJobInfo {
+    pub job_id: String,
+    pub table_name: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub duration_seconds: Option<i32>,
+    pub row_count_analyzed: Option<i64>,
+    pub status: String,
+    pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct StalenessDetection {
+    pub table_name: String,
+    pub is_stale: bool,
+    pub hours_since_analyze: i32,
+    pub staleness_threshold_hours: i32,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct StatisticsHealth {
+    pub health_score: u32,
+    pub status: String,
+    pub stale_tables_count: u32,
+    pub total_tables: u32,
+    pub timestamp: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct AutoAnalyzeScheduleResponse {
+    pub message: String,
+    pub tables_scheduled: u32,
+    pub timestamp: DateTime<Utc>,
 }

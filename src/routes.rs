@@ -732,7 +732,26 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
         .route("/contracts", get(handlers::get_contracts))
         .layer(axum::middleware::from_fn(
-            middleware::deprecation_middleware,
+            |req: Request<Body>, next: axum::middleware::Next| async move {
+                let path = req.uri().path().to_string();
+                let mut resp = next.run(req).await;
+                resp.headers_mut()
+                    .insert("Deprecation", HeaderValue::from_static("true"));
+                resp.headers_mut().insert(
+                    "Sunset",
+                    HeaderValue::from_static("Sat, 24 Oct 2026 00:00:00 GMT"),
+                );
+                // Map the deprecated path to its versioned equivalent
+                let versioned_path = format!("/v1{}", path);
+                let link_value = format!("<{}>; rel=\"successor-version\"", versioned_path);
+                resp.headers_mut().insert(
+                    "Link",
+                    HeaderValue::from_str(&link_value).unwrap_or_else(|_| {
+                        HeaderValue::from_static("</v1/events>; rel=\"successor-version\"")
+                    }),
+                );
+                resp
+            },
         ));
 
     // Health endpoints — exempt from rate limiting.
@@ -773,7 +792,16 @@ pub fn create_router_with_tx_and_tenant_map(
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated)
-            .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
+            .layer(axum::middleware::from_fn(
+                |req: Request<Body>, next: axum::middleware::Next| async move {
+                    let resp = next.run(req).await;
+                    if resp.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
+                        metrics::record_rate_limit_rejected();
+                        return rate_limit_json_response(resp);
+                    }
+                    resp
+                },
+            ))
             .layer(GovernorLayer::new(governor_conf))
     } else if behind_proxy {
         let governor_conf = Arc::new(
@@ -792,7 +820,16 @@ pub fn create_router_with_tx_and_tenant_map(
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated)
-            .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
+            .layer(axum::middleware::from_fn(
+                |req: Request<Body>, next: axum::middleware::Next| async move {
+                    let resp = next.run(req).await;
+                    if resp.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
+                        metrics::record_rate_limit_rejected();
+                        return rate_limit_json_response(resp);
+                    }
+                    resp
+                },
+            ))
             .layer(GovernorLayer::new(governor_conf))
     } else {
         let governor_conf = Arc::new(
@@ -811,7 +848,16 @@ pub fn create_router_with_tx_and_tenant_map(
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated)
-            .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
+            .layer(axum::middleware::from_fn(
+                |req: Request<Body>, next: axum::middleware::Next| async move {
+                    let resp = next.run(req).await;
+                    if resp.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
+                        metrics::record_rate_limit_rejected();
+                        return rate_limit_json_response(resp);
+                    }
+                    resp
+                },
+            ))
             .layer(GovernorLayer::new(governor_conf))
     };
 
@@ -819,8 +865,11 @@ pub fn create_router_with_tx_and_tenant_map(
         .merge(health_routes)
         .merge(rate_limited_routes)
         .layer(axum::middleware::from_fn({
-            let config = middleware::SecurityHeadersConfig::from_env();
-            middleware::security_headers_with_config(config)
+            let security_headers_config = middleware::SecurityHeadersConfig::from_env();
+            move |req, next| {
+                let config = security_headers_config.clone();
+                middleware::security_headers_middleware_with_config(config, req, next)
+            }
         }))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
@@ -842,7 +891,39 @@ pub fn create_router_with_tx_and_tenant_map(
             auth_state,
             middleware::auth_middleware,
         ))
-        .layer(axum::middleware::from_fn(middleware::slow_request_middleware(1000)))
+        .layer(axum::middleware::from_fn({
+            let slow_request_threshold_ms = 1000u64;
+            move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
+                let method = req.method().as_str().to_string();
+                let route = req
+                    .extensions()
+                    .get::<MatchedPath>()
+                    .map(|p| p.as_str().to_string())
+                    .unwrap_or_else(|| "<unknown>".to_string());
+                let request_id = req
+                    .headers()
+                    .get("x-request-id")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let start = Instant::now();
+                let response = next.run(req).await;
+                let duration = start.elapsed();
+                let status = response.status().as_u16().to_string();
+                metrics::record_http_request_duration(duration, &method, &route, &status);
+                if duration.as_millis() as u64 > 500 {
+                    tracing::warn!(
+                        method = %method,
+                        path = %route,
+                        status = %status,
+                        duration_ms = duration.as_millis(),
+                        request_id = %request_id,
+                        "slow request"
+                    );
+                }
+                response
+            }
+        }))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
@@ -872,6 +953,29 @@ pub fn create_router_with_tx_and_tenant_map(
         .layer(SetRequestIdLayer::x_request_id(UuidMakeRequestId))
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1 MB default
         .with_state(app_state)
+}
+
+/// Rewrite a 429 Too Many Requests response to the standard JSON ErrorResponse
+/// format (issue #424). Preserves all rate-limit headers from the original.
+fn rate_limit_json_response(original: axum::response::Response<Body>) -> axum::response::Response<Body> {
+    use axum::http::header;
+    let correlation_id = crate::error::get_request_id();
+    let body = serde_json::json!({
+        "error": "rate limit exceeded",
+        "code": "RATE_LIMIT_EXCEEDED",
+        "correlation_id": correlation_id,
+    });
+    let json_bytes = body.to_string();
+    let mut builder = axum::response::Response::builder()
+        .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
+        .header(header::CONTENT_TYPE, "application/json");
+    // Forward rate-limit headers from the original response.
+    for (name, value) in original.headers() {
+        if name != header::CONTENT_TYPE {
+            builder = builder.header(name, value);
+        }
+    }
+    builder.body(Body::from(json_bytes)).unwrap()
 }
 
 /// Issue #683: GraphQL API routes (requires `graphql` feature)

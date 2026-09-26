@@ -1,4 +1,4 @@
-//! # Error handling module — Issue #662 / #992
+//! # Error handling module — Issue #662
 //!
 //! Consolidates all application error types into a single, consistent module.
 //!
@@ -10,21 +10,12 @@
 //! - [`ErrorContext`] attaches structured metadata (operation, entity, request_id)
 //!   to any error for richer log output and API responses.
 //! - [`ErrorResponse`] is the machine-readable JSON body returned to clients.
-//! - [`ErrorRecovery`] provides standardized recovery suggestions for common errors.
 //!
 //! ## Extension Points
 //! Add a new domain error by:
 //! 1. Declaring a variant in the appropriate domain enum (or adding a new enum).
 //! 2. Implementing `From<YourDomainError> for AppError`.
 //! 3. Adding a `(StatusCode, &'static str)` arm inside `AppError::status_and_code`.
-//!
-//! ## Standardized Constructors
-//! Use the convenience constructors on [`AppError`] instead of manually
-//! constructing enum variants:
-//! ```rust,ignore
-//! return Err(AppError::validation("invalid input"));
-//! return Err(AppError::internal("something went wrong"));
-//! ```
 
 use axum::{
     http::StatusCode,
@@ -139,36 +130,6 @@ impl ErrorContext {
 }
 
 // ---------------------------------------------------------------------------
-// Error recovery — standardized recovery suggestions
-// ---------------------------------------------------------------------------
-
-/// Provides a human-readable suggestion for recovering from an error.
-/// Used by handlers to give users actionable guidance.
-#[derive(Debug, Clone)]
-pub struct ErrorRecovery {
-    /// A brief suggestion for the user (e.g. "Check your API key and try again").
-    pub suggestion: String,
-    /// An optional link to documentation about the error.
-    pub doc_link: Option<String>,
-}
-
-impl ErrorRecovery {
-    /// Create a new recovery suggestion.
-    pub fn new(suggestion: impl Into<String>) -> Self {
-        Self {
-            suggestion: suggestion.into(),
-            doc_link: None,
-        }
-    }
-
-    /// Set an optional documentation link.
-    pub fn with_doc(mut self, link: impl Into<String>) -> Self {
-        self.doc_link = Some(link.into());
-        self
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Domain-specific error types
 // ---------------------------------------------------------------------------
 
@@ -272,11 +233,6 @@ pub enum RpcError {
 /// 1. Add a variant here (or to an existing domain enum above).
 /// 2. Add a match arm in [`AppError::status_and_code`].
 /// 3. If it wraps a domain enum, add a `From` impl below.
-///
-/// ## Standardized Constructors
-/// Use convenience methods like [`AppError::validation`],
-/// [`AppError::internal`], [`AppError::not_found`] etc. instead of
-/// manually constructing enum variants.
 #[derive(Debug, Error)]
 pub enum AppError {
     // --- database domain --------------------------------------------------
@@ -378,7 +334,7 @@ impl From<AuthError> for AppError {
 }
 
 // ---------------------------------------------------------------------------
-// Context attachment and standardized constructors
+// Context attachment
 // ---------------------------------------------------------------------------
 
 impl AppError {
@@ -397,40 +353,6 @@ impl AppError {
             op: ctx.operation,
             entity: ctx.entity,
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // Standardized constructors — Issue #992
-    // -----------------------------------------------------------------------
-
-    /// Create a validation error from a message.
-    pub fn validation(msg: impl Into<String>) -> Self {
-        AppError::Validation(msg.into())
-    }
-
-    /// Create an internal error from a message.
-    pub fn internal(msg: impl Into<String>) -> Self {
-        AppError::Internal(msg.into())
-    }
-
-    /// Create a not-found error.
-    pub fn not_found() -> Self {
-        AppError::NotFound
-    }
-
-    /// Create a forbidden error with a message.
-    pub fn forbidden(msg: impl Into<String>) -> Self {
-        AppError::Forbidden(msg.into())
-    }
-
-    /// Create an unauthorized error.
-    pub fn unauthorized() -> Self {
-        AppError::Auth(AuthError::Unauthenticated)
-    }
-
-    /// Create a rate-limited error.
-    pub fn rate_limited() -> Self {
-        AppError::Subscription(SubscriptionError::LimitExceeded)
     }
 
     // -----------------------------------------------------------------------
@@ -648,69 +570,6 @@ impl<T> ResultExt<T> for Result<T, AppError> {
     }
 }
 
-/// Map a `String` error to a standardized `AppError::validation`.
-/// Replaces repetitive `map_err(|_| AppError::Validation("...".to_string()))` patterns.
-pub fn map_validation<T>(msg: impl Into<String>) -> impl FnOnce() -> AppError {
-    move || AppError::validation(msg.clone().into())
-}
-
-/// Map a serialization/deserialization error to a standardized `AppError::internal`.
-pub fn map_serialization_error<T>() -> impl FnOnce() -> AppError {
-    || AppError::internal("serialization error".to_string())
-}
-
-/// Map an I/O error to a standardized `AppError::internal`.
-pub fn map_io_error<T>() -> impl FnOnce() -> AppError {
-    || AppError::internal("I/O error".to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Error documentation generator — Issue #992
-// ---------------------------------------------------------------------------
-
-/// Generates a markdown documentation string for all [`AppError`] variants.
-/// Used to produce `docs/error-handling.md`.
-pub fn generate_error_docs() -> String {
-    let mut doc = String::from("# Error Handling Documentation\n\n");
-    doc.push_str("## AppError Variants\n\n");
-    doc.push_str("| Variant | HTTP Status | Code | Description |\n");
-    doc.push_str("|---------|-------------|------|-------------|\n");
-    doc.push_str("| `NotFound` | 404 | NOT_FOUND | Resource not found |\n");
-    doc.push_str("| `Validation(msg)` | 400 | VALIDATION_ERROR | Invalid input provided |\n");
-    doc.push_str("| `ValidationWithDetails(msg, errors)` | 400 | VALIDATION_ERROR | Validation with field details |\n");
-    doc.push_str("| `Forbidden(msg)` | 403 | FORBIDDEN | Access denied |\n");
-    doc.push_str("| `Auth(AuthError::Unauthenticated)` | 401 | UNAUTHORIZED | Missing or invalid credentials |\n");
-    doc.push_str("| `Auth(AuthError::TokenExpired)` | 401 | UNAUTHORIZED | Authentication token expired |\n");
-    doc.push_str("| `Database(sqlx::Error)` | 500 | DATABASE_ERROR | Database operation failed |\n");
-    doc.push_str("| `DatabaseDomain(DatabaseError::NotFound)` | 404 | NOT_FOUND | Record not found in database |\n");
-    doc.push_str("| `DatabaseDomain(DatabaseError::Timeout)` | 503 | DATABASE_TIMEOUT | Query timed out |\n");
-    doc.push_str("| `DatabaseDomain(DatabaseError::PoolExhausted)` | 503 | DATABASE_POOL_EXHAUSTED | Connection pool exhausted |\n");
-    doc.push_str("| `Rpc(RpcError::RateLimited)` | 429 | UPSTREAM_RATE_LIMITED | Upstream rate limit exceeded |\n");
-    doc.push_str("| `Indexer(IndexerError::LockNotAcquired)` | 503 | INDEXER_LOCK_NOT_ACQUIRED | Advisory lock not acquired |\n");
-    doc.push_str("| `Indexer(IndexerError::Stalled)` | 503 | INDEXER_STALLED | Indexer has stalled |\n");
-    doc.push_str("| `Webhook(WebhookError::InvalidEndpoint)` | 400 | INVALID_WEBHOOK_ENDPOINT | Invalid webhook URL |\n");
-    doc.push_str("| `Webhook(WebhookError::SignatureMismatch)` | 401 | WEBHOOK_SIGNATURE_MISMATCH | HMAC signature mismatch |\n");
-    doc.push_str("| `Subscription(SubscriptionError::NotFound)` | 404 | NOT_FOUND | Subscription not found |\n");
-    doc.push_str("| `Subscription(SubscriptionError::LimitExceeded)` | 429 | SUBSCRIPTION_LIMIT_EXCEEDED | Subscription limit exceeded |\n");
-    doc.push_str("| `WithContext { .. }` | Inherits source | Inherits source | Error with context metadata |\n\n");
-    doc.push_str("## ErrorContext\n\n");
-    doc.push_str("Attach structured metadata to any error using [`ErrorContext`]:\n\n");
-    doc.push_str("```rust\n");
-    doc.push_str("use crate::error::{AppError, ErrorContext};\n");
-    doc.push_str("Err(AppError::not_found().with_context(\n");
-    doc.push_str("    ErrorContext::new().with_operation(\"get_event\").with_entity(\"event:abc\"),\n");
-    doc.push_str("))?\n");
-    doc.push_str("```\n\n");
-    doc.push_str("## Recovery Suggestions\n\n");
-    doc.push_str("Use [`ErrorRecovery`] to provide actionable guidance:\n\n");
-    doc.push_str("```rust\n");
-    doc.push_str("use crate::error::ErrorRecovery;\n");
-    doc.push_str("let recovery = ErrorRecovery::new(\"Check your API key and try again\")\n");
-    doc.push_str("    .with_doc(\"https://docs.example.com/api-keys\");\n");
-    doc.push_str("```\n");
-    doc
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -828,58 +687,5 @@ mod tests {
         assert_eq!(get_request_id(), "test-id-123");
         // Clean up
         REQUEST_ID.with(|r| *r.borrow_mut() = None);
-    }
-
-    // Issue #992: Standardized constructors tests
-
-    #[test]
-    fn validation_constructor_works() {
-        let e = AppError::validation("bad input");
-        assert_eq!(e.status_and_code(), (StatusCode::BAD_REQUEST, "VALIDATION_ERROR"));
-    }
-
-    #[test]
-    fn internal_constructor_works() {
-        let e = AppError::internal("oops");
-        assert_eq!(e.status_and_code(), (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"));
-    }
-
-    #[test]
-    fn not_found_constructor_works() {
-        let e = AppError::not_found();
-        assert_eq!(e.status_and_code(), (StatusCode::NOT_FOUND, "NOT_FOUND"));
-    }
-
-    #[test]
-    fn forbidden_constructor_works() {
-        let e = AppError::forbidden("denied");
-        assert_eq!(e.status_and_code(), (StatusCode::FORBIDDEN, "FORBIDDEN"));
-    }
-
-    #[test]
-    fn unauthorized_constructor_works() {
-        let e = AppError::unauthorized();
-        assert_eq!(e.status_and_code(), (StatusCode::UNAUTHORIZED, "UNAUTHORIZED"));
-    }
-
-    #[test]
-    fn rate_limited_constructor_works() {
-        let e = AppError::rate_limited();
-        assert_eq!(e.status_and_code(), (StatusCode::TOO_MANY_REQUESTS, "SUBSCRIPTION_LIMIT_EXCEEDED"));
-    }
-
-    #[test]
-    fn error_recovery_works() {
-        let recovery = ErrorRecovery::new("Try again")
-            .with_doc("https://docs.example.com");
-        assert_eq!(recovery.suggestion, "Try again");
-        assert_eq!(recovery.doc_link, Some("https://docs.example.com".to_string()));
-    }
-
-    #[test]
-    fn generate_error_docs_is_nonempty() {
-        let docs = generate_error_docs();
-        assert!(docs.contains("AppError Variants"));
-        assert!(docs.contains("ErrorContext"));
     }
 }
