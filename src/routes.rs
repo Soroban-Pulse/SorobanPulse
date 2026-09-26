@@ -522,19 +522,22 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/backup/verification/report", axum::routing::get(handlers::get_backup_verification_report))
         .route("/admin/backup/verification/trigger", axum::routing::post(handlers::trigger_backup_verification))
         // #897: Alert silence management
-        .route("/admin/alerts/silences", axum::routing::post(handlers::create_alert_silence))
-        .route("/admin/alerts/silences", axum::routing::get(handlers::get_alert_silences))
+        .route(
+            "/admin/alerts/silences",
+            axum::routing::post(handlers::create_alert_silence)
+                .get(handlers::get_alert_silences),
+        )
         .route("/admin/alerts/silences/{silence_id}", axum::routing::delete(handlers::delete_alert_silence))
         // #839: Push notification delivery analytics
         .route("/admin/push/analytics", axum::routing::get(crate::push_notification::get_push_analytics))
         // #879: Webhook circuit breaker admin endpoints
         .route("/admin/webhook/circuit-breaker", axum::routing::get(handlers::get_circuit_breaker_stats))
-        .route("/admin/webhook/circuit-breaker/:endpoint", axum::routing::get(handlers::get_endpoint_circuit_breaker_stats))
-        .route("/admin/webhook/circuit-breaker/:endpoint/reset", axum::routing::post(handlers::reset_circuit_breaker))
+        .route("/admin/webhook/circuit-breaker/{endpoint}", axum::routing::get(handlers::get_endpoint_circuit_breaker_stats))
+        .route("/admin/webhook/circuit-breaker/{endpoint}/reset", axum::routing::post(handlers::reset_circuit_breaker))
         // #881: Bulk event export endpoints
         .route("/admin/events/export", axum::routing::post(handlers::start_event_export).get(handlers::list_export_jobs))
-        .route("/admin/events/export/:job_id", axum::routing::get(handlers::get_export_job_status))
-        .route("/admin/events/export/:job_id/download", axum::routing::get(handlers::download_export_file))
+        .route("/admin/events/export/{job_id}", axum::routing::get(handlers::get_export_job_status))
+        .route("/admin/events/export/{job_id}/download", axum::routing::get(handlers::download_export_file))
         .route("/admin/events/export/cleanup", axum::routing::post(handlers::cleanup_export_files))
         .route_layer(axum::middleware::from_fn_with_state(
             Arc::clone(&admin_auth_state),
@@ -763,7 +766,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/healthz/ready", get(handlers::health_ready))
         .route("/healthz/postgres", get(handlers::health_postgres))
         .route("/healthz/rpc", get(handlers::health_rpc))
-        .route("/healthz/external/:service", get(handlers::health_external))
+        .route("/healthz/external/{service}", get(handlers::health_external))
         .route("/unsubscribe", get(handlers::unsubscribe))
         .route("/metrics", get(handlers::metrics));
 
@@ -863,6 +866,7 @@ pub fn create_router_with_tx_and_tenant_map(
 
     Router::new()
         .merge(health_routes)
+        .merge(admin_routes)
         .merge(rate_limited_routes)
         .layer(axum::middleware::from_fn({
             let security_headers_config = middleware::SecurityHeadersConfig::from_env();

@@ -15244,3 +15244,111 @@ pub async fn cleanup_export_files(
         "removed_jobs": removed,
     })))
 }
+
+// ── Issue #1151: router smoke test stubs ─────────────────────────────────────
+// These handlers are referenced in `src/routes.rs` but had no implementation,
+// which previously meant the router could not even be built. They return
+// `501 Not Implemented` so the smoke test can assert "registered (non-404)"
+// while the real logic lands in follow-up issues.
+
+/// GET /v1/events/tx/{tx_hash}/related (cross-chain trace stub, see #1151).
+pub async fn get_cross_chain_trace(Path(_tx_hash): Path<String>) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// GET /v1/cross-chain/causality (stub, see #1151).
+pub async fn analyze_causality() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// GET /v1/features (client-side feature flag status stub, see #1151).
+pub async fn get_feature_flag_status() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// POST /v1/notifications/email/bounce (stub, see #1151).
+pub async fn email_bounce_webhook() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-config (stub).
+pub async fn create_anomaly_config(
+    Path(_subscription_id): Path<String>,
+) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// GET /v1/admin/subscriptions/{subscription_id}/anomaly-alerts (stub).
+pub async fn get_anomaly_alerts(
+    Path(_subscription_id): Path<String>,
+) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge (stub).
+pub async fn acknowledge_anomaly_alert(
+    Path((_subscription_id, _alert_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// POST /v1/admin/alerts/silences (stub, see #897/#1151).
+pub async fn create_alert_silence() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// GET /v1/admin/alerts/silences (stub, see #897/#1151).
+pub async fn get_alert_silences() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// DELETE /v1/admin/alerts/silences/{silence_id} (stub).
+pub async fn delete_alert_silence(Path(_silence_id): Path<String>) -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// GET /v1/admin/backup/verification/report (stub, see #894/#1151).
+pub async fn get_backup_verification_report() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
+
+/// POST /v1/admin/backup/verification/trigger (stub, see #894/#1151).
+pub async fn trigger_backup_verification() -> impl IntoResponse {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+    )
+}
