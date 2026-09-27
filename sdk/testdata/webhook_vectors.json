@@ -1,0 +1,103 @@
+{
+  "description": "Shared webhook signature test vectors for the Soroban Pulse SDKs. Scheme (docs/webhook_signing.md): header X-Signature-256 = 'sha256=' + lowercase hex HMAC-SHA256(secret, raw body). A request is valid if the signature matches any of the listed secrets (rotation). 'error' is the expected failure class: missing, format or mismatch.",
+  "header": "X-Signature-256",
+  "vectors": [
+    {
+      "name": "valid signature",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123456}",
+      "signature_header": "sha256=954b9f06dc445e49ad25fe0915edff52a20cb4c4ab799ae88f58325f3b2abcfa",
+      "valid": true
+    },
+    {
+      "name": "valid with secondary secret during rotation",
+      "secrets": [
+        "whsec_new",
+        "whsec_old"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123456}",
+      "signature_header": "sha256=a45ae6ab30c82530a129f9d244b186cf2883223432189e505543569cd66f580d",
+      "valid": true
+    },
+    {
+      "name": "empty payload",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "",
+      "signature_header": "sha256=f4f8bb41dc3c7512dbf8d73f115c0ce2d9810dc28cdd9630a54215174902dcad",
+      "valid": true
+    },
+    {
+      "name": "unicode payload",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "{\"memo\":\"café ✓\"}",
+      "signature_header": "sha256=5c8ba9d48994d689ce62dc4eb88511bee63ae353bfcbb1453bfb32971024ef52",
+      "valid": true
+    },
+    {
+      "name": "tampered payload",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123457}",
+      "signature_header": "sha256=954b9f06dc445e49ad25fe0915edff52a20cb4c4ab799ae88f58325f3b2abcfa",
+      "valid": false,
+      "error": "mismatch"
+    },
+    {
+      "name": "wrong secret",
+      "secrets": [
+        "whsec_other"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123456}",
+      "signature_header": "sha256=954b9f06dc445e49ad25fe0915edff52a20cb4c4ab799ae88f58325f3b2abcfa",
+      "valid": false,
+      "error": "mismatch"
+    },
+    {
+      "name": "truncated signature",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123456}",
+      "signature_header": "sha256=954b9f06dc445e49ad25fe0915edff52a20cb4c4ab799ae88f58325f3b2abc",
+      "valid": false,
+      "error": "mismatch"
+    },
+    {
+      "name": "unsupported algorithm prefix",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123456}",
+      "signature_header": "sha1=954b9f06dc445e49ad25fe0915edff52a20cb4c4ab799ae88f58325f3b2abcfa",
+      "valid": false,
+      "error": "format"
+    },
+    {
+      "name": "non-hex digest",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123456}",
+      "signature_header": "sha256=zz4b9f06dc445e49ad25fe0915edff52a20cb4c4ab799ae88f58325f3b2abcfa",
+      "valid": false,
+      "error": "format"
+    },
+    {
+      "name": "missing header",
+      "secrets": [
+        "whsec_primary"
+      ],
+      "payload": "{\"event_type\":\"contract\",\"contract_id\":\"CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC\",\"ledger\":123456}",
+      "signature_header": "",
+      "valid": false,
+      "error": "missing"
+    }
+  ]
+}

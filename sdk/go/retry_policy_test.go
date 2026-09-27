@@ -180,6 +180,7 @@ func TestRetryCallback(t *testing.T) {
 		StatusCode: 429,
 		Header:     make(http.Header),
 	}
+	assert.True(t, policy.ShouldRetry(resp.StatusCode))
 
 	// First retry
 	policy.OnRetry(1, 1*time.Second, "HTTP 429")

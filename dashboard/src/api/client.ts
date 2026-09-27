@@ -4,7 +4,9 @@ export interface SystemStatus {
   version: string;
 }
 
-export { type Event, type EventListResponse, type EventFilterParams } from "./eventTypes";
+import type { Event, EventListResponse, EventFilterParams } from "./eventTypes";
+
+export type { Event, EventListResponse, EventFilterParams };
 
 export interface MetricPoint {
   timestamp: string;

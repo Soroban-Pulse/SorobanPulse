@@ -21,3 +21,20 @@
 #docs/*.md
 # Then explicitly reverse the ignore rule for a single file:
 #!docs/README.md
+
+# Hand-written files and package tooling (#1127): keep `make generate-sdk`
+# from overwriting them.
+sse.ts
+retry-policy.ts
+webhook-verification.ts
+interceptors.ts
+examples.ts
+__tests__/**
+README.md
+RETRY_AND_BACKOFF.md
+package.json
+package-lock.json
+tsconfig.json
+tsup.config.ts
+jest.config.cjs
+.gitignore

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { dashboardApi, type Event, type EventListResponse, type EventFilterParams } from "../api/client";
 import { EventFilterBar } from "../components/EventFilterBar";
 import { EventTable } from "../components/EventTable";
-import { EmptyState } from "../components/EmptyState";
+import { EmptyFilterResults } from "../components/EmptyFilterResults";
 import { EventDrawer } from "../components/EventDrawer";
 
 export function EventExplorerPage() {
@@ -66,11 +66,7 @@ export function EventExplorerPage() {
       {loading ? (
         <p>Loading events…</p>
       ) : events.length === 0 ? (
-        <EmptyState
-          message="No events match the current filters."
-          actionLabel="Clear Filters"
-          onAction={() => setFilters({ page: 1, limit: 20 })}
-        />
+        <EmptyFilterResults onClearFilter={() => setFilters({ page: 1, limit: 20 })} />
       ) : (
         <>
           <EventTable events={events} onRowClick={handleRowClick} />

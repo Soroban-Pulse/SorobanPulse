@@ -468,7 +468,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Spawn background indexer with health state
+    // ── Role-gated: indexer subsystem ────────────────────────────────────────
+    // ROLE=api  → indexer is skipped; this pod is a pure HTTP API replica.
+    // ROLE=indexer | all → indexer starts; health/metrics HTTP server also binds.
+    info!(role = ?config.role, "Starting with deployment role");
+
+    // Create the SSE ring buffer unconditionally — the HTTP server always needs
+    // a valid (possibly empty) buffer for Last-Event-ID replay, even on api pods.
+    let sse_ring_buf = sse_ring_buffer::SseRingBuffer::new(config.sse_ring_buffer_capacity);
+
+    // Build and wire up the indexer only when this instance is configured to run it.
     let rpc_client = indexer::SorobanRpcClient::new(&config);
     let mut indexer = indexer::Indexer::new(
         pool.clone(),
@@ -479,10 +488,6 @@ async fn main() -> anyhow::Result<()> {
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
-
-    // Create the SSE ring buffer — shared between the indexer (writer) and HTTP
-    // handlers (reader for replay).
-    let sse_ring_buf = sse_ring_buffer::SseRingBuffer::new(config.sse_ring_buffer_capacity);
     indexer.set_sse_ring_buffer(std::sync::Arc::clone(&sse_ring_buf));
 
     // Issue #266: Initialize and seed bloom filter
@@ -596,37 +601,47 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let indexer_handle = tokio::spawn(async move {
-        indexer.run().await;
-    });
+    let indexer_handle = if config.role.runs_indexer() {
+        // Spawn the indexer background task.
+        let handle = tokio::spawn(async move {
+            indexer.run().await;
+        });
 
-    // Spawn index usage monitoring background task
-    index_monitor::spawn(
-        pool.clone(),
-        config.index_check_interval_hours,
-        shutdown_rx.clone(),
-        index_monitor::FragmentationThresholds {
-            warn_ratio: config.fragmentation_warn_threshold,
-            critical_ratio: config.fragmentation_critical_threshold,
-            auto_reindex: config.fragmentation_auto_reindex,
-        },
-    );
+        // Spawn index usage monitoring background task (indexer role only)
+        index_monitor::spawn(
+            pool.clone(),
+            config.index_check_interval_hours,
+            shutdown_rx.clone(),
+            index_monitor::FragmentationThresholds {
+                warn_ratio: config.fragmentation_warn_threshold,
+                critical_ratio: config.fragmentation_critical_threshold,
+                auto_reindex: config.fragmentation_auto_reindex,
+            },
+        );
 
-    // Spawn replica sync monitoring background task (#586)
-    replica_monitor::spawn(pool.clone(), 60, shutdown_rx.clone());
+        // Spawn replica sync monitoring background task (#586)
+        replica_monitor::spawn(pool.clone(), 60, shutdown_rx.clone());
 
-    // Spawn feature flag rollback watcher (#587)
-    feature_flags::spawn(pool.clone(), 60, shutdown_rx.clone());
+        // Spawn feature flag rollback watcher (#587)
+        feature_flags::spawn(pool.clone(), 60, shutdown_rx.clone());
 
-    // Spawn resource metrics collector (#630)
+        // Spawn materialized-view refresh background task
+        stats_refresh::spawn(
+            pool.clone(),
+            config.stats_refresh_interval_secs,
+            shutdown_rx.clone(),
+        );
+
+        Some(handle)
+    } else {
+        info!("ROLE=api: indexer and indexer-only background tasks skipped");
+        // Drop the un-spawned indexer so its resources are freed.
+        drop(indexer);
+        None
+    };
+
+    // Spawn resource metrics collector (all roles — useful on api pods too)
     resource_metrics::spawn_resource_collector(shutdown_rx.clone());
-
-    // Spawn materialized-view refresh background task
-    stats_refresh::spawn(
-        pool.clone(),
-        config.stats_refresh_interval_secs,
-        shutdown_rx.clone(),
-    );
 
     // #496: Spawn audit log purge job
     {
@@ -727,16 +742,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    info!(origins = ?config.allowed_origins, "Allowed CORS origins");
-    info!(
-        rate_limit = config.rate_limit_per_minute,
-        "Rate limit per IP"
-    );
+    info!(role = ?config.role, addr = %addr, "Binding HTTP server");
 
     // Clone pool before it is moved into the router for the tenant map load.
     let pool_for_tenant_map = pool.clone();
 
-    let tenant_map = if config.multi_tenant {
+    let tenant_map = if config.multi_tenant && config.role.runs_full_api() {
         match routes::load_tenant_map(&pool_for_tenant_map).await {
             Ok(map) => {
                 info!(count = map.len(), "Loaded tenant map from database");
@@ -751,28 +762,47 @@ async fn main() -> anyhow::Result<()> {
         std::sync::Arc::new(std::collections::HashMap::new())
     };
 
-    let router = routes::create_router_with_tx_and_tenant_map(
-        pool,
-        read_pool,
-        config.api_keys.clone(),
-        &config.allowed_origins,
-        config.rate_limit_per_minute,
-        config.behind_proxy,
-        health_state,
-        indexer_state,
-        prometheus_handle,
-        event_tx,
-        config.sse_keepalive_interval_ms,
-        config.sse_max_connections,
-        2000,
-        config.event_data_encryption_key,
-        config.event_data_encryption_key_old,
-        config.clone(),
-        Some(schema_validator),
-        tenant_map,
-        shutdown_rx.clone(),
-        sse_ring_buf,
-    );
+    // ROLE=indexer: expose only health + metrics so Kubernetes probes work
+    // and Prometheus can scrape the pod, but skip all API routes.
+    // ROLE=all|api: build the full router.
+    let router = if config.role.runs_full_api() {
+        info!(origins = ?config.allowed_origins, "Allowed CORS origins");
+        info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
+        routes::create_router_with_tx_and_tenant_map(
+            pool,
+            read_pool,
+            config.api_keys.clone(),
+            &config.allowed_origins,
+            config.rate_limit_per_minute,
+            config.behind_proxy,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            event_tx,
+            config.sse_keepalive_interval_ms,
+            config.sse_max_connections,
+            2000,
+            config.event_data_encryption_key,
+            config.event_data_encryption_key_old,
+            config.clone(),
+            Some(schema_validator),
+            tenant_map,
+            shutdown_rx.clone(),
+            sse_ring_buf,
+        )
+    } else {
+        // Indexer-only role: minimal router with health + metrics routes.
+        info!("ROLE=indexer: binding minimal HTTP server (health + metrics only)");
+        routes::create_minimal_router(
+            pool,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            config.clone(),
+            shutdown_rx.clone(),
+            sse_ring_buf,
+        )
+    };
 
     info!(addr = %addr, "Soroban Pulse listening");
 
@@ -791,7 +821,11 @@ async fn main() -> anyhow::Result<()> {
             let _ = shutdown_rx_axum.changed().await;
         })
         .await?;
-    let _ = indexer_handle.await;
+
+    // Wait for the indexer task to finish (only present when role runs indexer).
+    if let Some(handle) = indexer_handle {
+        let _ = handle.await;
+    }
 
     #[cfg(feature = "otel")]
     global::shutdown_tracer_provider();

@@ -95,6 +95,11 @@ generate-sdk: ## Generate TypeScript and Python SDKs from OpenAPI spec
 		-o sdk/python \
 		--additional-properties=library=httpx
 
+sbom: ## Generate a CycloneDX SBOM for the Rust crate (requires cargo-cyclonedx)
+	@command -v cargo-cyclonedx >/dev/null 2>&1 || cargo install cargo-cyclonedx --locked
+	cargo cyclonedx --format json --output-cdx soroban-pulse-sbom.cdx.json
+	@echo "CycloneDX SBOM written to soroban-pulse-sbom.cdx.json"
+
 vacuum: ## Run VACUUM ANALYZE on the events table
 	@if [ -z "$$DATABASE_URL" ]; then echo "DATABASE_URL is not set"; exit 1; fi
 	psql "$$DATABASE_URL" -c "VACUUM ANALYZE events;"

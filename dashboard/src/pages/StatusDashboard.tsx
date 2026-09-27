@@ -1,25 +1,40 @@
-import { useEffect, useState } from "react";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
+import { useEffect, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { dashboardApi, MetricPoint, SystemStatus } from "../api/client";
+import { ChartFigure } from "../components/ChartFigure";
+import { LiveRegion } from "../components/LiveRegion";
 import { StatTile } from "../components/StatTile";
+import { useFormat } from "../i18n/format";
 
 export function StatusDashboard() {
+  const { t } = useTranslation();
+  const format = useFormat();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [metrics, setMetrics] = useState<MetricPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const [updatedAt, setUpdatedAt] = useState<number | null>(null);
+  const [announcement, setAnnouncement] = useState("");
+  const previousStatus = useRef<SystemStatus["status"] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      const [statusResult, metricsResult] = await Promise.all([
-        dashboardApi.getSystemStatus(),
-        dashboardApi.getMetrics(60),
-      ]);
-      if (!cancelled) {
+      try {
+        const [statusResult, metricsResult] = await Promise.all([
+          dashboardApi.getSystemStatus(),
+          dashboardApi.getMetrics(60),
+        ]);
+        if (cancelled) return;
         setStatus(statusResult);
         setMetrics(metricsResult);
-        setLoading(false);
+        setUpdatedAt(Date.now());
+        setError(false);
+      } catch {
+        if (!cancelled) setError(true);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -31,39 +46,41 @@ export function StatusDashboard() {
     };
   }, []);
 
-  if (loading) return <p>Loading system status…</p>;
+  // Announce health changes only; a 15s poll would otherwise be very chatty.
+  useEffect(() => {
+    if (!status) return;
+    if (previousStatus.current && previousStatus.current !== status.status) {
+      setAnnouncement(t("status.changedAnnouncement", { status: t(`status.value.${status.status}`) }));
+    }
+    previousStatus.current = status.status;
+  }, [status, t]);
+
+  if (loading) return <p>{t("status.loading")}</p>;
 
   return (
     <div className="status-dashboard">
-      <div className="stat-row">
-        <StatTile label="Status" value={status?.status ?? "unknown"} />
-        <StatTile label="Uptime" value={`${Math.floor((status?.uptimeSeconds ?? 0) / 3600)}h`} />
-        <StatTile label="Version" value={status?.version ?? "-"} />
+      <div className="page-header">
+        <h1>{t("status.heading")}</h1>
+        {updatedAt && <p className="muted">{t("status.lastUpdated", { time: format.time(updatedAt) })}</p>}
       </div>
+      <LiveRegion message={announcement} />
+      {error && (
+        <p className="error-text" role="alert">
+          {t("common.loadError")}
+        </p>
+      )}
 
-      <section className="chart-section">
-        <h2>Events ingested (last hour)</h2>
-        <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={metrics}>
-            <XAxis dataKey="timestamp" tick={{ fontSize: 10 }} />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey="eventsIngested" stroke="#5b8def" dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
-      </section>
+      <dl className="stat-row">
+        <StatTile
+          label={t("status.tileStatus")}
+          value={t(`status.value.${status?.status ?? "unknown"}`)}
+        />
+        <StatTile label={t("status.tileUptime")} value={format.hours(status?.uptimeSeconds ?? 0)} />
+        <StatTile label={t("status.tileVersion")} value={status?.version ?? t("common.notAvailable")} />
+      </dl>
 
-      <section className="chart-section">
-        <h2>p99 latency (ms)</h2>
-        <ResponsiveContainer width="100%" height={300}>
-          <LineChart data={metrics}>
-            <XAxis dataKey="timestamp" tick={{ fontSize: 10 }} />
-            <YAxis />
-            <Tooltip />
-            <Line type="monotone" dataKey="latencyMsP99" stroke="#e0725b" dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
-      </section>
+      <ChartFigure name="events" dataKey="eventsIngested" data={metrics} />
+      <ChartFigure name="latency" dataKey="latencyMsP99" data={metrics} />
     </div>
   );
 }

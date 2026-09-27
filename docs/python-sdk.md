@@ -7,9 +7,10 @@ and webhook signature verification.
 ## Installation
 
 ```bash
-pip install -e sdk/python              # local development
-pip install -e "sdk/python[async]"     # include aiohttp for AsyncSorobanPulseClient
+pip install -e sdk/python              # local development (sync and async clients)
 ```
+
+`AsyncSorobanPulseClient` uses `httpx`, which is already a core dependency.
 
 ## Quick start
 
@@ -92,7 +93,7 @@ and client construction/header behavior. See `sdk/python/tests/`.
 | Module | Purpose |
 |---|---|
 | `soroban_pulse.client.SorobanPulseClient` | Synchronous REST client |
-| `soroban_pulse.async_client.AsyncSorobanPulseClient` | Async REST client (requires `aiohttp`) |
+| `soroban_pulse.async_client.AsyncSorobanPulseClient` | Async REST client on `httpx.AsyncClient`; pass `transport=` (e.g. `httpx.MockTransport`) in tests |
 | `soroban_pulse.subscriptions.EventSubscription` | SSE event stream consumer |
 | `soroban_pulse.webhooks.verify_webhook_signature` | HMAC-SHA256 webhook verification |
 | `soroban_pulse.exceptions` | `SorobanPulseError`, `ApiError`, `AuthenticationError` |

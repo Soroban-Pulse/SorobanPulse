@@ -1,0 +1,146 @@
+{
+  "app": {
+    "name": "SorobanPulse",
+    "title": "Panel de SorobanPulse"
+  },
+  "a11y": {
+    "skipToContent": "Saltar al contenido principal"
+  },
+  "common": {
+    "close": "Cerrar",
+    "loading": "Cargando…",
+    "loadError": "No se pudieron cargar los datos. Reintentando automáticamente.",
+    "viewDetails": "Ver detalles",
+    "noResults": "Todavía no hay nada que mostrar.",
+    "notAvailable": "—"
+  },
+  "nav": {
+    "primary": "Principal",
+    "menu": "Menú de navegación",
+    "openMenu": "Abrir menú de navegación",
+    "closeMenu": "Cerrar menú de navegación",
+    "status": "Estado",
+    "events": "Eventos",
+    "subscriptions": "Suscripciones",
+    "webhooks": "Webhooks",
+    "live": "Flujo en vivo",
+    "signOut": "Cerrar sesión"
+  },
+  "settings": {
+    "language": "Idioma",
+    "theme": "Tema",
+    "themeSystem": "Sistema",
+    "themeLight": "Claro",
+    "themeDark": "Oscuro"
+  },
+  "login": {
+    "heading": "Inicia sesión en SorobanPulse",
+    "email": "Correo electrónico",
+    "password": "Contraseña",
+    "submit": "Iniciar sesión",
+    "submitting": "Iniciando sesión…",
+    "error": "Correo electrónico o contraseña no válidos"
+  },
+  "status": {
+    "heading": "Estado del sistema",
+    "loading": "Cargando el estado del sistema…",
+    "tileStatus": "Estado",
+    "tileUptime": "Tiempo activo",
+    "tileVersion": "Versión",
+    "lastUpdated": "Última actualización {{time}}",
+    "changedAnnouncement": "El estado del sistema cambió a {{status}}",
+    "value": {
+      "healthy": "Correcto",
+      "degraded": "Degradado",
+      "down": "Caído",
+      "unknown": "Desconocido"
+    }
+  },
+  "charts": {
+    "showData": "Mostrar tabla de datos",
+    "time": "Hora",
+    "events": {
+      "title": "Eventos ingeridos (última hora)",
+      "series": "Eventos ingeridos",
+      "summary": "Gráfico de líneas de eventos ingeridos durante la última hora. Valor más reciente {{latest}}, máximo {{peak}}.",
+      "empty": "Gráfico de líneas de eventos ingeridos durante la última hora. Aún no hay datos."
+    },
+    "latency": {
+      "title": "Latencia p99 (ms)",
+      "series": "Latencia p99 (ms)",
+      "summary": "Gráfico de líneas de la latencia p99 en milisegundos durante la última hora. Valor más reciente {{latest}}, máximo {{peak}}.",
+      "empty": "Gráfico de líneas de la latencia p99 durante la última hora. Aún no hay datos."
+    }
+  },
+  "subscriptions": {
+    "heading": "Suscripciones",
+    "loading": "Cargando suscripciones…",
+    "tableCaption": "Suscripciones",
+    "filters": "Filtrar suscripciones",
+    "search": "Buscar por contrato o URL del webhook",
+    "statusFilter": "Estado",
+    "statusAll": "Todos los estados",
+    "resultCount_one": "Mostrando {{count}} de {{total}} suscripción",
+    "resultCount_other": "Mostrando {{count}} de {{total}} suscripciones",
+    "empty": "Ninguna suscripción coincide con los filtros actuales.",
+    "openDetail": "Ver detalles de la suscripción del contrato {{contract}}",
+    "columns": {
+      "contract": "Contrato",
+      "webhookUrl": "URL del webhook",
+      "eventTypes": "Tipos de evento",
+      "status": "Estado"
+    },
+    "detail": {
+      "title": "Detalles de la suscripción",
+      "id": "ID de suscripción",
+      "recentDeliveries": "Entregas recientes",
+      "loadingDeliveries": "Cargando entregas…",
+      "noDeliveries": "Todavía no hay entregas registradas."
+    },
+    "statusValue": {
+      "active": "Activa",
+      "paused": "En pausa",
+      "failing": "Con errores"
+    }
+  },
+  "webhooks": {
+    "heading": "Entregas de webhooks",
+    "subscription": "Suscripción",
+    "tableCaption": "Historial de entregas de la suscripción seleccionada",
+    "empty": "Todavía no hay entregas para esta suscripción.",
+    "columns": {
+      "attempt": "Intento",
+      "statusCode": "Código de estado",
+      "deliveredAt": "Entregado el"
+    },
+    "outcome": {
+      "success": "{{code}} (correcta)",
+      "failure": "{{code}} (fallida)"
+    }
+  },
+  "live": {
+    "heading": "Flujo de eventos en vivo",
+    "tableCaption": "Eventos más recientes, del más nuevo al más antiguo",
+    "connecting": "Conectando al flujo de eventos…",
+    "connected": "Conectado",
+    "disconnected": "Desconectado. Reconectando…",
+    "pause": "Pausar actualizaciones",
+    "resume": "Reanudar actualizaciones",
+    "paused": "Actualizaciones en pausa. {{count}} eventos en espera.",
+    "empty": "Esperando eventos…",
+    "newEvents_one": "Se recibió {{count}} evento nuevo",
+    "newEvents_other": "Se recibieron {{count}} eventos nuevos",
+    "openDetail": "Ver detalles del evento del ledger {{ledger}}",
+    "columns": {
+      "contract": "Contrato",
+      "type": "Tipo",
+      "ledger": "Ledger",
+      "time": "Hora"
+    },
+    "detail": {
+      "title": "Detalles del evento",
+      "txHash": "Hash de la transacción",
+      "data": "Datos del evento"
+    }
+  }
+}

@@ -142,6 +142,9 @@ pub struct AppState {
     pub circuit_breaker_manager: crate::webhook_circuit_breaker::CircuitBreakerManager,
     /// Issue #881: Bulk export manager for event export jobs.
     pub bulk_export_manager: crate::bulk_export::BulkExportManager,
+    /// Deployment role for this instance — used by the readiness handler to
+    /// apply role-specific readiness semantics.
+    pub role: crate::config::Role,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -150,7 +153,40 @@ pub struct AppState {
     info(
         title = "Soroban Pulse API",
         version = "1.0.0",
-        description = "Indexes Soroban smart contract events on the Stellar network."
+        description = "## Soroban Pulse API
+
+Real-time indexing and querying of Soroban smart contract events on the Stellar network.
+
+---
+
+### Authentication
+
+Most endpoints are open. When the `API_KEY` environment variable is set, all routes except
+`/health` and `/healthz/*` require one of:
+
+- `Authorization: Bearer <API_KEY>` header
+- `X-Api-Key: <API_KEY>` header
+
+Administrative endpoints under `/v1/admin/*` require `ADMIN_API_KEY` (independent of `API_KEY`).
+A missing key returns **401 Unauthorized**; a wrong key returns **403 Forbidden**.
+
+---
+
+### Rate Limiting
+
+Default: **60 requests / minute per IP** (configurable via `RATE_LIMIT_PER_MINUTE`).
+Requests that exceed the limit receive **429 Too Many Requests** with a `Retry-After` header.
+Set `RATE_LIMIT_PER_MINUTE=0` to disable rate limiting entirely.
+
+---
+
+### Guides & Resources
+
+- [Developer Onboarding](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/onboarding.md)
+- [API Usage Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/api-guide.md)
+- [SDK Integration Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sdk-integration-guide.md)
+- [Webhook Verification](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/webhook-verification.md)
+- [Contract Event Schemas](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/contract-event-schemas.md)"
     ),
     paths(
         handlers::health,
@@ -472,6 +508,7 @@ pub fn create_router_with_tx_and_tenant_map(
         adaptive_pool,
         circuit_breaker_manager,
         bulk_export_manager,
+        role: config.role.clone(),
     };
 
     // Spawn cache invalidation task: subscribe to the broadcast channel and
@@ -1416,4 +1453,100 @@ mod tests {
         assert!(v["error"].as_str().is_some());
         assert!(v["correlation_id"].as_str().is_some());
     }
+}
+
+/// Build a minimal HTTP router for `ROLE=indexer` pods.
+///
+/// Exposes only health probes (`/healthz/*`, `/health`) and the Prometheus
+/// `/metrics` endpoint.  No API routes, no rate limiting, no auth middleware.
+/// Kubernetes can still probe liveness/readiness and Prometheus can still
+/// scrape metrics from indexer pods.
+pub fn create_minimal_router(
+    pool: sqlx::PgPool,
+    health_state: std::sync::Arc<crate::config::HealthState>,
+    indexer_state: std::sync::Arc<crate::config::IndexerState>,
+    prometheus_handle: metrics_exporter_prometheus::PrometheusHandle,
+    config: crate::config::Config,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    sse_ring_buf: std::sync::Arc<crate::sse_ring_buffer::SseRingBuffer>,
+) -> Router {
+    use axum::routing::get;
+    use tokio::sync::broadcast;
+
+    // A dummy broadcast sender — no SSE on indexer pods, but AppState requires it.
+    let (event_tx, _) = broadcast::channel::<crate::models::SorobanEvent>(1);
+
+    let read_pool = pool.clone();
+
+    let contract_count_cache = moka::future::Cache::builder()
+        .max_capacity(config.contract_count_cache_size)
+        .time_to_live(std::time::Duration::from_secs(config.contract_count_cache_ttl_secs))
+        .build();
+
+    let stats_cache = moka::future::Cache::builder()
+        .max_capacity(128)
+        .time_to_live(std::time::Duration::from_secs(config.stats_cache_ttl_secs))
+        .build();
+
+    let query_result_cache = std::sync::Arc::new(
+        moka::future::Cache::builder()
+            .max_capacity(config.query_cache_max_capacity)
+            .time_to_live(std::time::Duration::from_secs(config.query_cache_ttl_secs))
+            .build(),
+    );
+
+    let abi_cache = crate::abi::AbiCache::new(
+        config.abi_cache_max_entries,
+        std::time::Duration::from_secs(config.abi_cache_ttl_secs),
+    );
+
+    let sse_connections_per_ip = std::sync::Arc::new(dashmap::DashMap::new());
+
+    let pool_stats = std::sync::Arc::new(crate::connection_pool::PoolStats::new(
+        config.db_max_connections,
+    ));
+    let adaptive_pool = std::sync::Arc::new(crate::adaptive_pool::AdaptiveTunerState::new(
+        crate::adaptive_pool::AdaptivePoolConfig::default(),
+    ));
+
+    let app_state = AppState {
+        pool: pool.clone(),
+        read_pool,
+        health_state,
+        indexer_state,
+        prometheus_handle,
+        event_tx,
+        sse_keepalive_interval_ms: config.sse_keepalive_interval_ms,
+        sse_connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        sse_max_connections: config.sse_max_connections,
+        health_check_timeout_ms: config.health_check_timeout_ms,
+        encryption_key: config.event_data_encryption_key,
+        encryption_key_old: config.event_data_encryption_key_old,
+        contract_count_cache,
+        config: config.clone(),
+        schema_validator: None,
+        tenant_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        stats_cache,
+        shutdown_rx,
+        sse_connections_per_ip,
+        super_admin_key_hash: None,
+        abi_cache,
+        sse_ring_buffer: sse_ring_buf,
+        query_result_cache,
+        anonymization_config: None,
+        pool_stats,
+        adaptive_pool,
+        db: pool,
+        circuit_breaker_manager: crate::webhook_circuit_breaker::CircuitBreakerManager::new(),
+        bulk_export_manager: crate::bulk_export::BulkExportManager::new(),
+        role: config.role.clone(),
+    };
+
+    Router::new()
+        .route("/health", get(handlers::health))
+        .route("/healthz/live", get(handlers::health_live))
+        .route("/healthz/ready", get(handlers::health_ready))
+        .route("/healthz/postgres", get(handlers::health_postgres))
+        .route("/metrics", get(handlers::metrics))
+        .with_state(app_state)
 }

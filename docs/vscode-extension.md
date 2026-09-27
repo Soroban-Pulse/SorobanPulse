@@ -57,3 +57,14 @@ configured `sorobanpulse.baseUrl` and does not require an API key.
 | `sorobanpulse.apiKey` | `""` | Legacy fallback — prefer **Set API Key**. |
 | `sorobanpulse.adminApiKey` | `""` | Legacy fallback — prefer **Set Admin API Key**. |
 | `sorobanpulse.timeoutMs` | `10000` | Request timeout for both the Request Tester and Test Webhook. |
+
+## Contract ID hover
+
+Hovering a 56-character contract ID (`C` followed by 55 base32 characters)
+in Rust, TypeScript, JavaScript or JSON files shows its summary from
+`GET /v1/contracts/{contract_id}/summary`: total events, last seen ledger
+(`ledger_range.max`) and last event time. Responses are cached for 30
+seconds (the cache is dropped when any `sorobanpulse.*` setting changes).
+Unknown contracts, non-200 responses, timeouts (3 s) and an unreachable
+server show no hover. The cache and rendering live in `src/contractHover.ts`
+(unit tested, `npm test`); the provider is in `src/contractHoverProvider.ts`.

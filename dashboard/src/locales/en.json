@@ -1,0 +1,146 @@
+{
+  "app": {
+    "name": "SorobanPulse",
+    "title": "SorobanPulse Dashboard"
+  },
+  "a11y": {
+    "skipToContent": "Skip to main content"
+  },
+  "common": {
+    "close": "Close",
+    "loading": "Loading…",
+    "loadError": "Could not load data. Retrying automatically.",
+    "viewDetails": "View details",
+    "noResults": "Nothing to show yet.",
+    "notAvailable": "—"
+  },
+  "nav": {
+    "primary": "Primary",
+    "menu": "Navigation menu",
+    "openMenu": "Open navigation menu",
+    "closeMenu": "Close navigation menu",
+    "status": "Status",
+    "events": "Events",
+    "subscriptions": "Subscriptions",
+    "webhooks": "Webhooks",
+    "live": "Live stream",
+    "signOut": "Sign out"
+  },
+  "settings": {
+    "language": "Language",
+    "theme": "Theme",
+    "themeSystem": "System",
+    "themeLight": "Light",
+    "themeDark": "Dark"
+  },
+  "login": {
+    "heading": "Sign in to SorobanPulse",
+    "email": "Email",
+    "password": "Password",
+    "submit": "Sign in",
+    "submitting": "Signing in…",
+    "error": "Invalid email or password"
+  },
+  "status": {
+    "heading": "System status",
+    "loading": "Loading system status…",
+    "tileStatus": "Status",
+    "tileUptime": "Uptime",
+    "tileVersion": "Version",
+    "lastUpdated": "Last updated {{time}}",
+    "changedAnnouncement": "System status changed to {{status}}",
+    "value": {
+      "healthy": "Healthy",
+      "degraded": "Degraded",
+      "down": "Down",
+      "unknown": "Unknown"
+    }
+  },
+  "charts": {
+    "showData": "Show data table",
+    "time": "Time",
+    "events": {
+      "title": "Events ingested (last hour)",
+      "series": "Events ingested",
+      "summary": "Line chart of events ingested over the last hour. Latest value {{latest}}, peak {{peak}}.",
+      "empty": "Line chart of events ingested over the last hour. No data points yet."
+    },
+    "latency": {
+      "title": "p99 latency (ms)",
+      "series": "p99 latency (ms)",
+      "summary": "Line chart of p99 latency in milliseconds over the last hour. Latest value {{latest}}, peak {{peak}}.",
+      "empty": "Line chart of p99 latency over the last hour. No data points yet."
+    }
+  },
+  "subscriptions": {
+    "heading": "Subscriptions",
+    "loading": "Loading subscriptions…",
+    "tableCaption": "Subscriptions",
+    "filters": "Filter subscriptions",
+    "search": "Search by contract or webhook URL",
+    "statusFilter": "Status",
+    "statusAll": "All statuses",
+    "resultCount_one": "Showing {{count}} of {{total}} subscription",
+    "resultCount_other": "Showing {{count}} of {{total}} subscriptions",
+    "empty": "No subscriptions match the current filters.",
+    "openDetail": "View details for subscription on contract {{contract}}",
+    "columns": {
+      "contract": "Contract",
+      "webhookUrl": "Webhook URL",
+      "eventTypes": "Event types",
+      "status": "Status"
+    },
+    "detail": {
+      "title": "Subscription details",
+      "id": "Subscription ID",
+      "recentDeliveries": "Recent deliveries",
+      "loadingDeliveries": "Loading deliveries…",
+      "noDeliveries": "No deliveries recorded yet."
+    },
+    "statusValue": {
+      "active": "Active",
+      "paused": "Paused",
+      "failing": "Failing"
+    }
+  },
+  "webhooks": {
+    "heading": "Webhook deliveries",
+    "subscription": "Subscription",
+    "tableCaption": "Delivery history for the selected subscription",
+    "empty": "No deliveries for this subscription yet.",
+    "columns": {
+      "attempt": "Attempt",
+      "statusCode": "Status code",
+      "deliveredAt": "Delivered at"
+    },
+    "outcome": {
+      "success": "{{code}} (succeeded)",
+      "failure": "{{code}} (failed)"
+    }
+  },
+  "live": {
+    "heading": "Live event stream",
+    "tableCaption": "Most recent events, newest first",
+    "connecting": "Connecting to the event stream…",
+    "connected": "Connected",
+    "disconnected": "Disconnected. Reconnecting…",
+    "pause": "Pause updates",
+    "resume": "Resume updates",
+    "paused": "Updates paused. {{count}} events buffered.",
+    "empty": "Waiting for events…",
+    "newEvents_one": "{{count}} new event received",
+    "newEvents_other": "{{count}} new events received",
+    "openDetail": "View details for event in ledger {{ledger}}",
+    "columns": {
+      "contract": "Contract",
+      "type": "Type",
+      "ledger": "Ledger",
+      "time": "Time"
+    },
+    "detail": {
+      "title": "Event details",
+      "txHash": "Transaction hash",
+      "data": "Event data"
+    }
+  }
+}

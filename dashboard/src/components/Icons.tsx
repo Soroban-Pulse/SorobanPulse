@@ -1,3 +1,22 @@
+// Decorative icons. Always pair with a visible label or an aria-label on the
+// surrounding control; the SVGs themselves are hidden from assistive tech.
+
+export function MenuIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" width="24" height="24" viewBox="0 0 24 24">
+      <path d="M3 6h18M3 12h18M3 18h18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function CloseIcon() {
+  return (
+    <svg aria-hidden="true" focusable="false" width="24" height="24" viewBox="0 0 24 24">
+      <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function IconEmpty() {
   return (
     <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">

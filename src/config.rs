@@ -106,6 +106,53 @@ impl IndexerState {
     }
 }
 
+/// Deployment role — controls which subsystems start on this instance.
+///
+/// | Value      | Starts indexer? | Starts HTTP server? |
+/// |------------|-----------------|---------------------|
+/// | `All`      | ✓               | ✓ (default)         |
+/// | `Api`      | ✗               | ✓                   |
+/// | `Indexer`  | ✓               | ✓ (health + metrics only) |
+///
+/// Set via `ROLE=all|api|indexer`.  The default (`all`) preserves
+/// backward-compatible behaviour — a single pod runs everything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Run both the indexer and the full HTTP server (default).
+    All,
+    /// Run only the HTTP API server; skip indexer startup entirely.
+    Api,
+    /// Run only the indexer; expose a minimal HTTP server for health/metrics.
+    Indexer,
+}
+
+impl Role {
+    fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "api" => Self::Api,
+            "indexer" => Self::Indexer,
+            _ => Self::All,
+        }
+    }
+
+    /// Returns `true` when the indexer background task should be spawned.
+    pub fn runs_indexer(&self) -> bool {
+        matches!(self, Self::All | Self::Indexer)
+    }
+
+    /// Returns `true` when the full Axum HTTP server should bind.
+    /// Even the `Indexer` role binds a minimal server for health/metrics.
+    pub fn runs_http_server(&self) -> bool {
+        true
+    }
+
+    /// Returns `true` when all API routes should be registered.
+    /// The `Indexer` role only registers health + metrics routes.
+    pub fn runs_full_api(&self) -> bool {
+        matches!(self, Self::All | Self::Api)
+    }
+}
+
 /// Deployment environment — controls strictness of defaults.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Environment {
@@ -498,6 +545,10 @@ pub struct Config {
     pub ml_confidence_threshold: f64,
     /// Enable automatic model retraining
     pub ml_auto_retrain: bool,
+
+    /// Deployment role: controls which subsystems start on this instance.
+    /// Set via `ROLE=all|api|indexer`. Default: `all` (backward-compatible).
+    pub role: Role,
 }
 
 impl Default for Config {
@@ -673,6 +724,7 @@ impl Default for Config {
             ml_min_training_samples: 100,
             ml_confidence_threshold: 0.8,
             ml_auto_retrain: true,
+            role: Role::All,
         }
     }
 }
@@ -1786,6 +1838,7 @@ impl Config {
             ml_auto_retrain: env_or_file("ML_AUTO_RETRAIN", &file)
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
                 .unwrap_or(true),
+            role: Role::from_str(&env_or_file_or("ROLE", &file, "all")),
         }
     }
 }

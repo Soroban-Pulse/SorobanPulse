@@ -1,0 +1,22 @@
+{{- if .Values.grafana.dashboardConfigMap.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}-grafana-dashboard
+  namespace: {{ .Values.grafana.dashboardConfigMap.namespace | default .Release.Namespace }}
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+    # Label picked up by the Grafana sidecar (grafana-sc-dashboard).
+    # Must match grafana.sidecar.dashboards.label in your Grafana Helm values.
+    {{ .Values.grafana.dashboardConfigMap.sidecarLabel }}: {{ .Values.grafana.dashboardConfigMap.sidecarLabelValue | quote }}
+    {{- with .Values.grafana.dashboardConfigMap.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.grafana.dashboardConfigMap.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  soroban-pulse-dashboard.json: |-
+{{ .Files.Get "dashboards/soroban-pulse-dashboard.json" | indent 4 }}
+{{- end }}

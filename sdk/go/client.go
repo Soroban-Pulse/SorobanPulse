@@ -1,14 +1,12 @@
 package soroban_pulse
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -105,7 +103,7 @@ func (c *Client) GetEvents(ctx context.Context, opts *GetEventsOptions) (*Events
 	}
 
 	var result EventsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeJSON(resp, &result); err != nil {
 		return nil, err
 	}
 
@@ -130,7 +128,7 @@ func (c *Client) GetEventsByContract(ctx context.Context, contractID string, opt
 	}
 
 	var result EventsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeJSON(resp, &result); err != nil {
 		return nil, err
 	}
 
@@ -151,7 +149,7 @@ func (c *Client) GetEventsByTransactionHash(ctx context.Context, txHash string) 
 	}
 
 	var result EventsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeJSON(resp, &result); err != nil {
 		return nil, err
 	}
 
@@ -176,7 +174,9 @@ func (c *Client) StreamEvents(ctx context.Context, contractID *string, handler f
 	c.setHeaders(req)
 	req.Header.Set("Accept", "text/event-stream")
 
-	resp, err := c.doRequestWithRetry(ctx, req)
+	// http.Client.Timeout also bounds reading the body, which would cut a
+	// long-lived stream off; the stream's lifetime is governed by ctx instead.
+	resp, err := c.doWithRetry(ctx, c.streamingClient(), req)
 	if err != nil {
 		return err
 	}
@@ -187,37 +187,25 @@ func (c *Client) StreamEvents(ctx context.Context, contractID *string, handler f
 		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	reader := io.NewReader(resp.Body)
-	buffer := make([]byte, 0, 64*1024)
+	stream := newSSEReader(resp.Body)
 	for {
-		line, err := reader.ReadBytes('\n')
-		if err != nil && err != io.EOF {
+		msg, err := stream.Next()
+		if err != nil {
+			if err == io.EOF || ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return err
 		}
 
-		if len(line) > 0 {
-			line = bytes.TrimSuffix(line, []byte("\n"))
-			if bytes.HasPrefix(line, []byte("data: ")) {
-				data := line[6:]
-				if len(data) > 0 {
-					var event Event
-					if err := json.Unmarshal(data, &event); err != nil {
-						// Log but continue on parse errors
-						continue
-					}
-					if err := handler(&event); err != nil {
-						return err
-					}
-				}
-			}
+		var event Event
+		if err := json.Unmarshal([]byte(msg.Data), &event); err != nil {
+			// Skip frames that are not events (e.g. lag notices).
+			continue
 		}
-
-		if err == io.EOF {
-			break
+		if err := handler(&event); err != nil {
+			return err
 		}
 	}
-
-	return nil
 }
 
 // GetHealth checks the service health
@@ -230,11 +218,32 @@ func (c *Client) GetHealth(ctx context.Context) (*HealthResponse, error) {
 	}
 
 	var result HealthResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeJSON(resp, &result); err != nil {
 		return nil, err
 	}
 
 	return &result, nil
+}
+
+// APIError is returned when the API answers with a non-2xx status.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("soroban pulse API error: HTTP %d: %s", e.StatusCode, e.Body)
+}
+
+// decodeJSON closes resp.Body and decodes it into out, or returns an
+// *APIError for non-2xx responses.
+func decodeJSON(resp *http.Response, out interface{}) error {
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return &APIError{StatusCode: resp.StatusCode, Body: strings.TrimSpace(string(body))}
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
 }
 
 // doRequest performs an HTTP request
@@ -250,6 +259,11 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body io.Read
 
 // doRequestWithRetry performs an HTTP request with retry logic
 func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*http.Response, error) {
+	return c.doWithRetry(ctx, c.httpClient, req)
+}
+
+// doWithRetry performs an HTTP request on httpClient with retry logic
+func (c *Client) doWithRetry(ctx context.Context, httpClient *http.Client, req *http.Request) (*http.Response, error) {
 	var lastResp *http.Response
 	var lastErr error
 
@@ -282,7 +296,7 @@ func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*ht
 			req = newReq
 		}
 
-		resp, err := c.httpClient.Do(req)
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			lastErr = err
 			if attempt < c.retryPolicy.MaxRetries {
@@ -313,6 +327,14 @@ func (c *Client) doRequestWithRetry(ctx context.Context, req *http.Request) (*ht
 		return lastResp, nil
 	}
 	return nil, lastErr
+}
+
+// streamingClient returns a copy of the HTTP client without an overall
+// timeout, for long-lived SSE connections.
+func (c *Client) streamingClient() *http.Client {
+	streaming := *c.httpClient
+	streaming.Timeout = 0
+	return &streaming
 }
 
 // setHeaders sets common headers for requests

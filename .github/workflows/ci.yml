@@ -234,6 +234,41 @@ jobs:
           path: nextest-archive.tar.zst
           retention-days: 1
 
+  features:
+    name: Check each feature (cargo-hack)
+    # Default-feature jobs never compile code behind optional features
+    # (quantum-crypto, istio, linkerd, full-observability, kafka, sqs, pubsub).
+    # `--each-feature` checks every feature on its own plus --no-default-features.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: features
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack,sqlx-cli
+      # cmake builds librdkafka for the `kafka` feature (rdkafka `cmake-build`).
+      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev cmake
+      # sqlx `query!` macros are checked against the live schema at compile time.
+      - run: sqlx migrate run
+      - run: cargo hack check --each-feature --no-dev-deps
+
   test:
     name: Test (rust stable, pg ${{ matrix.postgres }})
     runs-on: ubuntu-latest

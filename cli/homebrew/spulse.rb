@@ -28,17 +28,12 @@ class Spulse < Formula
 
   def install
     bin.install "spulse"
-  end
-
-  # Generate shell completions at install time
-  def post_install
-    (bash_completion/"spulse").write `#{bin}/spulse --generate bash 2>/dev/null || true`
-    (zsh_completion/"_spulse").write `#{bin}/spulse --generate zsh 2>/dev/null || true`
-    (fish_completion/"spulse.fish").write `#{bin}/spulse --generate fish 2>/dev/null || true`
+    generate_completions_from_executable(bin/"spulse", "completions")
   end
 
   test do
     assert_match "spulse", shell_output("#{bin}/spulse --version")
+    assert_match "_spulse", shell_output("#{bin}/spulse completions zsh")
     system bin/"spulse", "config", "path"
   end
 end

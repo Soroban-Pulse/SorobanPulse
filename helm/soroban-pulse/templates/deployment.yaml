@@ -1,3 +1,20 @@
+{{/*
+──────────────────────────────────────────────────────────────────────────────
+Deployment(s)
+
+When splitMode is false (default): a single Deployment runs both the indexer
+and the HTTP API  (ROLE=all). This preserves backward compatibility — a simple
+`helm upgrade` from an existing installation with no values change is a no-op.
+
+When splitMode is true: the single Deployment is replaced by two separate
+Deployments:
+  • <name>-api      – ROLE=api,     scaled by HPA, serves HTTP traffic
+  • <name>-indexer  – ROLE=indexer, fixed replicas (1 active + optional standby)
+──────────────────────────────────────────────────────────────────────────────
+*/}}
+
+{{- if not .Values.splitMode }}
+{{/* ── COMBINED MODE (backward-compatible default) ─────────────────────── */}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,7 +22,9 @@ metadata:
   labels:
     {{- include "soroban-pulse.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   strategy:
     {{- toYaml .Values.strategy | nindent 4 }}
   selector:
@@ -63,8 +82,10 @@ spec:
                 name: {{ include "soroban-pulse.fullname" . }}-config
             - secretRef:
                 name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "soroban-pulse.fullname" .)) }}
-          {{- with .Values.extraEnv }}
           env:
+            - name: ROLE
+              value: "all"
+          {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
           livenessProbe:
@@ -81,3 +102,205 @@ spec:
             initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
             periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
             failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+
+{{- else }}
+{{/* ── SPLIT MODE ──────────────────────────────────────────────────────── */}}
+
+# ── API Deployment ────────────────────────────────────────────────────────────
+# Runs ROLE=api; scaled horizontally by HPA.
+# Does NOT run the indexer or any indexer-only background workers.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}-api
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  {{- if not .Values.api.autoscaling.enabled }}
+  replicas: {{ .Values.api.replicaCount }}
+  {{- end }}
+  strategy:
+    {{- toYaml (.Values.api.strategy | default .Values.strategy) | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "soroban-pulse.apiSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "soroban-pulse.apiSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.api.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "soroban-pulse.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.api.nodeSelector | default .Values.nodeSelector) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.api.affinity | default .Values.affinity) }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.api.tolerations | default .Values.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.api.topologySpreadConstraints | default .Values.topologySpreadConstraints) }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}-api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+          resources:
+            {{- toYaml (.Values.api.resources | default .Values.resources) | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "soroban-pulse.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "soroban-pulse.fullname" .)) }}
+          env:
+            - name: ROLE
+              value: "api"
+          {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.api.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path }}
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.path }}
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+---
+# ── Indexer Deployment ────────────────────────────────────────────────────────
+# Runs ROLE=indexer; always exactly indexer.replicaCount replicas (1 + optional
+# standby).  The advisory-lock mechanism ensures only one pod actively indexes
+# at a time — additional pods wait on standby and auto-promote on leader failure.
+# NOT scaled by HPA.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}-indexer
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  # Fixed replica count — never scaled by HPA.
+  replicas: {{ .Values.indexer.replicaCount }}
+  # Recreate strategy keeps exactly the configured replica count; use
+  # RollingUpdate only if you understand the two-leader window risk.
+  strategy:
+    {{- toYaml (.Values.indexer.strategy | default (dict "type" "RollingUpdate" "rollingUpdate" (dict "maxUnavailable" 0 "maxSurge" 1))) | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "soroban-pulse.indexerSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "soroban-pulse.indexerSelectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- with .Values.indexer.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "soroban-pulse.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.indexer.nodeSelector | default .Values.nodeSelector) }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.indexer.affinity | default .Values.affinity) }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with (.Values.indexer.tolerations | default .Values.tolerations) }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}-indexer
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+          resources:
+            {{- toYaml (.Values.indexer.resources | default .Values.resources) | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "soroban-pulse.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "soroban-pulse.fullname" .)) }}
+          env:
+            - name: ROLE
+              value: "indexer"
+          {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.indexer.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path }}
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          # Indexer readiness: ready when the advisory lock is held (active leader).
+          # Standby pods report 503 until they are promoted — this is intentional.
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.readinessProbe.path }}
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: {{ .Values.indexer.readinessProbe.initialDelaySeconds | default 15 }}
+            periodSeconds: {{ .Values.indexer.readinessProbe.periodSeconds | default 10 }}
+            failureThreshold: {{ .Values.indexer.readinessProbe.failureThreshold | default 6 }}
+
+{{- end }}

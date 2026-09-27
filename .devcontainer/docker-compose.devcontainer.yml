@@ -1,0 +1,82 @@
+version: "3.9"
+
+# ── Dev Container Docker Compose override ─────────────────────────────────────
+# This file is used exclusively by the VS Code / GitHub Codespaces dev container.
+# It replaces the production docker-compose.yml for development purposes:
+#   - The `app` service uses the dev-specific Dockerfile (not the production one)
+#   - Only the services a contributor needs day-to-day are started
+#     (app + postgres).  Run `docker compose up redis prometheus grafana`
+#     separately if you need those.
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: soroban
+      POSTGRES_PASSWORD: soroban
+      POSTGRES_DB: soroban_pulse
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U soroban"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── App (dev container) ──────────────────────────────────────────────────────
+  # Built from .devcontainer/Dockerfile which installs all dev tooling.
+  # The workspace is mounted as a bind-mount so edits are reflected instantly.
+  app:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      # Mount the project source so cargo build artefacts persist between
+      # rebuilds without being trapped inside the image.
+      - ..:/workspaces/SorobanPulse:cached
+      # Persist the Cargo registry and git objects across container rebuilds
+      # so the first `cargo build` after a rebuild isn't a cold download.
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      # Persist compiled artefacts so incremental builds work across restarts.
+      - cargo-target:/workspaces/SorobanPulse/target
+      # Persist Node modules between rebuilds.
+      - node-modules-frontend:/workspaces/SorobanPulse/frontend/node_modules
+    environment:
+      # ── Database ──────────────────────────────────────────────────────────
+      DATABASE_URL: postgres://soroban:soroban@db:5432/soroban_pulse
+      POSTGRES_USER: soroban
+      POSTGRES_PASSWORD: soroban
+      POSTGRES_DB: soroban_pulse
+      # ── App config ────────────────────────────────────────────────────────
+      STELLAR_RPC_URL: https://soroban-testnet.stellar.org
+      START_LEDGER: "0"
+      PORT: "3000"
+      RUST_LOG: info
+      ENVIRONMENT: development
+      ALLOWED_ORIGINS: "*"
+      ALLOW_INSECURE_RPC: "true"
+      # ── Codespaces / Remote – keep the terminal nice ───────────────────────
+      TERM: xterm-256color
+    ports:
+      - "3000:3000"
+      - "5173:5173"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Keep the container alive so VS Code can attach; the actual server is
+    # started manually with `make run` or launched via VS Code Run & Debug.
+    command: sleep infinity
+
+volumes:
+  pgdata-dev:
+  cargo-registry:
+  cargo-git:
+  cargo-target:
+  node-modules-frontend:

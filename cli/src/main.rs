@@ -4,10 +4,11 @@ mod exporter;
 mod formatter;
 mod query;
 mod subscription;
+mod tail;
 mod webhook_test;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use colored::Colorize;
 use std::path::PathBuf;
 
@@ -23,9 +24,12 @@ use query::{
 // CLI definition
 // ---------------------------------------------------------------------------
 
+/// `spulse --version` output: crate version plus the git commit it was built from.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), " (", env!("SPULSE_GIT_SHA"), ")");
+
 /// spulse — query and analyze Soroban Pulse events from the command line.
 #[derive(Parser)]
-#[command(name = "spulse", version, about, long_about = None)]
+#[command(name = "spulse", version = VERSION, about, long_about = None)]
 #[command(propagate_version = true)]
 struct Cli {
     /// Soroban Pulse base URL (overrides config)
@@ -146,6 +150,22 @@ enum Commands {
         action: SubscriptionAction,
     },
 
+    /// Print a shell completion script (bash, zsh, fish, powershell, elvish)
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
+
+    /// Stream live events as NDJSON (one JSON object per line)
+    Tail {
+        /// Contract ID to stream events for
+        #[arg(long, short = 'c')]
+        contract: String,
+        /// Filter: event type (contract, diagnostic, system)
+        #[arg(long = "type", short = 't')]
+        event_type: Option<String>,
+    },
+
     /// Send a synthetic test event to a webhook URL and report the result
     WebhookTest {
         /// Callback URL to POST the test payload to
@@ -239,6 +259,12 @@ fn main() {
 fn run() -> Result<()> {
     let cli = Cli::parse();
 
+    // Completions need no config, so a broken config file cannot break them.
+    if let Commands::Completions { shell } = cli.command {
+        clap_complete::generate(shell, &mut Cli::command(), "spulse", &mut std::io::stdout());
+        return Ok(());
+    }
+
     // Load config and apply CLI overrides
     let mut cfg = Config::load()?;
     if let Some(url) = cli.base_url    { cfg.base_url = url; }
@@ -327,9 +353,16 @@ fn run() -> Result<()> {
             println!("{} {} record(s) → {}", "Exported".green().bold(), n, output.display());
         }
 
+        Commands::Completions { .. } => unreachable!("handled before loading config"),
+
         Commands::Config { action } => handle_config(action)?,
 
         Commands::Subscriptions { action } => handle_subscription(&cfg, action)?,
+
+        Commands::Tail { contract, event_type } => {
+            let client = ApiClient::new(&cfg)?;
+            tail::run(&client, &contract, event_type.as_deref())?;
+        }
 
         Commands::WebhookTest { url, contract, timeout } => {
             let result = webhook_test::send(&url, &contract, timeout)?;

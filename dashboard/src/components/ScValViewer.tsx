@@ -108,7 +108,7 @@ function renderValue(value: unknown): JSX.Element {
   if (Array.isArray(value)) {
     return (
       <span className="scval-array">
-        [{value.map((item, i) => renderValue(item)).reduce((prev, curr) => (
+        [{value.map((item) => renderValue(item)).reduce((prev, curr, i) => (
           <>
             {prev}
             {i > 0 && <span className="scval-comma">, </span>}

@@ -1,0 +1,43 @@
+name: Helm Chart
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "helm/**"
+      - "ct.yaml"
+      - ".github/workflows/helm.yml"
+  pull_request:
+    paths:
+      - "helm/**"
+      - "ct.yaml"
+      - ".github/workflows/helm.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: helm lint & ct lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Installs ct plus the yamllint / yamale tools it runs.
+      - uses: helm/chart-testing-action@v2.7.0
+
+      - name: helm lint
+        run: helm lint --strict helm/soroban-pulse
+
+      - name: ct lint
+        run: ct lint --config ct.yaml --charts helm/soroban-pulse

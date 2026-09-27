@@ -155,9 +155,9 @@ export function cacheInterceptor(ttlMs: number = 60000): Interceptor {
     },
 
     async onResponse(response: Response): Promise<Response> {
-      if (response.ok && (response.request?.method === 'GET' || true)) {
-        // Cache successful GET responses
-        // Note: Response.request is not standard, this is pseudocode
+      // `Response` does not expose the request method, so every successful
+      // response is cached (same behaviour as before, now type-correct).
+      if (response.ok) {
         cache.set(response.url, {
           response: response.clone(),
           expiry: Date.now() + ttlMs,

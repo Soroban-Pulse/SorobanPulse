@@ -7,6 +7,7 @@ Browse, test, and inspect [Soroban Pulse](https://github.com/soroban-pulse/sorob
 - **API Explorer** — sidebar tree of all endpoints grouped by category (Events, Contracts, Subscriptions, Admin, …)
 - **Request Tester** — send real HTTP requests with path params, query params, custom headers, and a body editor
 - **Response Viewer** — formatted JSON body, status badge, duration, and response headers
+- **Contract hover** - hover a `C…` contract ID in Rust, TypeScript, JavaScript or JSON to see its total events, last seen ledger and last event time
 
 ## Getting Started
 
@@ -34,6 +35,11 @@ npm install
 npm run package        # builds soroban-pulse-explorer-x.x.x.vsix
 npm run publish        # publishes to VS Code Marketplace (requires vsce login)
 ```
+
+Releases are automated: bump `version` in `package.json`, add the entry to
+`CHANGELOG.md`, then push a matching `vscode-extension-vX.Y.Z` tag. The
+`VS Code Extension Release` workflow packages the `.vsix` and publishes it to
+the VS Code Marketplace (`VSCE_PAT` secret) and Open VSX (`OVSX_PAT` secret).
 
 ## Requirements
 

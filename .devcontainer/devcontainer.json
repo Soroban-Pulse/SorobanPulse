@@ -1,0 +1,78 @@
+{
+  "name": "SorobanPulse Dev",
+
+  // ── Compose-based setup ───────────────────────────────────────────────────
+  // Uses a dedicated override file so the dev container gets a fresh build
+  // with dev tools installed, while the production Dockerfile stays lean.
+  "dockerComposeFile": "docker-compose.devcontainer.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/SorobanPulse",
+
+  // ── Port forwards ─────────────────────────────────────────────────────────
+  "forwardPorts": [3000, 5173, 5432],
+  "portsAttributes": {
+    "3000": {
+      "label": "API (Rust / Axum)",
+      "onAutoForward": "notify"
+    },
+    "5173": {
+      "label": "Web frontend (Vite)",
+      "onAutoForward": "notify"
+    },
+    "5432": {
+      "label": "PostgreSQL",
+      "onAutoForward": "silent"
+    }
+  },
+
+  // ── Post-create: migrations + optional seed data ──────────────────────────
+  "postCreateCommand": "bash .devcontainer/postCreate.sh",
+
+  // ── VS Code extensions ────────────────────────────────────────────────────
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        // Rust
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "vadimcn.vscode-lldb",
+        "serayuzgur.crates",
+
+        // Web / TypeScript
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "bradlc.vscode-tailwindcss",
+
+        // Database
+        "cweijan.vscode-postgresql-client2",
+
+        // General DX
+        "eamodio.gitlens",
+        "github.vscode-pull-request-github",
+        "ms-azuretools.vscode-docker",
+        "EditorConfig.EditorConfig",
+        "streetsidesoftware.code-spell-checker",
+        "usernamehw.errorlens"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.buildScripts.enable": true,
+        "rust-analyzer.checkOnSave.command": "clippy",
+        "rust-analyzer.checkOnSave.extraArgs": ["--", "-D", "warnings"],
+        "editor.formatOnSave": true,
+        "[rust]": {
+          "editor.defaultFormatter": "rust-lang.rust-analyzer"
+        },
+        "[typescript]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "[typescriptreact]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "terminal.integrated.defaultProfile.linux": "bash"
+      }
+    }
+  },
+
+  // ── Container user ────────────────────────────────────────────────────────
+  "remoteUser": "vscode"
+}

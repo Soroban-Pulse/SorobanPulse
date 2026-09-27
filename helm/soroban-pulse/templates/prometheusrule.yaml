@@ -1,0 +1,319 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}
+  {{- if .Values.prometheusRule.namespace }}
+  namespace: {{ .Values.prometheusRule.namespace }}
+  {{- else }}
+  namespace: {{ .Release.Namespace }}
+  {{- end }}
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: soroban_pulse
+      rules:
+        - alert: IndexerLagHigh
+          expr: soroban_pulse_indexer_lag_ledgers > 100
+          for: 5m
+          labels:
+            severity: warning
+            component: indexer
+          annotations:
+            summary: "Soroban Pulse indexer is falling behind"
+            description: "Indexer lag is {{ "{{" }} $value {{ "}}" }} ledgers (threshold: 100). The indexer may be experiencing RPC errors or database slowness. Check logs with: kubectl logs -l app=soroban-pulse | grep 'Indexer error'"
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/indexer-lag.md"
+
+        - alert: IndexerLagCritical
+          expr: soroban_pulse_indexer_lag_ledgers > 500
+          for: 10m
+          labels:
+            severity: critical
+            component: indexer
+          annotations:
+            summary: "Soroban Pulse indexer lag is critical"
+            description: "Indexer lag is {{ "{{" }} $value {{ "}}" }} ledgers (threshold: 500). Immediate investigation required. Check RPC endpoint health and database performance."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/indexer-lag.md"
+
+        - alert: IndexerStall
+          expr: time() - soroban_pulse_indexer_last_poll_timestamp > 120
+          for: 0m
+          labels:
+            severity: critical
+            component: indexer
+          annotations:
+            summary: "Soroban Pulse indexer has stalled"
+            description: "No successful indexer poll in {{ "{{" }} $value | humanizeDuration {{ "}}" }}. The indexer may have lost the advisory lock or crashed. Check replica health and restart if necessary."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/indexer-lag.md"
+
+        - alert: HighRPCErrorRate
+          expr: |
+            rate(soroban_pulse_rpc_errors_total[5m])
+            /
+            (rate(soroban_pulse_rpc_errors_total[5m]) + rate(soroban_pulse_events_indexed_total[5m]) + 0.001)
+            > 0.05
+          for: 5m
+          labels:
+            severity: critical
+            component: indexer
+          annotations:
+            summary: "Soroban Pulse RPC error rate is above 5%"
+            description: "More than 5% of RPC calls are failing over the last 5 minutes (current rate: {{ "{{" }} $value | humanizePercentage {{ "}}" }}). Check RPC endpoint connectivity and consider switching to a backup RPC node."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/rpc-errors.md"
+
+        - alert: DBPoolExhaustion
+          expr: soroban_pulse_db_pool_size >= soroban_pulse_db_pool_max
+          for: 1m
+          labels:
+            severity: critical
+            component: database
+          annotations:
+            summary: "Soroban Pulse database connection pool is exhausted"
+            description: "The database connection pool has been at maximum capacity for more than 1 minute (pool_size={{ "{{" }} $value {{ "}}" }}). New requests may be queued or rejected. Consider increasing DB_MAX_CONNECTIONS or scaling the service."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/db-pool-exhaustion.md"
+
+        - alert: HighHTTPErrorRate
+          expr: |
+            rate(soroban_pulse_http_request_duration_seconds_count{status=~"5.."}[5m])
+            /
+            rate(soroban_pulse_http_request_duration_seconds_count[5m])
+            > 0.01
+          for: 5m
+          labels:
+            severity: critical
+            component: http
+          annotations:
+            summary: "Soroban Pulse HTTP 5xx error rate exceeds 1%"
+            description: "More than 1% of HTTP requests are returning 5xx errors over the last 5 minutes (current rate: {{ "{{" }} $value | humanizePercentage {{ "}}" }}). Check application logs for errors and database connectivity."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/indexer-lag.md"
+
+        - alert: P99LatencySLOBreach
+          expr: histogram_quantile(0.99, rate(soroban_pulse_http_request_duration_seconds_bucket[5m])) > 0.2
+          for: 5m
+          labels:
+            severity: critical
+            component: http
+          annotations:
+            summary: "Soroban Pulse p99 latency exceeds 200ms SLO"
+            description: "p99 request latency is {{ "{{" }} $value | humanizeDuration {{ "}}" }} (SLO: 200ms). Consider scaling horizontally, adding database indexes, or investigating slow queries."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/db-pool-exhaustion.md"
+
+        - alert: IndexerRPCErrors
+          expr: rate(soroban_pulse_rpc_errors_total[5m]) > 0.1
+          for: 5m
+          labels:
+            severity: warning
+            component: indexer
+          annotations:
+            summary: "Soroban Pulse RPC errors are elevated"
+            description: "RPC error rate is {{ "{{" }} $value {{ "}}" }} errors/sec. Check RPC endpoint connectivity and review logs for specific error messages."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/rpc-errors.md"
+
+        - alert: IndexerNoEventsIndexed
+          expr: increase(soroban_pulse_events_indexed_total[10m]) == 0
+          for: 15m
+          labels:
+            severity: warning
+            component: indexer
+          annotations:
+            summary: "Soroban Pulse indexer is not indexing events"
+            description: "No events indexed in the last 10 minutes. This may be expected during low-activity periods on the network, but could also indicate an indexer stall. Verify network activity and check indexer logs."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/indexer-lag.md"
+
+        - alert: HTTPRequestLatencyHigh
+          expr: histogram_quantile(0.95, rate(soroban_pulse_http_request_duration_seconds_bucket[5m])) > 1
+          for: 5m
+          labels:
+            severity: warning
+            component: http
+          annotations:
+            summary: "Soroban Pulse HTTP p95 request latency is high"
+            description: "p95 request latency is {{ "{{" }} $value | humanizeDuration {{ "}}" }}. Consider scaling or investigating database performance."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/db-pool-exhaustion.md"
+
+        - alert: PodMemoryNearLimit
+          expr: soroban_pulse_process_memory_bytes / (512 * 1024 * 1024) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+            component: resource
+          annotations:
+            summary: "Soroban Pulse pod memory is approaching the 512Mi limit"
+            description: "Process memory is {{ "{{" }} $value | humanizeBytes {{ "}}" }} ({{ "{{" }} $value | humanizePercentage {{ "}}" }} of the 512Mi limit). OOM kill risk if usage continues to grow. Consider increasing the memory limit or investigating leaks."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/sse-connections.md"
+
+        - alert: UnusedIndexesDetected
+          expr: soroban_pulse_unused_indexes_total > 0
+          for: 24h
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Soroban Pulse has unused database indexes"
+            description: "{{ "{{" }} $value {{ "}}" }} index(es) have not been scanned since the last pg_stat_user_indexes reset. Unused indexes waste storage and slow writes. Review with: SELECT indexname, tablename FROM pg_stat_user_indexes WHERE schemaname = 'public' AND idx_scan = 0;"
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/db-pool-exhaustion.md"
+
+        - alert: MatviewRefreshTimeout
+          expr: increase(soroban_pulse_matview_refresh_timeout_total[1h]) > 0
+          for: 0m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Materialized view refresh hit lock timeout"
+            description: "A materialized view refresh was skipped due to a lock timeout in the last hour. Check for long-running queries blocking the view lock."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/db-pool-exhaustion.md"
+
+        - alert: NotificationDeliverySLABreach
+          expr: |
+            histogram_quantile(0.95,
+              rate(soroban_pulse_notification_delivery_latency_seconds_bucket[5m])
+            ) > 30
+          for: 2m
+          labels:
+            severity: critical
+            component: notifications
+          annotations:
+            summary: "Notification delivery p95 latency exceeds 30s SLA"
+            description: "The p95 notification delivery latency for channel {{ "{{" }} $labels.channel {{ "}}" }} is {{ "{{" }} $value | humanizeDuration {{ "}}" }}, which exceeds the 30s SLA threshold. Check the notification pipeline for backlog or downstream failures."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/notifications.md"
+
+        - alert: NotificationDeliveryLatencyHigh
+          expr: |
+            histogram_quantile(0.99,
+              rate(soroban_pulse_notification_delivery_latency_seconds_bucket[5m])
+            ) > 60
+          for: 5m
+          labels:
+            severity: warning
+            component: notifications
+          annotations:
+            summary: "Notification delivery p99 latency exceeds 60s"
+            description: "The p99 notification delivery latency for channel {{ "{{" }} $labels.channel {{ "}}" }} is {{ "{{" }} $value | humanizeDuration {{ "}}" }}. Investigate notification queue depth and downstream webhook/email endpoint health."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/runbooks/notifications.md"
+
+        - alert: ReplicaLagHigh
+          expr: soroban_pulse_replica_replay_lag_seconds > 30
+          for: 2m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Replica replay lag exceeds 30s"
+            description: "Replica {{ "{{" }} $labels.client_addr {{ "}}" }} replay lag is {{ "{{" }} $value | humanizeDuration {{ "}}" }}. Check replica I/O and network connectivity to the primary."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/replica-monitoring.md"
+
+        - alert: ReplicaLagCritical
+          expr: soroban_pulse_replica_replay_lag_seconds > 120
+          for: 5m
+          labels:
+            severity: critical
+            component: database
+          annotations:
+            summary: "Replica replay lag exceeds 2 minutes"
+            description: "Replica {{ "{{" }} $labels.client_addr {{ "}}" }} replay lag is {{ "{{" }} $value | humanizeDuration {{ "}}" }}. Consider replica failover. Check pg_stat_replication on the primary."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/replica-monitoring.md"
+
+        - alert: ReplicaLagBytes
+          expr: soroban_pulse_replica_lag_bytes > 104857600
+          for: 5m
+          labels:
+            severity: warning
+            component: database
+          annotations:
+            summary: "Replica WAL lag exceeds 100 MiB"
+            description: "Replica {{ "{{" }} $labels.client_addr {{ "}}" }} is {{ "{{" }} $value | humanizeBytes {{ "}}" }} behind the primary WAL position. Investigate replica throughput."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/replica-monitoring.md"
+
+        - alert: ReplicaDown
+          expr: soroban_pulse_replica_count == 0
+          for: 5m
+          labels:
+            severity: critical
+            component: database
+          annotations:
+            summary: "No streaming replicas connected"
+            description: "pg_stat_replication shows zero connected replicas. Read queries may be served from the primary only. Investigate replica health."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/replica-monitoring.md"
+
+        - alert: SLOBudgetBurnRateFast
+          expr: soroban_pulse_slo_burn_rate > 14.4
+          for: 2m
+          labels:
+            severity: critical
+            component: slo
+          annotations:
+            summary: "SLO error budget is burning fast (>14.4x)"
+            description: "SLO {{ "{{" }} $labels.slo {{ "}}" }} has a burn rate of {{ "{{" }} $value {{ "}}" }} over the last window. At this rate the 30-day error budget will be exhausted in ~2h. Page on-call immediately."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sli-slo.md"
+
+        - alert: SLOBudgetBurnRateSlow
+          expr: soroban_pulse_slo_burn_rate > 6
+          for: 5m
+          labels:
+            severity: warning
+            component: slo
+          annotations:
+            summary: "SLO error budget is burning too fast (>6x)"
+            description: "SLO {{ "{{" }} $labels.slo {{ "}}" }} has a burn rate of {{ "{{" }} $value {{ "}}" }} over the last window. At this rate the 30-day error budget will be exhausted in ~5h. Investigate."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sli-slo.md"
+
+        - alert: SLOErrorBudgetLow
+          expr: soroban_pulse_slo_error_budget_remaining < 0.1
+          for: 10m
+          labels:
+            severity: warning
+            component: slo
+          annotations:
+            summary: "SLO error budget is nearly exhausted"
+            description: "SLO {{ "{{" }} $labels.slo {{ "}}" }} has only {{ "{{" }} $value | humanizePercentage {{ "}}" }} of its error budget remaining. Freeze risky deploys until the budget recovers."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sli-slo.md"
+
+        - alert: SLOCompletionBelowTarget
+          expr: soroban_pulse_slo_completion_ratio < 0.95
+          for: 15m
+          labels:
+            severity: warning
+            component: slo
+          annotations:
+            summary: "SLO completion ratio below 95%"
+            description: "SLO {{ "{{" }} $labels.slo {{ "}}" }} completion ratio is {{ "{{" }} $value | humanizePercentage {{ "}}" }} over the rolling window. Investigate before budget exhaustion."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sli-slo.md"
+
+        - alert: SLOSeverelyBreached
+          expr: soroban_pulse_slo_completion_ratio < 0.5
+          for: 5m
+          labels:
+            severity: critical
+            component: slo
+          annotations:
+            summary: "SLO completion ratio below 50%"
+            description: "SLO {{ "{{" }} $labels.slo {{ "}}" }} completion ratio is {{ "{{" }} $value | humanizePercentage {{ "}}" }}. Treat as a customer-impacting incident."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sli-slo.md"
+
+        - alert: FeatureFlagAutoRollback
+          expr: increase(soroban_pulse_feature_flag_rollback_total[5m]) > 0
+          for: 0m
+          labels:
+            severity: warning
+            component: feature_flags
+          annotations:
+            summary: "Feature flag was automatically rolled back"
+            description: "A feature flag was automatically disabled due to an error rate spike. Check the feature_flag_audit table and recent HTTP error logs."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/feature-flag-rollback.md"
+
+        - alert: HighErrorRateRollbackRisk
+          expr: soroban_pulse_feature_flag_error_rate > 0.03
+          for: 2m
+          labels:
+            severity: warning
+            component: feature_flags
+          annotations:
+            summary: "Error rate approaching feature flag rollback threshold"
+            description: "Current error rate is {{ "{{" }} $value | humanizePercentage {{ "}}" }} (rollback threshold 5%). Feature flags with auto_rollback enabled may be disabled soon."
+            runbook_url: "https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/feature-flag-rollback.md"
+{{- end }}

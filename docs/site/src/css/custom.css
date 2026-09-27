@@ -1,0 +1,876 @@
+/**
+ * docs/site/src/css/custom.css
+ *
+ * SorobanPulse Docusaurus theme overrides.
+ * Design tokens are defined in docs/design-tokens.md — every value here
+ * traces back to a named token in that document.
+ *
+ * Structure:
+ *   1. Design token custom properties
+ *   2. Docusaurus IFM variable overrides (light mode)
+ *   3. Docusaurus IFM variable overrides (dark mode)
+ *   4. Global resets & typography
+ *   5. Navbar
+ *   6. Sidebar
+ *   7. Content area & headings
+ *   8. Code blocks & inline code
+ *   9. Admonitions / callouts
+ *  10. Tables
+ *  11. Badges & method labels
+ *  12. Landing page utilities (used by index.tsx)
+ *  13. Footer
+ *  14. Responsive overrides
+ */
+
+/* ==========================================================================
+   1. Design Tokens
+   ========================================================================== */
+
+:root {
+  /* Brand */
+  --sp-brand-600: #7c3aed;
+  --sp-brand-500: #8b5cf6;
+  --sp-brand-400: #a78bfa;
+  --sp-brand-300: #c4b5fd;
+  --sp-brand-100: #ede9fe;
+
+  /* Neutrals */
+  --sp-bg: #0f1117;
+  --sp-surface: #1a1d2e;
+  --sp-surface-raised: #222540;
+  --sp-border: #2d3158;
+  --sp-border-subtle: #1e2240;
+
+  /* Text */
+  --sp-text: #e2e8f0;
+  --sp-text-muted: #94a3b8;
+  --sp-text-faint: #64748b;
+
+  /* Semantic */
+  --sp-success: #10b981;
+  --sp-success-bg: #064e3b;
+  --sp-warning: #f59e0b;
+  --sp-warning-bg: #451a03;
+  --sp-danger: #ef4444;
+  --sp-danger-bg: #450a0a;
+  --sp-info: #38bdf8;
+  --sp-info-bg: #082f49;
+
+  /* Typography */
+  --sp-font-sans: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --sp-font-mono: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, monospace;
+
+  /* Spacing */
+  --sp-space-1: 0.25rem;
+  --sp-space-2: 0.5rem;
+  --sp-space-3: 0.75rem;
+  --sp-space-4: 1rem;
+  --sp-space-6: 1.5rem;
+  --sp-space-8: 2rem;
+  --sp-space-12: 3rem;
+  --sp-space-16: 4rem;
+  --sp-space-20: 5rem;
+
+  /* Radius */
+  --sp-radius-sm: 0.25rem;
+  --sp-radius-md: 0.375rem;
+  --sp-radius-lg: 0.5rem;
+  --sp-radius-xl: 0.75rem;
+  --sp-radius-2xl: 1rem;
+
+  /* Shadows */
+  --sp-shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --sp-shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.4), 0 2px 4px -2px rgb(0 0 0 / 0.3);
+  --sp-shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.5), 0 4px 6px -4px rgb(0 0 0 / 0.4);
+  --sp-shadow-brand: 0 0 0 3px rgb(124 58 237 / 0.35);
+
+  /* Transitions */
+  --sp-duration-fast: 100ms;
+  --sp-duration-base: 150ms;
+  --sp-duration-slow: 300ms;
+  --sp-ease: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ==========================================================================
+   2. IFM overrides — Light mode (default)
+   ========================================================================== */
+
+:root {
+  --ifm-color-primary: var(--sp-brand-600);
+  --ifm-color-primary-dark: #6d28d9;
+  --ifm-color-primary-darker: #5b21b6;
+  --ifm-color-primary-darkest: #4c1d95;
+  --ifm-color-primary-light: var(--sp-brand-500);
+  --ifm-color-primary-lighter: var(--sp-brand-400);
+  --ifm-color-primary-lightest: var(--sp-brand-300);
+
+  --ifm-font-family-base: var(--sp-font-sans);
+  --ifm-font-family-monospace: var(--sp-font-mono);
+  --ifm-font-size-base: 1rem;
+  --ifm-line-height-base: 1.6;
+  --ifm-code-font-size: 0.875em;
+
+  --ifm-background-color: #ffffff;
+  --ifm-background-surface-color: #f8fafc;
+
+  --ifm-navbar-background-color: #ffffff;
+  --ifm-navbar-shadow: 0 1px 0 0 #e2e8f0;
+  --ifm-navbar-height: 3.5rem;
+
+  --ifm-toc-border-color: #e2e8f0;
+
+  --ifm-hr-border-color: #e2e8f0;
+
+  --ifm-blockquote-border-left-color: var(--sp-brand-600);
+  --ifm-blockquote-color: #475569;
+
+  --ifm-table-border-color: #e2e8f0;
+  --ifm-table-head-background: #f1f5f9;
+  --ifm-table-stripe-background: #f8fafc;
+
+  --ifm-link-color: var(--sp-brand-600);
+  --ifm-link-hover-color: var(--sp-brand-500);
+
+  --ifm-heading-color: #0f172a;
+  --ifm-font-color-base: #1e293b;
+  --ifm-font-color-secondary: #475569;
+
+  --ifm-menu-color-active: var(--sp-brand-600);
+  --ifm-menu-color-background-active: var(--sp-brand-100);
+  --ifm-menu-color-background-hover: #f1f5f9;
+
+  --ifm-breadcrumb-color-active: var(--sp-brand-600);
+
+  --docusaurus-highlighted-code-line-bg: rgb(124 58 237 / 0.08);
+}
+
+/* ==========================================================================
+   3. IFM overrides — Dark mode
+   ========================================================================== */
+
+[data-theme='dark'] {
+  --ifm-color-primary: var(--sp-brand-400);
+  --ifm-color-primary-dark: var(--sp-brand-500);
+  --ifm-color-primary-darker: var(--sp-brand-600);
+  --ifm-color-primary-darkest: #6d28d9;
+  --ifm-color-primary-light: var(--sp-brand-300);
+  --ifm-color-primary-lighter: #d8b4fe;
+  --ifm-color-primary-lightest: #ede9fe;
+
+  --ifm-background-color: var(--sp-bg);
+  --ifm-background-surface-color: var(--sp-surface);
+
+  --ifm-navbar-background-color: var(--sp-surface);
+  --ifm-navbar-shadow: 0 1px 0 0 var(--sp-border);
+
+  --ifm-toc-border-color: var(--sp-border);
+
+  --ifm-hr-border-color: var(--sp-border);
+
+  --ifm-blockquote-border-left-color: var(--sp-brand-400);
+  --ifm-blockquote-color: var(--sp-text-muted);
+
+  --ifm-table-border-color: var(--sp-border);
+  --ifm-table-head-background: var(--sp-surface-raised);
+  --ifm-table-stripe-background: rgb(255 255 255 / 0.025);
+
+  --ifm-link-color: var(--sp-brand-400);
+  --ifm-link-hover-color: var(--sp-brand-300);
+
+  --ifm-heading-color: var(--sp-text);
+  --ifm-font-color-base: var(--sp-text);
+  --ifm-font-color-secondary: var(--sp-text-muted);
+
+  --ifm-menu-color: var(--sp-text);
+  --ifm-menu-color-active: var(--sp-brand-400);
+  --ifm-menu-color-background-active: rgb(124 58 237 / 0.15);
+  --ifm-menu-color-background-hover: rgb(255 255 255 / 0.05);
+
+  --ifm-sidebar-background: var(--sp-surface);
+
+  --docusaurus-highlighted-code-line-bg: rgb(167 139 250 / 0.12);
+}
+
+/* ==========================================================================
+   4. Global resets & typography
+   ========================================================================== */
+
+html {
+  font-feature-settings: "kern" 1, "liga" 1, "calt" 1;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--sp-font-sans);
+}
+
+/* Smooth scrolling for anchor links */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Remove default margin from first/last child in article */
+.markdown > :first-child {
+  margin-top: 0 !important;
+}
+
+/* Slightly larger lead paragraph for the first <p> after h1 */
+.markdown > h1 + p {
+  font-size: 1.125rem;
+  color: var(--ifm-font-color-secondary);
+  line-height: 1.7;
+}
+
+/* ==========================================================================
+   5. Navbar
+   ========================================================================== */
+
+.navbar {
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+[data-theme='dark'] .navbar {
+  background-color: rgb(26 29 46 / 0.92);
+  border-bottom: 1px solid var(--sp-border);
+}
+
+.navbar__brand {
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.navbar__title {
+  font-size: 1.125rem;
+  color: var(--sp-brand-400);
+}
+
+[data-theme='light'] .navbar__title {
+  color: var(--sp-brand-600);
+}
+
+.navbar__link {
+  font-size: 0.9375rem;
+  font-weight: 500;
+}
+
+.navbar__link--active,
+.navbar__link:hover {
+  color: var(--ifm-color-primary);
+}
+
+/* GitHub icon link */
+.navbar-github-link::before {
+  content: '';
+  display: inline-block;
+  width: 1.5rem;
+  height: 1.5rem;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath fill='%23a78bfa' d='M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.385-1.335-1.755-1.335-1.755-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 1.5rem;
+}
+
+/* ==========================================================================
+   6. Sidebar
+   ========================================================================== */
+
+.theme-doc-sidebar-container {
+  border-right: 1px solid var(--ifm-toc-border-color) !important;
+}
+
+[data-theme='dark'] .theme-doc-sidebar-container {
+  background-color: var(--sp-surface);
+}
+
+.menu__link {
+  border-radius: var(--sp-radius-md);
+  font-size: 0.875rem;
+  transition: background-color var(--sp-duration-fast) var(--sp-ease),
+              color var(--sp-duration-fast) var(--sp-ease);
+}
+
+.menu__link--active {
+  font-weight: 600;
+}
+
+.menu__list-item-collapsible:hover {
+  background: var(--ifm-menu-color-background-hover);
+  border-radius: var(--sp-radius-md);
+}
+
+/* Category labels */
+.menu__list-item--collapsed > .menu__link,
+.menu__caret {
+  color: var(--ifm-font-color-secondary);
+}
+
+/* ==========================================================================
+   7. Content area & headings
+   ========================================================================== */
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  font-family: var(--sp-font-sans);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+}
+
+.markdown h1 {
+  font-size: 2.25rem;
+  margin-bottom: var(--sp-space-6);
+}
+
+.markdown h2 {
+  font-size: 1.75rem;
+  margin-top: var(--sp-space-12);
+  margin-bottom: var(--sp-space-4);
+  padding-bottom: var(--sp-space-2);
+  border-bottom: 1px solid var(--ifm-hr-border-color);
+}
+
+.markdown h3 {
+  font-size: 1.375rem;
+  margin-top: var(--sp-space-8);
+}
+
+.markdown h4 {
+  font-size: 1.125rem;
+  margin-top: var(--sp-space-6);
+}
+
+/* Anchor link on headings */
+.markdown .hash-link {
+  color: var(--sp-brand-400);
+  opacity: 0;
+  transition: opacity var(--sp-duration-fast) var(--sp-ease);
+}
+
+.markdown *:hover > .hash-link {
+  opacity: 1;
+}
+
+/* Blockquotes */
+.markdown blockquote {
+  border-left: 4px solid var(--ifm-blockquote-border-left-color);
+  background: var(--ifm-background-surface-color);
+  border-radius: 0 var(--sp-radius-md) var(--sp-radius-md) 0;
+  margin: var(--sp-space-6) 0;
+  padding: var(--sp-space-4) var(--sp-space-6);
+}
+
+/* ==========================================================================
+   8. Code blocks & inline code
+   ========================================================================== */
+
+/* Inline code */
+.markdown code {
+  font-family: var(--sp-font-mono);
+  font-size: 0.875em;
+  border-radius: var(--sp-radius-md);
+  padding: 0.15em 0.4em;
+  font-weight: 400;
+}
+
+[data-theme='dark'] .markdown code {
+  background-color: rgb(124 58 237 / 0.15);
+  color: var(--sp-brand-300);
+  border: 1px solid rgb(124 58 237 / 0.25);
+}
+
+[data-theme='light'] .markdown code {
+  background-color: var(--sp-brand-100);
+  color: var(--sp-brand-600);
+  border: 1px solid rgb(124 58 237 / 0.2);
+}
+
+/* Fenced code blocks */
+.prism-code {
+  font-family: var(--sp-font-mono) !important;
+  font-size: 0.875rem !important;
+  line-height: 1.6 !important;
+  border-radius: var(--sp-radius-lg) !important;
+}
+
+[data-theme='dark'] .prism-code {
+  background-color: #0d1117 !important;
+  border: 1px solid var(--sp-border) !important;
+}
+
+[data-theme='light'] .prism-code {
+  background-color: #f6f8fa !important;
+  border: 1px solid #d0d7de !important;
+}
+
+/* Code block title bar */
+.codeBlockTitle_node_modules-\\@docusaurus-theme-classic-lib-theme-CodeBlock-Content-styles-module {
+  font-family: var(--sp-font-mono);
+  font-size: 0.8125rem;
+}
+
+[data-theme='dark'] div[class*="codeBlockTitle"] {
+  background-color: var(--sp-surface) !important;
+  border-bottom: 1px solid var(--sp-border) !important;
+  color: var(--sp-text-muted) !important;
+}
+
+/* Copy button */
+button[class*="copyButton"] {
+  border-radius: var(--sp-radius-sm) !important;
+  transition: background-color var(--sp-duration-fast) var(--sp-ease) !important;
+}
+
+/* Highlighted lines */
+.docusaurus-highlight-code-line {
+  background-color: var(--docusaurus-highlighted-code-line-bg);
+  display: block;
+  margin: 0 -1rem;
+  padding: 0 1rem;
+  border-left: 3px solid var(--sp-brand-400);
+}
+
+/* ==========================================================================
+   9. Admonitions / callouts
+   ========================================================================== */
+
+/* Base */
+.admonition {
+  border-radius: var(--sp-radius-lg) !important;
+  margin: var(--sp-space-6) 0 !important;
+  border-left-width: 4px !important;
+  border-left-style: solid !important;
+}
+
+.admonition-heading h5 {
+  font-family: var(--sp-font-sans);
+  font-weight: 600;
+  font-size: 0.875rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Note / info */
+[data-theme='dark'] .admonition-note,
+[data-theme='dark'] .admonition-info {
+  background-color: var(--sp-info-bg) !important;
+  border-left-color: var(--sp-info) !important;
+}
+
+.admonition-note .admonition-heading h5,
+.admonition-info .admonition-heading h5 {
+  color: var(--sp-info);
+}
+
+/* Tip / success */
+[data-theme='dark'] .admonition-tip,
+[data-theme='dark'] .admonition-success {
+  background-color: var(--sp-success-bg) !important;
+  border-left-color: var(--sp-success) !important;
+}
+
+.admonition-tip .admonition-heading h5,
+.admonition-success .admonition-heading h5 {
+  color: var(--sp-success);
+}
+
+/* Warning */
+[data-theme='dark'] .admonition-caution,
+[data-theme='dark'] .admonition-warning {
+  background-color: var(--sp-warning-bg) !important;
+  border-left-color: var(--sp-warning) !important;
+}
+
+.admonition-caution .admonition-heading h5,
+.admonition-warning .admonition-heading h5 {
+  color: var(--sp-warning);
+}
+
+/* Danger */
+[data-theme='dark'] .admonition-danger {
+  background-color: var(--sp-danger-bg) !important;
+  border-left-color: var(--sp-danger) !important;
+}
+
+.admonition-danger .admonition-heading h5 {
+  color: var(--sp-danger);
+}
+
+/* ==========================================================================
+   10. Tables
+   ========================================================================== */
+
+.markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9375rem;
+  margin: var(--sp-space-6) 0;
+  border-radius: var(--sp-radius-lg);
+  overflow: hidden;
+  border: 1px solid var(--ifm-table-border-color);
+}
+
+.markdown table thead {
+  background-color: var(--ifm-table-head-background);
+}
+
+.markdown table thead th {
+  font-weight: 600;
+  font-size: 0.8125rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ifm-font-color-secondary);
+  padding: var(--sp-space-3) var(--sp-space-4);
+  border-bottom: 2px solid var(--ifm-table-border-color);
+  white-space: nowrap;
+}
+
+.markdown table tbody td {
+  padding: var(--sp-space-3) var(--sp-space-4);
+  border-top: 1px solid var(--ifm-table-border-color);
+  vertical-align: top;
+  line-height: 1.5;
+}
+
+.markdown table tbody tr:nth-child(even) {
+  background-color: var(--ifm-table-stripe-background);
+}
+
+/* ==========================================================================
+   11. Badges & HTTP method labels
+   ========================================================================== */
+
+.badge--get    { background: var(--sp-success);  color: #fff; }
+.badge--post   { background: var(--sp-brand-600); color: #fff; }
+.badge--delete { background: var(--sp-danger);   color: #fff; }
+.badge--patch  { background: var(--sp-warning);  color: #000; }
+
+.badge {
+  border-radius: var(--sp-radius-sm);
+  font-family: var(--sp-font-mono);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0.2em 0.6em;
+  text-transform: uppercase;
+}
+
+/* ==========================================================================
+   12. Landing page utilities (used by src/pages/index.tsx)
+   ========================================================================== */
+
+/* Hero section */
+.sp-hero {
+  padding: var(--sp-space-20) var(--sp-space-8);
+  text-align: center;
+  background: var(--ifm-background-color);
+  position: relative;
+  overflow: hidden;
+}
+
+[data-theme='dark'] .sp-hero {
+  background: radial-gradient(
+    ellipse 80% 60% at 50% -20%,
+    rgb(124 58 237 / 0.18) 0%,
+    transparent 70%
+  ),
+  var(--sp-bg);
+}
+
+.sp-hero__eyebrow {
+  display: inline-block;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--sp-brand-400);
+  background: rgb(124 58 237 / 0.12);
+  border: 1px solid rgb(124 58 237 / 0.3);
+  border-radius: var(--sp-radius-full);
+  padding: var(--sp-space-1) var(--sp-space-4);
+  margin-bottom: var(--sp-space-6);
+}
+
+.sp-hero__title {
+  font-size: clamp(2.5rem, 6vw, 3.5rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--ifm-heading-color);
+  margin-bottom: var(--sp-space-6);
+}
+
+[data-theme='dark'] .sp-hero__title {
+  background: linear-gradient(135deg, #ffffff 0%, var(--sp-brand-300) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.sp-hero__subtitle {
+  font-size: 1.25rem;
+  line-height: 1.6;
+  color: var(--ifm-font-color-secondary);
+  max-width: 680px;
+  margin: 0 auto var(--sp-space-8);
+}
+
+.sp-hero__actions {
+  display: flex;
+  gap: var(--sp-space-4);
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* CTA buttons */
+.sp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-space-2);
+  padding: 0.75rem 1.5rem;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: var(--sp-radius-lg);
+  text-decoration: none !important;
+  transition:
+    background-color var(--sp-duration-base) var(--sp-ease),
+    box-shadow var(--sp-duration-base) var(--sp-ease),
+    transform var(--sp-duration-base) var(--sp-ease);
+  border: none;
+  cursor: pointer;
+}
+
+.sp-btn--primary {
+  background: var(--sp-brand-600);
+  color: #ffffff;
+}
+
+.sp-btn--primary:hover {
+  background: var(--sp-brand-500);
+  box-shadow: var(--sp-shadow-brand);
+  transform: translateY(-1px);
+  color: #ffffff;
+}
+
+.sp-btn--secondary {
+  background: transparent;
+  color: var(--ifm-font-color-base);
+  border: 1.5px solid var(--ifm-toc-border-color);
+}
+
+.sp-btn--secondary:hover {
+  border-color: var(--sp-brand-400);
+  color: var(--sp-brand-400);
+  background: rgb(124 58 237 / 0.06);
+}
+
+/* Feature grid */
+.sp-features {
+  padding: var(--sp-space-16) var(--sp-space-8);
+  background: var(--ifm-background-surface-color);
+}
+
+.sp-features__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-space-6);
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.sp-feature-card {
+  background: var(--ifm-background-color);
+  border: 1px solid var(--ifm-toc-border-color);
+  border-radius: var(--sp-radius-xl);
+  padding: var(--sp-space-8);
+  transition:
+    border-color var(--sp-duration-base) var(--sp-ease),
+    box-shadow var(--sp-duration-base) var(--sp-ease),
+    transform var(--sp-duration-base) var(--sp-ease);
+}
+
+.sp-feature-card:hover {
+  border-color: var(--sp-brand-400);
+  box-shadow: var(--sp-shadow-lg);
+  transform: translateY(-2px);
+}
+
+.sp-feature-card__icon {
+  width: 3rem;
+  height: 3rem;
+  border-radius: var(--sp-radius-xl);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.5rem;
+  margin-bottom: var(--sp-space-4);
+  background: rgb(124 58 237 / 0.12);
+  border: 1px solid rgb(124 58 237 / 0.2);
+}
+
+.sp-feature-card__title {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin-bottom: var(--sp-space-2);
+  color: var(--ifm-heading-color);
+}
+
+.sp-feature-card__desc {
+  font-size: 0.9375rem;
+  color: var(--ifm-font-color-secondary);
+  line-height: 1.6;
+  margin: 0;
+}
+
+/* Quick-start section */
+.sp-quickstart {
+  padding: var(--sp-space-16) var(--sp-space-8);
+  text-align: center;
+}
+
+.sp-section__label {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--sp-brand-400);
+  display: block;
+  margin-bottom: var(--sp-space-3);
+}
+
+.sp-section__title {
+  font-size: clamp(1.75rem, 4vw, 2.5rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--ifm-heading-color);
+  margin-bottom: var(--sp-space-4);
+}
+
+.sp-section__subtitle {
+  font-size: 1.0625rem;
+  color: var(--ifm-font-color-secondary);
+  max-width: 600px;
+  margin: 0 auto var(--sp-space-8);
+  line-height: 1.6;
+}
+
+/* Stat strip */
+.sp-stats {
+  display: flex;
+  justify-content: center;
+  gap: var(--sp-space-16);
+  flex-wrap: wrap;
+  padding: var(--sp-space-12) var(--sp-space-8);
+  border-top: 1px solid var(--ifm-hr-border-color);
+  border-bottom: 1px solid var(--ifm-hr-border-color);
+}
+
+.sp-stat__value {
+  font-size: 2.25rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--sp-brand-400);
+  display: block;
+}
+
+.sp-stat__label {
+  font-size: 0.875rem;
+  color: var(--ifm-font-color-secondary);
+  font-weight: 500;
+}
+
+/* ==========================================================================
+   13. Footer
+   ========================================================================== */
+
+.footer {
+  padding: var(--sp-space-12) var(--sp-space-8) var(--sp-space-8);
+  border-top: 1px solid var(--ifm-hr-border-color);
+}
+
+[data-theme='dark'] .footer {
+  background-color: var(--sp-surface);
+  border-top-color: var(--sp-border);
+}
+
+.footer__title {
+  font-weight: 700;
+  font-size: 0.875rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--sp-brand-400);
+  margin-bottom: var(--sp-space-3);
+}
+
+.footer__link-item {
+  font-size: 0.9375rem;
+  color: var(--ifm-font-color-secondary);
+  transition: color var(--sp-duration-fast) var(--sp-ease);
+}
+
+.footer__link-item:hover {
+  color: var(--sp-brand-400);
+  text-decoration: none;
+}
+
+.footer__copyright {
+  font-size: 0.875rem;
+  color: var(--sp-text-faint);
+  margin-top: var(--sp-space-8);
+  text-align: center;
+}
+
+/* ==========================================================================
+   14. Responsive overrides
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .sp-hero {
+    padding: var(--sp-space-16) var(--sp-space-4);
+  }
+
+  .sp-hero__actions {
+    flex-direction: column;
+    align-items: center;
+  }
+
+  .sp-btn {
+    width: 100%;
+    max-width: 320px;
+    justify-content: center;
+  }
+
+  .sp-features {
+    padding: var(--sp-space-12) var(--sp-space-4);
+  }
+
+  .sp-quickstart {
+    padding: var(--sp-space-12) var(--sp-space-4);
+  }
+
+  .sp-stats {
+    gap: var(--sp-space-8);
+    padding: var(--sp-space-8) var(--sp-space-4);
+  }
+
+  .markdown table {
+    font-size: 0.875rem;
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
+@media (max-width: 480px) {
+  .sp-hero__title {
+    font-size: 2rem;
+  }
+
+  .sp-features__grid {
+    grid-template-columns: 1fr;
+  }
+}

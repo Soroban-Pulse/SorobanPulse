@@ -54,6 +54,31 @@ impl ApiClient {
             .with_context(|| format!("GET {url}"))
     }
 
+    /// Open a long-lived `text/event-stream` GET. Uses a separate client with
+    /// no overall timeout (the configured one would cut the stream off), and
+    /// fails on a non-2xx status with the response body in the error.
+    pub fn stream(&self, path: &str, params: &[(&str, &str)]) -> Result<Response> {
+        let url = format!("{}{}", self.base_url, path);
+        let client = Client::builder()
+            .timeout(None::<Duration>)
+            .build()
+            .context("building streaming HTTP client")?;
+        let resp = client
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .query(params)
+            .send()
+            .with_context(|| format!("GET {url}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().unwrap_or_default();
+            anyhow::bail!("HTTP {status}: {body}");
+        }
+        Ok(resp)
+    }
+
     /// POST a JSON body and deserialize the response.
     pub fn post<B: serde::Serialize, T: DeserializeOwned>(&self, path: &str, body: &B) -> Result<T> {
         let url = format!("{}{}", self.base_url, path);

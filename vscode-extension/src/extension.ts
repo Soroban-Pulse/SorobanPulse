@@ -4,9 +4,11 @@ import { RequestTesterPanel } from './requestTester';
 import { ApiEndpoint } from './types';
 import { setApiKey, setAdminApiKey, clearApiKeys } from './apiKeyManager';
 import { testWebhook } from './webhookTester';
+import { ContractHoverProvider, HOVER_LANGUAGES } from './contractHoverProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
     const explorer = new ApiExplorerProvider();
+    const contractHover = new ContractHoverProvider(context);
 
     // Tree view
     const treeView = vscode.window.createTreeView('sorobanpulse.apiExplorer', {
@@ -51,6 +53,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
         // Issue #963: webhook test interface.
         vscode.commands.registerCommand('sorobanpulse.testWebhook', () => testWebhook()),
+
+        // Issue #1125: contract ID hover.
+        vscode.languages.registerHoverProvider(HOVER_LANGUAGES, contractHover),
+        vscode.workspace.onDidChangeConfiguration(e => {
+            if (e.affectsConfiguration('sorobanpulse')) { contractHover.clear(); }
+        }),
     );
 }
 

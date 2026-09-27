@@ -2,6 +2,12 @@
 
 # Soroban Pulse
 
+<p align="center">
+  <a href="https://codespaces.new/Soroban-Pulse/SorobanPulse?quickstart=1">
+    <img src="https://github.com/codespaces/badge.svg" alt="Open in GitHub Codespaces" />
+  </a>
+</p>
+
 A lightweight Rust backend service that indexes Soroban smart contract events on the Stellar network and exposes them via a REST API.
 
 ## Tech Stack
