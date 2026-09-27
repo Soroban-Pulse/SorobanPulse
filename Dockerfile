@@ -10,7 +10,7 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 # Issue #1112: build the web dashboard (web/) — served by the backend at /ui.
 # Design tokens are pre-built in design/build/, so only web/'s deps are needed.
-FROM node:20-slim AS web
+FROM node:26-slim AS web
 WORKDIR /src
 COPY web/package.json web/package-lock.json ./web/
 RUN cd web && npm ci --no-audit --no-fund
