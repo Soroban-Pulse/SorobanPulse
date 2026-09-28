@@ -1,0 +1,106 @@
+# docker-compose.conformance.yml
+#
+# SDK conformance test environment for SorobanPulse.
+#
+# Brings up a complete, isolated stack, applies seed data, then runs all three
+# SDK conformance runners (TypeScript, Python, Go) sequentially.
+#
+# Services:
+#   db             – PostgreSQL 16 (isolated, in-memory via tmpfs)
+#   rpc-stub       – WireMock simulating the Stellar Soroban RPC
+#   app            – SorobanPulse application (built from source)
+#   webhook-sink   – Tiny HTTP server that records webhook deliveries
+#
+# Usage:
+#   docker compose -f docker-compose.conformance.yml up --build --wait
+#   docker compose -f docker-compose.conformance.yml ps  # verify all healthy
+#
+# The CI workflow (.github/workflows/sdk-conformance.yml) handles seeding data
+# and running each runner container after the stack is healthy.
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: conformance
+      POSTGRES_PASSWORD: conformance
+      POSTGRES_DB: soroban_pulse_conformance
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conformance -d soroban_pulse_conformance"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    # Use tmpfs so the DB starts fast and leaves no artefacts on disk
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  # ── Stellar RPC stub (WireMock) ──────────────────────────────────────────────
+  rpc-stub:
+    image: wiremock/wiremock:3.6.0
+    command:
+      - "--port=8080"
+      - "--verbose"
+    # Mount the same WireMock mappings used by E2E tests so the indexer
+    # gets sensible stub responses and does not error-loop.
+    volumes:
+      - ./tests/e2e/wiremock:/home/wiremock
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/__admin/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ── SorobanPulse application ─────────────────────────────────────────────────
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+      rpc-stub:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://conformance:conformance@db:5432/soroban_pulse_conformance
+      STELLAR_RPC_URL: http://rpc-stub:8080
+      START_LEDGER: "0"
+      PORT: "3000"
+      RUST_LOG: "info"
+      RUST_LOG_FORMAT: "json"
+      # Disable rate-limiting so runner requests are never throttled
+      RATE_LIMIT_PER_MINUTE: "0"
+      SSE_KEEPALIVE_SECS: "5"
+      INDEXER_LOCK_RETRY_SECS: "5"
+      HEALTH_CHECK_TIMEOUT_MS: "2000"
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/healthz/ready | grep -q '\"status\":\"ok\"' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+
+  # ── Webhook sink ──────────────────────────────────────────────────────────────
+  # Lightweight Python HTTP server that records webhook deliveries.
+  # The conformance runner creates subscriptions pointing to http://webhook-sink:9002/hook.
+  webhook-sink:
+    image: python:3.12-alpine
+    command: >
+      sh -c "python /app/server.py"
+    volumes:
+      - ./sdk/conformance/webhook_sink:/app:ro
+    environment:
+      PORT: "9002"
+    ports:
+      - "9002:9002"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9002/health | grep -q ok || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
