@@ -704,7 +704,27 @@ pub async fn unsubscribe(
             .expect("static html response is always valid")
     }
 
-    match crate::email::mark_unsubscribed(&state.pool, &query.token).await {
+    // Verify the HMAC-signed, time-limited token (issue #1158).
+    // The subject carried in the token is the opaque DB token string that
+    // `mark_unsubscribed` looks up; we verify purpose = Unsubscribe before
+    // touching the DB.
+    let db_token = match crate::email_token::verify_token(
+        &query.token,
+        Some(&crate::email_token::TokenPurpose::Unsubscribe),
+        None,
+    ) {
+        Ok(claims) => claims.subject,
+        Err(_) => {
+            // Return 404 (not 400) to avoid leaking why the token failed.
+            return html_page(
+                StatusCode::NOT_FOUND,
+                "Invalid link",
+                "This unsubscribe link is not valid.",
+            );
+        }
+    };
+
+    match crate::email::mark_unsubscribed(&state.pool, &db_token).await {
         Ok(true) => html_page(
             StatusCode::OK,
             "Unsubscribed",
@@ -12362,23 +12382,38 @@ pub async fn track_email_open(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> impl IntoResponse {
-    let pool = state.pool.clone();
-    tokio::spawn(async move {
-        let updated = sqlx::query_scalar::<_, i64>(
-            "WITH upd AS (
-                UPDATE email_opens SET opened_at = NOW()
-                WHERE token = $1 AND opened_at IS NULL
-                RETURNING 1
-             ) SELECT COUNT(*) FROM upd",
-        )
-        .bind(&token)
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(0);
-        if updated > 0 {
-            crate::metrics::record_email_open();
-        }
-    });
+    // Verify the HMAC-signed, time-limited token (issue #1158).
+    // The subject is the DB token string; verification failure silently
+    // returns the pixel anyway (to avoid leaking validity to enumerators)
+    // but does NOT record an open event.
+    let db_subject = match crate::email_token::verify_token(
+        &token,
+        Some(&crate::email_token::TokenPurpose::Open),
+        None,
+    ) {
+        Ok(claims) => Some(claims.subject),
+        Err(_) => None,
+    };
+
+    if let Some(subject) = db_subject {
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            let updated = sqlx::query_scalar::<_, i64>(
+                "WITH upd AS (
+                    UPDATE email_opens SET opened_at = NOW()
+                    WHERE token = $1 AND opened_at IS NULL
+                    RETURNING 1
+                 ) SELECT COUNT(*) FROM upd",
+            )
+            .bind(&subject)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+            if updated > 0 {
+                crate::metrics::record_email_open();
+            }
+        });
+    }
 
     Response::builder()
         .status(StatusCode::OK)
@@ -12429,16 +12464,31 @@ pub async fn track_email_click(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> impl IntoResponse {
+    // Verify the HMAC-signed, time-limited token (issue #1158).
+    let db_subject = match crate::email_token::verify_token(
+        &token,
+        Some(&crate::email_token::TokenPurpose::Click),
+        None,
+    ) {
+        Ok(claims) => claims.subject,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("click token not found"))
+                .unwrap();
+        }
+    };
+
     let dest: Option<String> = sqlx::query_scalar(
         "SELECT destination_url FROM email_clicks WHERE token = $1",
     )
-    .bind(&token)
+    .bind(&db_subject)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
 
     let pool = state.pool.clone();
-    let token_clone = token.clone();
+    let subject_clone = db_subject.clone();
     tokio::spawn(async move {
         let updated = sqlx::query_scalar::<_, i64>(
             "WITH upd AS (
@@ -12447,7 +12497,7 @@ pub async fn track_email_click(
                 RETURNING 1
              ) SELECT COUNT(*) FROM upd",
         )
-        .bind(&token_clone)
+        .bind(&subject_clone)
         .fetch_one(&pool)
         .await
         .unwrap_or(0);
@@ -15760,6 +15810,13 @@ pub fn update_disk_read_bytes(bytes: u64) {
 /// Webhook that receives email bounce notifications from SendGrid, AWS SES
 /// (including SNS-wrapped notifications) and Mailgun (Issue #484). Bounced
 /// addresses are persisted so future notifications skip them.
+///
+/// Bounce webhook authentication (issue #1158): the provider signature is
+/// verified before any DB write.  The provider is determined from the
+/// `X-Bounce-Provider` header:
+///   - `sns` — Amazon SNS (SES)
+///   - `sendgrid` — SendGrid Event Webhook
+///   - `shared_secret` (default) — generic HMAC shared secret
 #[utoipa::path(
     post,
     path = "/v1/notifications/email/bounce",
@@ -15767,12 +15824,58 @@ pub fn update_disk_read_bytes(bytes: u64) {
     request_body = serde_json::Value,
     responses(
         (status = 200, description = "Bounce payload processed", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid provider signature"),
     )
 )]
 pub async fn email_bounce_webhook(
     State(state): State<AppState>,
-    Json(payload): Json<Value>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
+    use axum::body::to_bytes;
+    use crate::email_token::{verify_bounce_signature, BounceProvider};
+
+    // Read the raw body so we can verify the signature over it.
+    let headers = request.headers().clone();
+    let provider_header = headers
+        .get("x-bounce-provider")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("shared_secret");
+    let provider = match provider_header {
+        "sns" => BounceProvider::Sns,
+        "sendgrid" => BounceProvider::SendGrid,
+        _ => BounceProvider::SharedSecret,
+    };
+
+    let body_bytes = match to_bytes(request.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to read bounce webhook body");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "failed to read request body" })),
+            );
+        }
+    };
+
+    // Verify signature before touching the DB.
+    if let Err(e) = verify_bounce_signature(&provider, &headers, &body_bytes, None) {
+        tracing::warn!(error = %e, "Bounce webhook signature verification failed");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid or missing provider signature" })),
+        );
+    }
+
+    let payload: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid JSON: {e}") })),
+            );
+        }
+    };
+
     let recipients = crate::email::extract_bounced_recipients(&payload);
     let mut recorded = 0usize;
     for recipient in &recipients {

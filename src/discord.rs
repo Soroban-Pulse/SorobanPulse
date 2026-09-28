@@ -6,9 +6,31 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::{
+    config::Environment,
     metrics,
     models::{Event, EventType},
+    net::outbound,
 };
+
+/// Validate a Discord webhook URL against the shared SSRF guard.
+///
+/// Only `discord.com` and its subdomains are allowed as the destination host.
+/// Call this at channel-creation time and again just before firing the request
+/// (DNS-rebinding defence via the async [`outbound::validate_outbound_url`]).
+pub async fn validate_discord_webhook_url(url: &str, env: &Environment) -> crate::error::AppError {
+    match outbound::validate_outbound_url(url, env, &["discord.com"]).await {
+        Ok(()) => crate::error::AppError::Validation(String::new()), // placeholder – use Result in callers
+        Err(e) => e,
+    }
+}
+
+/// Validate a Discord webhook URL synchronously (cheap static check).
+///
+/// Use at storage time; combine with [`validate_discord_webhook_url`] at
+/// request time for full DNS-rebinding protection.
+pub fn validate_discord_webhook_url_static(url: &str, env: &Environment) -> Result<(), crate::error::AppError> {
+    outbound::validate_outbound_url_static(url, env, &["discord.com"])
+}
 
 /// Discord webhook configuration
 #[derive(Debug, Clone)]
@@ -52,10 +74,11 @@ fn prefix_with_role_mentions(content: &str, role_ids: &[&str]) -> String {
 
 impl DiscordClient {
     pub fn new(config: DiscordConfig) -> Self {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("Failed to build Discord HTTP client");
+        // Use the shared outbound client: redirects disabled, 10-second timeout.
+        // The webhook_url is validated by `validate_discord_webhook_url` at
+        // creation time; we use `build_outbound_client` here so that the same
+        // hardened client is used for every subsequent request.
+        let client = crate::net::outbound::build_outbound_client(&["discord.com"]);
 
         Self {
             client,

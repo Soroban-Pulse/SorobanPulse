@@ -98,7 +98,7 @@ prost = { version = "0.12", optional = true }
 rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
 google-cloud-pubsub = { version = "0.33", optional = true }
 google-cloud-googleapis = { version = "0.16", optional = true }
-url = { version = "2.5", optional = true }
+url = { version = "2.5" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -134,7 +134,7 @@ full-observability = ["tracing-opentelemetry", "opentelemetry-jaeger"]
 
 # Messaging integrations
 kafka = ["dep:rdkafka"]
-sqs = ["dep:url"]
+sqs = []
 pubsub = ["dep:google-cloud-pubsub", "dep:google-cloud-googleapis"]
 
 [lints.clippy]
