@@ -1,0 +1,163 @@
+# .github/workflows/docs.yml
+#
+# Build and deploy the SorobanPulse documentation site (Docusaurus 3) to
+# GitHub Pages on every push to main, and upload a preview artifact on PRs.
+#
+# Required repository settings (Settings → Pages):
+#   Source: GitHub Actions
+#
+# Required repository permissions on the workflow (already set below):
+#   contents: read
+#   pages:    write
+#   id-token: write
+
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "openapi.json"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "openapi.json"
+      - ".github/workflows/docs.yml"
+  # Allow manual re-deploy from the Actions tab
+  workflow_dispatch:
+
+# Only one deployment runs at a time; newer pushes cancel older pending ones.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Build
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build docs site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: docs/site
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: docs/site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Copy the canonical openapi.json into the static folder so the
+      # API Reference page and Scalar embed can load it at /openapi.json.
+      - name: Copy OpenAPI spec to static assets
+        run: |
+          mkdir -p static
+          cp ../../openapi.json static/openapi.json
+        working-directory: docs/site
+
+      - name: Build Docusaurus site
+        run: npm run build
+        env:
+          # Treat broken links as errors so the build fails loudly.
+          NODE_ENV: production
+
+      # Upload the built site for the deploy job (main branch) or as a
+      # PR preview artifact (pull requests).
+      - name: Upload built site
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docs-site
+          path: docs/site/build/
+          retention-days: 7
+
+      # On PRs, also upload the build as a named preview so reviewers can
+      # download and browse it locally without waiting for a full deploy.
+      - name: Upload PR preview artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: docs-preview-pr${{ github.event.pull_request.number }}
+          path: docs/site/build/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # 2. Link checker (lychee)
+  #    Runs on PRs to catch broken links before they reach main.
+  #    Runs on push to main as a post-deploy health check.
+  # ---------------------------------------------------------------------------
+  link-check:
+    name: Check links (lychee)
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Download the built HTML so lychee can check rendered links too.
+      - name: Download built site
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-site
+          path: docs-build/
+
+      - name: Run lychee link checker
+        uses: lycheeverse/lychee-action@2b973e86fc7b1f6b36a93795fe2c9c6ae1118621 # v2
+        with:
+          # Check Markdown sources AND the rendered HTML build.
+          args: >-
+            --config lychee.toml
+            --no-progress
+            docs/**/*.md
+            docs-build/**/*.html
+        env:
+          # GitHub token reduces rate-limiting when checking github.com links.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # 3. Deploy (main branch only)
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    needs: [build, link-check]
+    # Only deploy on push to main (not PRs, not forks).
+    if: >
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'Soroban-Pulse/SorobanPulse'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download built site
+        uses: actions/download-artifact@v4
+        with:
+          name: docs-site
+          path: docs-build/
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: docs-build/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
