@@ -137,6 +137,12 @@ for the exact grant statement needed.
   deployment architecture.
 - **Understand the schema**: [Database Schema](schema.md) — table structure,
   indexes, and an ER diagram.
+- **Understand Stellar/Soroban terminology**: [Glossary](glossary.md) — plain-language
+  definitions of ledger, TOID, ScVal, XDR, Strkey, SAC, SEP-41, TTL/archival,
+  and Soroban events 101. A good read before diving into `src/indexer.rs`.
+- **Understand the codebase layout**: [Module Map](module-map.md) — every `src/`
+  module grouped by domain with one-line descriptions and "where do I start?"
+  guidance for common contribution types.
 - **Understand testing conventions**: [CONTRIBUTING.md](../CONTRIBUTING.md) —
   commit message format, migration naming, fuzzing, mutation testing, and the
   PR checklist.

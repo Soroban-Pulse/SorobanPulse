@@ -36,24 +36,48 @@ Key features:
 ## Project Structure
 
 ```
-src/
-├── main.rs       # Entry point, wires everything together
-├── config.rs     # Environment config
-├── db.rs         # DB pool + migrations
-├── models.rs     # Data types (Event, RPC response shapes)
-├── indexer.rs    # Background event polling worker
-├── routes.rs     # Axum router
-├── handlers.rs   # Request handlers
-└── error.rs      # Unified error type
-migrations/
-└── 20260314000000_create_events.sql
+SorobanPulse/
+├── src/                   # Rust backend service (100+ modules)
+│   ├── main.rs            # Binary entry point — wires everything together
+│   ├── lib.rs             # Library crate root (shared by tests and binaries)
+│   ├── middleware/        # Axum middleware stack (auth, rate-limit, security headers, …)
+│   ├── models/            # Shared data types (Event, RPC shapes, notification types)
+│   ├── codegen/           # OpenAPI, webhook, and subscription code generators
+│   ├── warehouse/         # Data warehouse export (BigQuery, Snowflake)
+│   ├── crypto/            # Cryptographic primitives (HMAC, encryption, quantum-ready)
+│   ├── costs/             # Per-tenant cost tracking and forecasting
+│   └── bin/               # Stand-alone utility binaries (gen_openapi, schema_cli, …)
+├── migrations/            # 140+ SQLx migration files (up + down)
+├── tests/                 # Integration, e2e, contract, property, and security tests
+├── benches/               # Criterion micro-benchmarks (pagination, DB queries, compression)
+├── sdk/                   # Client SDKs: TypeScript, Python, Go, JavaScript
+├── cli/                   # `spulse` command-line tool (Rust)
+├── frontend/              # React event-explorer UI (Vite + TypeScript)
+├── dashboard/             # Built-in ops dashboard served at /ui
+├── packages/feed-widget/  # <soroban-pulse-feed> embeddable web component
+├── web/                   # Public-facing marketing / docs site
+├── vscode-extension/      # VS Code extension for contract event inspection
+├── helm/                  # Helm chart for Kubernetes deployment
+├── terraform/             # Terraform IaC (AWS, GCP, multi-region)
+├── k8s/                   # Raw Kubernetes manifests (deployment, HPA, Istio, Linkerd)
+├── gitops/                # ArgoCD application definitions
+├── edge/                  # Cloudflare Worker edge-cache layer
+├── fuzz/                  # cargo-fuzz targets
+├── design/                # Design tokens and component CSS
+├── scripts/               # Helper shell scripts (CI checks, backups, migrations)
+├── docs/                  # All documentation (architecture, runbooks, ADRs, guides)
+└── notification_templates/ # Handlebars email templates (i18n)
 ```
+
+For a detailed breakdown of every `src/` module grouped by domain, see **[docs/module-map.md](docs/module-map.md)**.
 
 See [docs/schema.md](docs/schema.md) for a detailed description of the database schema, indexes, constraints, and an ER diagram.
 
 ## Documentation
 
 - [Developer onboarding guide](docs/onboarding.md) — start here if you're new: a day-1 checklist and fixes for the most common first-build issues.
+- [Stellar & Soroban glossary](docs/glossary.md) — plain-language definitions of ledger, TOID, ScVal, XDR, Strkey, SAC, SEP-41, TTL/archival, RPC retention, and Soroban events 101.
+- [Module map](docs/module-map.md) — every `src/` module grouped by domain with one-line descriptions and "where do I start?" guidance.
 - [Development environment setup](docs/development-setup.md) — OS-specific setup, IDE/editor configuration, pre-commit hooks, debugging tools, and performance profiling.
 - [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
 - [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
