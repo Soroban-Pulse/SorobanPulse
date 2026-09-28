@@ -1,0 +1,19 @@
+{
+  "name": "soroban-pulse-conformance-ts",
+  "version": "1.0.0",
+  "description": "TypeScript SDK conformance runner for SorobanPulse",
+  "private": true,
+  "scripts": {
+    "run": "ts-node runner.ts",
+    "build": "tsc --noEmit"
+  },
+  "dependencies": {
+    "js-yaml": "4.1.0"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "4.0.9",
+    "@types/node": "20.11.5",
+    "ts-node": "10.9.2",
+    "typescript": "5.3.3"
+  }
+}

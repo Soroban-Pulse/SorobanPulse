@@ -1,0 +1,317 @@
+# sdk/conformance/scenarios.yaml
+#
+# Shared scenario list for SDK conformance tests.
+# Each runner (TypeScript, Python, Go) reads this file and executes every
+# scenario against the live server started by docker-compose.conformance.yml.
+#
+# Seed data (seed.sql) must be applied before runners execute.
+# Seed guarantees the following:
+#   CONTRACT_A = CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+#   CONTRACT_B = CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBFCT4
+#   TX_HASH_1  = 0000000000000000000000000000000000000000000000000000000000000001
+#   TX_HASH_UNKNOWN = ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+#
+# Assertion operators:
+#   eq    – field == value
+#   gte   – field >= value (numeric)
+#   lte   – field <= value (numeric)
+#   type  – typeof field == value ("string", "number", "boolean", "object", "array")
+#   exists – field is present and not null
+#   len_gte – array length >= value
+
+base_url_env: CONFORMANCE_BASE_URL   # runners read this env var; default http://localhost:3000
+
+scenarios:
+
+  # ── 1. List events (no filter) ─────────────────────────────────────────────
+  - id: list_events_no_filter
+    description: "GET /v1/events returns a paginated list with the expected shape"
+    method: GET
+    path: /v1/events
+    query:
+      page: 1
+      limit: 10
+    expect:
+      status: 200
+      headers:
+        content-type: "application/json"
+      body:
+        - op: type
+          field: data
+          value: array
+        - op: len_gte
+          field: data
+          value: 10
+        - op: type
+          field: total
+          value: number
+        - op: gte
+          field: total
+          value: 65
+        - op: type
+          field: page
+          value: number
+        - op: eq
+          field: page
+          value: 1
+        - op: type
+          field: limit
+          value: number
+        - op: type
+          field: approximate
+          value: boolean
+        # Every event in the array must have required fields
+        - op: exists
+          field: data[0].id
+        - op: type
+          field: data[0].id
+          value: string
+        - op: exists
+          field: data[0].contract_id
+        - op: exists
+          field: data[0].event_type
+        - op: exists
+          field: data[0].tx_hash
+        - op: exists
+          field: data[0].ledger
+        - op: type
+          field: data[0].ledger
+          value: number
+        - op: exists
+          field: data[0].timestamp
+        - op: type
+          field: data[0].timestamp
+          value: string
+        - op: exists
+          field: data[0].event_data
+
+  # ── 2. Paginate – page 2 ────────────────────────────────────────────────────
+  - id: list_events_page2
+    description: "GET /v1/events?page=2&limit=5 returns a different set of events"
+    method: GET
+    path: /v1/events
+    query:
+      page: 2
+      limit: 5
+    expect:
+      status: 200
+      body:
+        - op: eq
+          field: page
+          value: 2
+        - op: eq
+          field: limit
+          value: 5
+        - op: type
+          field: data
+          value: array
+        - op: len_gte
+          field: data
+          value: 5
+
+  # ── 3. Filter by event_type = contract ──────────────────────────────────────
+  - id: filter_by_event_type_contract
+    description: "GET /v1/events?event_type=contract returns only contract events"
+    method: GET
+    path: /v1/events
+    query:
+      event_type: contract
+      limit: 20
+    expect:
+      status: 200
+      body:
+        - op: type
+          field: data
+          value: array
+        - op: len_gte
+          field: data
+          value: 1
+        # Every returned event must be of type "contract"
+        - op: eq
+          field: data[0].event_type
+          value: contract
+
+  # ── 4. Filter by event_type = diagnostic ────────────────────────────────────
+  - id: filter_by_event_type_diagnostic
+    description: "GET /v1/events?event_type=diagnostic returns only diagnostic events"
+    method: GET
+    path: /v1/events
+    query:
+      event_type: diagnostic
+      limit: 20
+    expect:
+      status: 200
+      body:
+        - op: type
+          field: data
+          value: array
+        - op: len_gte
+          field: data
+          value: 1
+        - op: eq
+          field: data[0].event_type
+          value: diagnostic
+
+  # ── 5. Filter by ledger range ────────────────────────────────────────────────
+  - id: filter_by_ledger_range
+    description: "GET /v1/events?from_ledger=1010&to_ledger=1020 returns events in range"
+    method: GET
+    path: /v1/events
+    query:
+      from_ledger: 1010
+      to_ledger: 1020
+      limit: 50
+    expect:
+      status: 200
+      body:
+        - op: type
+          field: data
+          value: array
+        - op: len_gte
+          field: data
+          value: 1
+        - op: gte
+          field: data[0].ledger
+          value: 1010
+        - op: lte
+          field: data[0].ledger
+          value: 1020
+
+  # ── 6. Invalid ledger range returns 400 ────────────────────────────────────
+  - id: invalid_ledger_range_400
+    description: "GET /v1/events?from_ledger=1020&to_ledger=1010 returns 400"
+    method: GET
+    path: /v1/events
+    query:
+      from_ledger: 1020
+      to_ledger: 1010
+    expect:
+      status: 400
+
+  # ── 7. Exact count ────────────────────────────────────────────────────────────
+  - id: exact_count
+    description: "GET /v1/events?exact_count=true returns approximate=false"
+    method: GET
+    path: /v1/events
+    query:
+      exact_count: "true"
+    expect:
+      status: 200
+      body:
+        - op: eq
+          field: approximate
+          value: false
+        - op: type
+          field: total
+          value: number
+        - op: gte
+          field: total
+          value: 65
+
+  # ── 8. Get events by contract ──────────────────────────────────────────────
+  - id: get_events_by_contract
+    description: "GET /v1/events/contract/{id} returns events for CONTRACT_A"
+    method: GET
+    path: /v1/events/contract/CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+    expect:
+      status: 200
+      body:
+        - op: type
+          field: data
+          value: array
+        - op: len_gte
+          field: data
+          value: 1
+        - op: eq
+          field: data[0].contract_id
+          value: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+
+  # ── 9. Get events by transaction hash (known tx) ───────────────────────────
+  - id: get_events_by_tx_known
+    description: "GET /v1/events/tx/{hash} returns 200 with data for a known tx"
+    method: GET
+    path: /v1/events/tx/0000000000000000000000000000000000000000000000000000000000000001
+    expect:
+      status: 200
+      body:
+        - op: type
+          field: data
+          value: array
+        - op: len_gte
+          field: data
+          value: 1
+
+  # ── 10. Get events by transaction hash (unknown tx → empty 200) ────────────
+  - id: get_events_by_tx_unknown
+    description: "GET /v1/events/tx/{unknown} returns 200 with empty data array"
+    method: GET
+    path: /v1/events/tx/ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+    expect:
+      status: 200
+      body:
+        - op: type
+          field: data
+          value: array
+        - op: eq
+          field: data
+          value: []
+
+  # ── 11. Health check ────────────────────────────────────────────────────────
+  - id: health_check
+    description: "GET /healthz/ready returns 200 with status ok"
+    method: GET
+    path: /healthz/ready
+    expect:
+      status: 200
+      body:
+        - op: eq
+          field: status
+          value: ok
+
+  # ── 12. Create subscription ────────────────────────────────────────────────
+  - id: create_subscription
+    description: "POST /v1/subscriptions creates a new webhook subscription"
+    method: POST
+    path: /v1/subscriptions
+    headers:
+      Content-Type: application/json
+    body:
+      contract_id: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+      webhook_url: http://webhook-sink:9002/hook
+      description: conformance-test-subscription
+    expect:
+      status: 201
+      body:
+        - op: exists
+          field: id
+        - op: type
+          field: id
+          value: string
+        - op: eq
+          field: contract_id
+          value: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4
+
+  # ── 13. Delete subscription ────────────────────────────────────────────────
+  # This scenario depends on the ID returned by create_subscription.
+  # Runners must store the ID and substitute it here.
+  - id: delete_subscription
+    description: "DELETE /v1/subscriptions/{id} cancels the subscription created above"
+    method: DELETE
+    # path is dynamically set by runners using the ID from create_subscription
+    path_template: /v1/subscriptions/{subscription_id}
+    depends_on: create_subscription
+    expect:
+      status: 204
+
+  # ── 14. Stream 5 events via SSE ────────────────────────────────────────────
+  - id: stream_events_sse
+    description: "GET /v1/events/stream emits at least 1 SSE message within 10s"
+    method: GET
+    path: /v1/events/stream
+    sse: true
+    sse_timeout_secs: 10
+    sse_min_events: 1
+    expect:
+      status: 200
+      headers:
+        content-type: "text/event-stream"
