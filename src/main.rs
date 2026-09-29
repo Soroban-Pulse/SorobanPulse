@@ -187,7 +187,39 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let _ = db::run_migrations(&pool).await;
+    // Issue #1147: MIGRATE_ONLY=true (or the `migrate` subcommand) runs
+    // migrations then exits with code 0 on success, 1 on failure.
+    // This is used by the Helm pre-install/pre-upgrade Job so that schema
+    // changes are applied before any application pods start.
+    let migrate_only = std::env::var("MIGRATE_ONLY")
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+        .unwrap_or(false)
+        || std::env::args().nth(1).as_deref() == Some("migrate");
+
+    if migrate_only {
+        info!("MIGRATE_ONLY mode: running migrations and exiting");
+        match db::run_migrations(&pool).await {
+            Ok(count) => {
+                info!(count = count, "Migration complete — exiting");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "Migration failed — exiting with code 1");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Issue #1147: skip startup migrations when the Helm migration Job is
+    // responsible for running them (RUN_MIGRATIONS_ON_STARTUP=false).
+    if config.run_migrations_on_startup {
+        if let Err(e) = db::run_migrations(&pool).await {
+            tracing::error!(error = %e, "Startup migrations failed");
+            return Err(e.into());
+        }
+    } else {
+        info!("RUN_MIGRATIONS_ON_STARTUP=false — skipping startup migrations (expected to be run by the Helm migration Job)");
+    }
 
     // Create read pool: use replica URL if configured, otherwise reuse primary pool.
     let read_pool = if let Some(ref replica_url) = config.database_replica_url {

@@ -1,0 +1,105 @@
+{{/*
+──────────────────────────────────────────────────────────────────────────────
+Migration Job (pre-install / pre-upgrade hook)
+
+Runs database migrations BEFORE any application Deployment pods are started or
+replaced.  If the Job fails, Helm aborts the release and leaves the existing
+pods untouched — the rollout never happens.
+
+Controlled by .Values.migrationJob.enabled (default: true).
+
+Key behaviours:
+  - Hook weights ensure this runs before any other hook.
+  - "hook-delete-policy: before-hook-creation" removes the old Job so each
+    release gets a clean run.
+  - The container runs: soroban-pulse migrate  (MIGRATE_ONLY=true equivalent).
+  - Inherits the same image, pull secrets, security context, and secret / ConfigMap
+    references as the main Deployment so no additional credentials need wiring.
+──────────────────────────────────────────────────────────────────────────────
+*/}}
+
+{{- if .Values.migrationJob.enabled }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}-migrate
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migration
+  annotations:
+    # Run this Job before Helm installs or upgrades any other resources.
+    "helm.sh/hook": pre-install,pre-upgrade
+    # Weight -5 ensures this hook runs before any other pre-install/pre-upgrade
+    # hooks (lower = earlier).
+    "helm.sh/hook-weight": "-5"
+    # Delete the previous Job before creating a new one so each release gets a
+    # clean slate.  "hook-succeeded" would leave it around for debugging; switch
+    # to "hook-succeeded,hook-failed" to auto-clean on success too.
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  # Number of retries before the Job is considered failed and Helm aborts.
+  backoffLimit: {{ .Values.migrationJob.backoffLimit | default 2 }}
+  # Automatically delete the Job (and its Pod logs) this many seconds after
+  # the Job finishes.  Set to 0 to delete immediately; omit the field to keep
+  # it around indefinitely.
+  {{- if kindIs "int" .Values.migrationJob.ttlSecondsAfterFinished }}
+  ttlSecondsAfterFinished: {{ .Values.migrationJob.ttlSecondsAfterFinished }}
+  {{- end }}
+  # Hard deadline for the entire Job (all retries).  Helm will not wait longer
+  # than this; the default matches a reasonable worst-case migration time.
+  activeDeadlineSeconds: {{ .Values.migrationJob.activeDeadlineSeconds | default 600 }}
+  template:
+    metadata:
+      labels:
+        {{- include "soroban-pulse.labels" . | nindent 8 }}
+        app.kubernetes.io/component: migration
+      {{- with .Values.migrationJob.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      # Jobs must not restart on completion — OnFailure would re-run the
+      # migration forever if it keeps failing; Never keeps logs visible.
+      restartPolicy: Never
+      serviceAccountName: {{ include "soroban-pulse.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.migrationJob.nodeSelector | default .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.migrationJob.tolerations | default .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Pass "migrate" as the first argument so the binary enters
+          # MIGRATE_ONLY mode, runs all pending migrations, and exits 0/1.
+          command: ["/app/soroban-pulse", "migrate"]
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # Inherit the same ConfigMap and Secret so DATABASE_URL and other
+          # required vars are available — same pattern as the main Deployment.
+          envFrom:
+            - configMapRef:
+                name: {{ include "soroban-pulse.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "soroban-pulse.fullname" .)) }}
+          # Explicit env overrides for the migration context.
+          env:
+            - name: MIGRATE_ONLY
+              value: "true"
+          {{- with .Values.migrationJob.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml (.Values.migrationJob.resources | default .Values.resources) | nindent 12 }}
+{{- end }}

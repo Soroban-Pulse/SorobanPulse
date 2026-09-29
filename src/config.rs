@@ -500,6 +500,13 @@ pub struct Config {
     /// Disabled by default. Set ENABLE_PUSH_PRELOAD=true to opt in.
     pub enable_push_preload: bool,
 
+    // Issue #1147: Helm pre-install/pre-upgrade migration Job
+    /// When true (default), migrations run automatically on startup before
+    /// the HTTP server and indexer start.  Set RUN_MIGRATIONS_ON_STARTUP=false
+    /// when the Helm migration Job is responsible for running migrations so
+    /// that application pods skip the migration step entirely.
+    pub run_migrations_on_startup: bool,
+
     // Issue #1112: built-in web dashboard
     /// Serve the web dashboard (web/dist) at /ui. Requires the `dashboard`
     /// cargo feature. Set SERVE_DASHBOARD=true to opt in.
@@ -712,6 +719,7 @@ impl Default for Config {
             query_cache_ttl_secs: crate::query_cache::DEFAULT_TTL_SECS,
             query_cache_max_capacity: crate::query_cache::DEFAULT_MAX_CAPACITY,
             enable_push_preload: false,
+            run_migrations_on_startup: true,
             serve_dashboard: false,
             dashboard_dir: "web/dist".to_string(),
             dashboard_connect_src: Vec::new(),
@@ -1852,6 +1860,11 @@ impl Config {
             enable_push_preload: env_or_file("ENABLE_PUSH_PRELOAD", &file)
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
                 .unwrap_or(false),
+            // Issue #1147: set to false when using the Helm migration Job so
+            // that application pods skip the startup migration step.
+            run_migrations_on_startup: env_or_file("RUN_MIGRATIONS_ON_STARTUP", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+                .unwrap_or(true),
             serve_dashboard: env_or_file("SERVE_DASHBOARD", &file)
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
                 .unwrap_or(false),
