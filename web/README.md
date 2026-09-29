@@ -2,6 +2,8 @@
 
 A Vite + React 18 + TypeScript dashboard for exploring indexed Soroban events, managing subscriptions and monitoring the indexer.
 
+The backend serves the production build at `/ui` when `SERVE_DASHBOARD=true`. See [docs/dashboard.md](../docs/dashboard.md) for configuration, caching and the Content-Security-Policy.
+
 ## Prerequisites
 
 - **Node.js ≥ 20** (LTS recommended)
@@ -12,28 +14,19 @@ A Vite + React 18 + TypeScript dashboard for exploring indexed Soroban events, m
 
 ```bash
 cd web
-npm ci          # install exact locked versions
-npm run dev     # start the dev server on http://localhost:5173
+npm ci
+SOROBAN_PULSE_API=http://localhost:3000 npm run dev   # dev server on http://localhost:5173
 ```
 
-Open `http://localhost:5173` — the Vite dev proxy forwards `/api/*` to `http://localhost:3000` so you won't hit CORS issues.
-
-Alternatively, from the repo root:
-
-```bash
-make web-dev
-```
+Open `http://localhost:5173` — the Vite dev proxy forwards `/v1/*`, `/health` and `/status` to the backend so you won't hit CORS issues.
 
 ## Environment variables
 
-Copy `.env.example` to `.env.local` and customise:
+| Variable | Default | Description |
+|---|---|---|
+| `SOROBAN_PULSE_API` | `http://localhost:3000` | Backend base URL used by the Vite dev proxy |
 
-```
-VITE_API_BASE_URL=http://localhost:3000   # API base URL (no trailing slash)
-VITE_API_KEY=                             # Optional X-Api-Key header value
-```
-
-`.env.local` is git-ignored — never commit real secrets.
+Credentials (server URL, API key, admin key) are entered at runtime on the **Settings** page and stored in `sessionStorage` / `localStorage` — never baked into the build.
 
 ## Available scripts
 
@@ -60,6 +53,7 @@ web/
 │   ├── api/           # Typed openapi-fetch client + TanStack Query hooks
 │   ├── components/
 │   │   └── layout/    # Shell layout: Sidebar, TopBar, Layout
+│   ├── context/       # SettingsContext (server URL + API keys)
 │   ├── pages/         # Route-level page components
 │   ├── test/          # Vitest setup and unit tests
 │   ├── App.tsx        # React Router root
@@ -67,13 +61,12 @@ web/
 │   └── main.tsx       # Application entry point
 ├── scripts/
 │   └── check-api-up-to-date.mjs
-├── .env.example
 ├── eslint.config.js
 ├── .prettierrc
-├── tsconfig.json      # IDE / typecheck config
+├── tsconfig.json
 ├── tsconfig.build.json
 ├── tsconfig.node.json
-└── vite.config.ts     # Vite + Vitest config
+└── vite.config.ts
 ```
 
 ## Tech stack
@@ -88,15 +81,3 @@ web/
 | Testing | [Vitest](https://vitest.dev) + [React Testing Library](https://testing-library.com) |
 | Linting | ESLint 9 (flat config) + `@typescript-eslint` |
 | Formatting | Prettier 3 |
-# SorobanPulse web dashboard
-
-Vanilla TypeScript + Vite. The backend serves the build at `/ui`. See [docs/dashboard.md](../docs/dashboard.md)
-for configuration, caching and the Content-Security-Policy.
-
-```bash
-npm install
-SOROBAN_PULSE_API=http://localhost:3000 npm run dev
-npm run build   # → dist/
-```
-
-Styling comes only from the shared design system: `../design/build/tokens.css` and `../design/components.css`.

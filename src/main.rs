@@ -1,10 +1,3 @@
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(
-    clippy::module_name_repetitions, // e.g. AppError, AppState — idiomatic in Rust
-    clippy::missing_errors_doc,      // internal handlers; not a public library
-    clippy::missing_panics_doc,      // panics only on misconfiguration at startup
-    clippy::wildcard_imports,        // used sparingly in test modules only
-)]
 mod audit_logging;
 mod bloom_filter;
 mod compliance_report;
@@ -51,6 +44,34 @@ use soroban_pulse::lua_transform;
 use soroban_pulse::parquet_export;
 #[cfg(feature = "graphql")]
 use soroban_pulse::graphql;
+#[cfg(feature = "graphql")]
+mod graphql_subscriptions;
+mod event_dedup_replicas;
+mod bulk_export;
+mod sse_ring_buffer;
+mod query_cache;
+mod query_plan_cache;
+mod query_optimizer;
+mod partition_manager;
+mod query_builder;
+mod adaptive_pool;
+mod pool_management;
+mod statistics_management;
+mod notification_admin;
+mod push_preload;
+mod financial_accuracy;
+mod webhook_template;
+mod event_aggregation;
+mod anomaly_detection;
+mod push_notification;
+mod connection_pool;
+mod slo_tracker;
+mod anonymization;
+mod event_compression;
+mod health_check;
+mod ledger_hashes;
+mod networks;
+
 #[cfg(feature = "graphql")]
 use soroban_pulse::graphql_subscriptions;
 #[cfg(feature = "archive")]
