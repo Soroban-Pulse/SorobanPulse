@@ -40,9 +40,14 @@ impl Default for SecurityHeadersConfig {
             frame_options: "DENY".to_string(),
             referrer_policy: "no-referrer".to_string(),
             csp_default: "default-src 'none'; frame-ancestors 'none';".to_string(),
-            csp_docs: "default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com; \
-                       style-src 'self' 'unsafe-inline' https://unpkg.com; img-src 'self' data:; \
-                       connect-src 'self'; frame-ancestors 'none';"
+            csp_docs: "default-src 'self'; \
+                       script-src 'self' https://unpkg.com \
+                         'sha256-OlhJ06FtsPaiJ/1A+8VpeJOGKCgqkf63ajgd7nrxk98='; \
+                       style-src 'self' https://unpkg.com \
+                         'sha256-t5Nfs8a1PFuEVO00S72ZGB4P65C74f37u8w0VCVsqBw='; \
+                       img-src 'self' data:; \
+                       connect-src 'self'; \
+                       frame-ancestors 'none';"
                 .to_string(),
         }
     }
@@ -101,6 +106,10 @@ impl SecurityHeadersConfig {
 /// - `Referrer-Policy`
 /// - `Strict-Transport-Security`
 /// - `X-XSS-Protection: 1; mode=block`
+/// - `Permissions-Policy: …` (all powerful features disabled)
+/// - `Content-Security-Policy` (strict for API routes; relaxed for `/docs`;
+///   the `/ui` dashboard keeps the policy set by `crate::dashboard`)
+pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
 /// - `Permissions-Policy` (all powerful features disabled)
 /// - `Content-Security-Policy` (strict for API routes; relaxed for `/docs`)
 pub async fn security_headers_middleware_with_config(
@@ -138,6 +147,9 @@ pub async fn security_headers_middleware_with_config(
     } else {
         &config.csp_default
     };
+    // The /ui dashboard sets its own policy (see crate::dashboard); keep it.
+    if !(crate::dashboard::is_dashboard_path(&path) && h.contains_key("Content-Security-Policy")) {
+        h.insert("Content-Security-Policy", csp.parse().unwrap());
     if let Ok(v) = csp.parse() {
         h.insert("Content-Security-Policy", v);
     }
@@ -241,6 +253,54 @@ mod tests {
             .to_str()
             .unwrap();
         assert!(csp.contains("unpkg.com"));
+    }
+
+    #[tokio::test]
+    async fn docs_csp_has_no_unsafe_inline() {
+        let resp = app()
+            .await
+            .oneshot(axum::http::Request::get("/docs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let csp = resp
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            !csp.contains("unsafe-inline"),
+            "docs CSP must not contain unsafe-inline; got: {csp}"
+        );
+    }
+
+    #[tokio::test]
+    async fn docs_csp_has_sha256_hashes() {
+        let resp = app()
+            .await
+            .oneshot(axum::http::Request::get("/docs").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let csp = resp
+            .headers()
+            .get("Content-Security-Policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            csp.contains("sha256-"),
+            "docs CSP should contain SHA-256 hashes for inline blocks; got: {csp}"
+        );
+        // CSS hash
+        assert!(
+            csp.contains("sha256-t5Nfs8a1PFuEVO00S72ZGB4P65C74f37u8w0VCVsqBw="),
+            "docs CSP missing CSS sha256 hash; got: {csp}"
+        );
+        // JS hash
+        assert!(
+            csp.contains("sha256-OlhJ06FtsPaiJ/1A+8VpeJOGKCgqkf63ajgd7nrxk98="),
+            "docs CSP missing JS sha256 hash; got: {csp}"
+        );
     }
 
     #[tokio::test]

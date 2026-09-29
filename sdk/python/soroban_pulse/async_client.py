@@ -6,13 +6,16 @@ import asyncio
 import json
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+import httpx
+
 from .exceptions import ApiError, AuthenticationError
 from .client import DEFAULT_BASE_URL, DEFAULT_TIMEOUT
 
 
 class AsyncSorobanPulseClient:
-    """Async client built on top of `aiohttp` (imported lazily so the sync
-    client has no hard dependency on it).
+    """Async client built on `httpx.AsyncClient`, with the same error
+    semantics as `SorobanPulseClient` (401/403 -> `AuthenticationError`,
+    other non-2xx and network failures -> `ApiError`).
 
     Example:
         async with AsyncSorobanPulseClient(api_key="sp_live_...") as client:
@@ -24,26 +27,27 @@ class AsyncSorobanPulseClient:
         api_key: str,
         base_url: str = DEFAULT_BASE_URL,
         timeout: int = DEFAULT_TIMEOUT,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
     ) -> None:
         if not api_key:
             raise AuthenticationError("api_key is required")
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self._session = None
+        self._transport = transport
+        self._session: Optional[httpx.AsyncClient] = None
 
     async def __aenter__(self) -> "AsyncSorobanPulseClient":
-        import aiohttp  # noqa: WPS433 (lazy import to keep this optional)
-
-        self._session = aiohttp.ClientSession(
+        self._session = httpx.AsyncClient(
             headers=self._headers(),
-            timeout=aiohttp.ClientTimeout(total=self.timeout),
+            timeout=self.timeout,
+            transport=self._transport,
         )
         return self
 
     async def __aexit__(self, *exc_info: Any) -> None:
         if self._session is not None:
-            await self._session.close()
+            await self._session.aclose()
             self._session = None
 
     def _headers(self) -> Dict[str, str]:
@@ -54,21 +58,28 @@ class AsyncSorobanPulseClient:
         }
 
     async def _request(self, method: str, path: str, params: Optional[Dict[str, Any]] = None,
-                        body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                       body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if self._session is None:
             raise RuntimeError("AsyncSorobanPulseClient must be used as an async context manager")
 
         url = f"{self.base_url}{path}"
         clean_params = {k: v for k, v in (params or {}).items() if v is not None}
 
-        async with self._session.request(method, url, params=clean_params, json=body) as resp:
-            text = await resp.text()
+        try:
+            resp = await self._session.request(method, url, params=clean_params, json=body)
+        except httpx.HTTPError as exc:
+            raise ApiError(0, f"network error: {exc}") from exc
+
+        text = resp.text
+        try:
             payload = json.loads(text) if text else {}
-            if resp.status >= 400:
-                if resp.status in (401, 403):
-                    raise AuthenticationError(payload.get("message", "authentication failed"))
-                raise ApiError(resp.status, payload.get("message", "request failed"), payload=payload)
-            return payload
+        except json.JSONDecodeError:
+            payload = {"message": text}
+        if resp.status_code >= 400:
+            if resp.status_code in (401, 403):
+                raise AuthenticationError(payload.get("message", "authentication failed"))
+            raise ApiError(resp.status_code, payload.get("message", "request failed"), payload=payload)
+        return payload
 
     async def list_events(
         self,

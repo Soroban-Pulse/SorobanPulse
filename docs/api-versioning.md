@@ -155,6 +155,52 @@ paths:
 
 The current OpenAPI spec is available at `/openapi.json`.
 
+## SDK Versioning
+
+The official SDKs (`sdk/typescript`, `sdk/python`, `sdk/go`) are versioned
+together and track the API version they target.
+
+### Version Numbers
+
+SDKs use [Semantic Versioning](https://semver.org/) `MAJOR.MINOR.PATCH`:
+
+| Part | Changes when |
+|------|--------------|
+| `MAJOR` | The SDK targets a new API major version (`/v1/` -> `/v2/`). SDK `1.x` speaks `/v1/`, SDK `2.x` speaks `/v2/`. |
+| `MINOR` | New endpoints, fields or SDK features are added, backward compatible (see [Backward-Compatible Changes](#backward-compatible-changes)). |
+| `PATCH` | Bug fixes and regenerated clients with no public API change. |
+
+A breaking change to an SDK's own surface (renamed method, removed option)
+without a new API version is avoided; when unavoidable it waits for the next
+`MAJOR`. Until the first published release SDKs stay at `0.x`, where a
+`MINOR` bump may break.
+
+All three SDKs are released at the same version from the same commit, so a
+given version number means the same API coverage in every language.
+
+### Release Tags
+
+| Tag | Purpose |
+|-----|---------|
+| `sdk-vX.Y.Z` | Triggers the SDK release (npm, PyPI) for version `X.Y.Z` |
+| `sdk/go/vX.Y.Z` | Go module version tag for the module in `sdk/go` (Go requires the subdirectory prefix) |
+
+Before a release, the version in `sdk/typescript/package.json` and
+`sdk/python/pyproject.toml` must equal the tag version.
+
+### Package Names
+
+| SDK | Package |
+|-----|---------|
+| TypeScript | `@soroban-pulse/sdk` (npm) |
+| Python | `openapi_client` (PyPI name still to be chosen before the first release) |
+| Go | `sdk/go` module; its `go.mod` path (`github.com/soroban-pulse/client-go`) must become `github.com/Soroban-Pulse/SorobanPulse/sdk/go` for `sdk/go/vX.Y.Z` tags to resolve |
+
+### Deprecated API Versions
+
+When an API version is deprecated, the SDK major that targets it keeps
+receiving `PATCH` releases until the API version's sunset date, then stops.
+
 ## Monitoring Deprecated Endpoints
 
 Operators can monitor usage of deprecated endpoints using the `soroban_pulse_http_request_duration_seconds` metric:

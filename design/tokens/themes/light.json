@@ -1,0 +1,191 @@
+{
+  "color": {
+    "bg": {
+      "canvas": {
+        "value": "{color.neutral.50}"
+      },
+      "surface": {
+        "value": "{color.neutral.0}"
+      },
+      "raised": {
+        "value": "{color.neutral.0}"
+      },
+      "subtle": {
+        "value": "{color.neutral.100}"
+      },
+      "hover": {
+        "value": "{color.neutral.100}"
+      },
+      "selected": {
+        "value": "{color.violet.50}"
+      },
+      "inverse": {
+        "value": "{color.neutral.900}"
+      },
+      "overlay": {
+        "value": "rgba(15, 18, 34, 0.45)"
+      }
+    },
+    "text": {
+      "primary": {
+        "value": "{color.neutral.900}"
+      },
+      "secondary": {
+        "value": "{color.neutral.600}"
+      },
+      "muted": {
+        "value": "{color.neutral.500}"
+      },
+      "inverse": {
+        "value": "{color.neutral.0}"
+      },
+      "on-accent": {
+        "value": "{color.neutral.0}"
+      },
+      "link": {
+        "value": "{color.violet.600}"
+      }
+    },
+    "border": {
+      "default": {
+        "value": "{color.neutral.200}"
+      },
+      "strong": {
+        "value": "{color.neutral.300}"
+      },
+      "subtle": {
+        "value": "{color.neutral.100}"
+      }
+    },
+    "accent": {
+      "default": {
+        "value": "{color.violet.600}"
+      },
+      "hover": {
+        "value": "{color.violet.700}"
+      },
+      "active": {
+        "value": "{color.violet.800}"
+      },
+      "subtle": {
+        "value": "{color.violet.50}"
+      },
+      "fg": {
+        "value": "{color.violet.700}"
+      }
+    },
+    "focus": {
+      "ring": {
+        "value": "{color.violet.500}"
+      }
+    },
+    "success": {
+      "fg": {
+        "value": "{color.green.700}"
+      },
+      "bg": {
+        "value": "{color.green.50}"
+      },
+      "border": {
+        "value": "{color.green.600}"
+      },
+      "solid": {
+        "value": "{color.green.600}"
+      }
+    },
+    "warn": {
+      "fg": {
+        "value": "{color.amber.700}"
+      },
+      "bg": {
+        "value": "{color.amber.50}"
+      },
+      "border": {
+        "value": "{color.amber.600}"
+      },
+      "solid": {
+        "value": "{color.amber.600}"
+      }
+    },
+    "error": {
+      "fg": {
+        "value": "{color.red.700}"
+      },
+      "bg": {
+        "value": "{color.red.50}"
+      },
+      "border": {
+        "value": "{color.red.600}"
+      },
+      "solid": {
+        "value": "{color.red.600}"
+      }
+    },
+    "info": {
+      "fg": {
+        "value": "{color.blue.700}"
+      },
+      "bg": {
+        "value": "{color.blue.50}"
+      },
+      "border": {
+        "value": "{color.blue.600}"
+      },
+      "solid": {
+        "value": "{color.blue.600}"
+      }
+    },
+    "event": {
+      "contract": {
+        "value": "{color.violet.600}"
+      },
+      "system": {
+        "value": "{color.cyan.700}"
+      },
+      "diagnostic": {
+        "value": "{color.amber.700}"
+      }
+    },
+    "code": {
+      "bg": {
+        "value": "{color.neutral.50}"
+      },
+      "key": {
+        "value": "{color.violet.700}"
+      },
+      "string": {
+        "value": "{color.green.700}"
+      },
+      "number": {
+        "value": "{color.blue.700}"
+      },
+      "literal": {
+        "value": "{color.amber.700}"
+      }
+    }
+  },
+  "elevation": {
+    "0": {
+      "value": "none"
+    },
+    "1": {
+      "value": "0 1px 2px rgba(15, 18, 34, 0.06), 0 1px 3px rgba(15, 18, 34, 0.08)",
+      "comment": "Cards, table headers"
+    },
+    "2": {
+      "value": "0 2px 4px rgba(15, 18, 34, 0.06), 0 4px 12px rgba(15, 18, 34, 0.08)",
+      "comment": "Dropdowns, popovers"
+    },
+    "3": {
+      "value": "0 8px 24px rgba(15, 18, 34, 0.12), 0 2px 6px rgba(15, 18, 34, 0.08)",
+      "comment": "Toasts"
+    },
+    "4": {
+      "value": "0 16px 48px rgba(15, 18, 34, 0.18), 0 4px 12px rgba(15, 18, 34, 0.08)",
+      "comment": "Drawers, modals"
+    }
+  },
+  "color-scheme": {
+    "value": "light"
+  }
+}

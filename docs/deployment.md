@@ -830,3 +830,94 @@ delete its row to resume delivery:
 ```sql
 DELETE FROM email_bounces WHERE email = 'user@example.com';
 ```
+
+---
+
+## Supply-Chain Verification
+
+Every GitHub Release ships verifiable supply-chain artefacts so that downstream
+operators and grant reviewers can confirm that the binary and container image
+were built from this repository's source by its official CI pipeline.
+
+### What is shipped with each release?
+
+| Artefact | Description |
+|----------|-------------|
+| `soroban-pulse` | Pre-built linux/amd64 binary |
+| `soroban-pulse-sbom.cdx.json` | CycloneDX JSON SBOM — full Rust crate dependency graph |
+| `soroban-pulse-container-sbom.spdx.json` | SPDX JSON SBOM — container image layer inventory (via syft) |
+| `SHA256SUMS` | SHA-256 checksums for all release assets |
+| SLSA provenance attestations | Signed attestations stored in the GitHub Attestations API |
+
+### Prerequisites
+
+Install the [GitHub CLI](https://cli.github.com/) (`gh`) and authenticate:
+
+```bash
+gh auth login
+```
+
+### Verify binary provenance
+
+```bash
+# Download the release binary
+gh release download v1.0.0 --repo Soroban-Pulse/SorobanPulse --pattern soroban-pulse
+
+# Verify the SLSA provenance attestation against the repository
+gh attestation verify soroban-pulse \
+  --repo Soroban-Pulse/SorobanPulse
+```
+
+A successful verification prints:
+
+```
+Loaded digest: sha256:<digest>
+Loaded 1 attestation from GitHub API
+✓ Verification succeeded!
+```
+
+### Verify container image provenance
+
+```bash
+# Verify the SLSA provenance attestation for a specific image tag
+gh attestation verify oci://ghcr.io/soroban-pulse/sorobanpulse:v1.0.0 \
+  --repo Soroban-Pulse/SorobanPulse
+```
+
+### Verify file checksums
+
+```bash
+# Download the release assets and the checksum file
+gh release download v1.0.0 --repo Soroban-Pulse/SorobanPulse
+
+# Verify integrity
+sha256sum --check SHA256SUMS
+```
+
+### Inspect the SBOMs
+
+The CycloneDX crate SBOM (`soroban-pulse-sbom.cdx.json`) lists every Rust
+dependency with its version and licence. Open it in any CycloneDX-compatible
+tool, or inspect it directly:
+
+```bash
+# Pretty-print the crate dependency list
+cat soroban-pulse-sbom.cdx.json | jq '.components[] | {name, version, licenses}'
+```
+
+The SPDX container SBOM (`soroban-pulse-container-sbom.spdx.json`) covers the
+operating-system packages and libraries baked into the Docker image:
+
+```bash
+cat soroban-pulse-container-sbom.spdx.json | jq '.packages[] | {name, versionInfo}'
+```
+
+### Generate the crate SBOM locally
+
+To reproduce the crate SBOM locally (requires
+[cargo-cyclonedx](https://github.com/CycloneDX/cyclonedx-rust-cargo)):
+
+```bash
+make sbom
+# Output: soroban-pulse-sbom.cdx.json
+```

@@ -284,6 +284,32 @@ if err != nil {
 }
 ```
 
+## Verifying Webhooks
+
+Soroban Pulse signs each webhook delivery with an `X-Signature-256:
+sha256=<hex HMAC-SHA256(secret, raw body)>` header (see
+`docs/webhook_signing.md`). Verify it against the raw body before parsing:
+
+```go
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Pass both secrets while rotating; either one is accepted.
+	if err := sp.VerifyWebhook(body, r.Header.Get(sp.WebhookSignatureHeader), newSecret, oldSecret); err != nil {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+	// ... handle the event in body
+}
+```
+
+`VerifyWebhook` compares digests in constant time and returns
+`ErrMissingSignature`, `ErrInvalidSignatureFormat` or `ErrSignatureMismatch`.
+It is tested against the shared vectors in `sdk/testdata/webhook_vectors.json`.
+
 ## Connection Pooling
 
 The client automatically manages connection pooling through the `http.Client`.

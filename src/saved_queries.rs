@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    Extension,
     http::StatusCode,
     Json,
 };
@@ -11,6 +12,7 @@ use uuid::Uuid;
 
 use crate::{
     error::AppError,
+    middleware::auth::Principal,
     models::{Event, PaginationParams},
     routes::{AppState, PaginatedResponse},
 };
@@ -48,8 +50,16 @@ pub struct ListSavedQueriesParams {
     pub limit: Option<i64>,
 }
 
+/// Owner identity for the request; `"anonymous"` when auth is disabled.
+fn owner_of(principal: Option<Extension<Principal>>) -> String {
+    principal
+        .map(|Extension(p)| p.0)
+        .unwrap_or_else(|| Principal::ANONYMOUS.to_string())
+}
+
 pub async fn create_saved_query(
     State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
     Json(request): Json<CreateSavedQueryRequest>,
 ) -> Result<Json<SavedQuery>, AppError> {
     let query_params_json = serde_json::to_value(&request.query_params)
@@ -65,7 +75,7 @@ pub async fn create_saved_query(
     .bind(&request.name)
     .bind(&request.description)
     .bind(&query_params_json)
-    .bind("api_user") // TODO: Extract from auth context
+    .bind(owner_of(principal))
     .fetch_one(&state.pool)
     .await
     .map_err(|e| match e {
@@ -79,26 +89,31 @@ pub async fn create_saved_query(
 }
 pub async fn list_saved_queries(
     State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
     Query(params): Query<ListSavedQueriesParams>,
 ) -> Result<Json<PaginatedResponse<SavedQuery>>, AppError> {
     let page = params.page.unwrap_or(1).max(1);
     let limit = params.limit.unwrap_or(20).clamp(1, 100);
     let offset = (page - 1) * limit;
+    let owner = owner_of(principal);
 
     let queries = sqlx::query_as::<_, SavedQuery>(
         r#"
         SELECT * FROM saved_queries
+        WHERE created_by = $3
         ORDER BY created_at DESC
         LIMIT $1 OFFSET $2
         "#,
     )
     .bind(limit)
     .bind(offset)
+    .bind(&owner)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| AppError::Internal(format!("Failed to fetch saved queries: {}", e)))?;
 
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM saved_queries")
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM saved_queries WHERE created_by = $1")
+        .bind(&owner)
         .fetch_one(&state.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to count saved queries: {}", e)))?;
@@ -114,12 +129,14 @@ pub async fn list_saved_queries(
 
 pub async fn get_saved_query(
     State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<SavedQuery>, AppError> {
     let query = sqlx::query_as::<_, SavedQuery>(
-        "SELECT * FROM saved_queries WHERE id = $1"
+        "SELECT * FROM saved_queries WHERE id = $1 AND created_by = $2"
     )
     .bind(id)
+    .bind(owner_of(principal))
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| AppError::Internal(format!("Failed to fetch saved query: {}", e)))?
@@ -130,6 +147,7 @@ pub async fn get_saved_query(
 
 pub async fn update_saved_query(
     State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
     Path(id): Path<Uuid>,
     Json(request): Json<UpdateSavedQueryRequest>,
 ) -> Result<Json<SavedQuery>, AppError> {
@@ -147,7 +165,7 @@ pub async fn update_saved_query(
             description = COALESCE($2, description),
             query_params = COALESCE($3, query_params),
             updated_at = NOW()
-        WHERE id = $4
+        WHERE id = $4 AND created_by = $5
         RETURNING *
         "#,
     )
@@ -155,6 +173,7 @@ pub async fn update_saved_query(
     .bind(&request.description)
     .bind(&query_params_json)
     .bind(id)
+    .bind(owner_of(principal))
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| AppError::Internal(format!("Failed to update saved query: {}", e)))?
@@ -165,10 +184,12 @@ pub async fn update_saved_query(
 
 pub async fn delete_saved_query(
     State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    let rows_affected = sqlx::query("DELETE FROM saved_queries WHERE id = $1")
+    let rows_affected = sqlx::query("DELETE FROM saved_queries WHERE id = $1 AND created_by = $2")
         .bind(id)
+        .bind(owner_of(principal))
         .execute(&state.pool)
         .await
         .map_err(|e| AppError::Internal(format!("Failed to delete saved query: {}", e)))?
@@ -183,6 +204,7 @@ pub async fn delete_saved_query(
 
 pub async fn execute_saved_query(
     State(state): State<AppState>,
+    principal: Option<Extension<Principal>>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<PaginatedResponse<Event>>, AppError> {
     // First, fetch the saved query and update execution stats
@@ -190,11 +212,12 @@ pub async fn execute_saved_query(
         r#"
         UPDATE saved_queries 
         SET last_executed_at = NOW(), execution_count = execution_count + 1
-        WHERE id = $1
+        WHERE id = $1 AND created_by = $2
         RETURNING *
         "#,
     )
     .bind(id)
+    .bind(owner_of(principal))
     .fetch_optional(&state.pool)
     .await
     .map_err(|e| AppError::Internal(format!("Failed to fetch saved query: {}", e)))?
@@ -206,4 +229,18 @@ pub async fn execute_saved_query(
 
     // Execute the query using existing event query logic
     crate::routes::get_events_with_params(State(state), Query(query_params)).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owners_are_isolated_and_default_to_anonymous() {
+        let a = owner_of(Some(Extension(Principal::from_api_key("key-a"))));
+        let b = owner_of(Some(Extension(Principal::from_api_key("key-b"))));
+        assert_ne!(a, b);
+        assert_eq!(owner_of(None), "anonymous");
+        assert_eq!(owner_of(Some(Extension(Principal::anonymous()))), "anonymous");
+    }
 }

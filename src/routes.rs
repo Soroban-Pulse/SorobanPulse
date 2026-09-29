@@ -142,6 +142,9 @@ pub struct AppState {
     pub circuit_breaker_manager: crate::webhook_circuit_breaker::CircuitBreakerManager,
     /// Issue #881: Bulk export manager for event export jobs.
     pub bulk_export_manager: crate::bulk_export::BulkExportManager,
+    /// Deployment role for this instance — used by the readiness handler to
+    /// apply role-specific readiness semantics.
+    pub role: crate::config::Role,
 }
 
 /// OpenAPI spec — all paths are documented via #[utoipa::path] on handlers.
@@ -150,7 +153,40 @@ pub struct AppState {
     info(
         title = "Soroban Pulse API",
         version = "1.0.0",
-        description = "Indexes Soroban smart contract events on the Stellar network."
+        description = "## Soroban Pulse API
+
+Real-time indexing and querying of Soroban smart contract events on the Stellar network.
+
+---
+
+### Authentication
+
+Most endpoints are open. When the `API_KEY` environment variable is set, all routes except
+`/health` and `/healthz/*` require one of:
+
+- `Authorization: Bearer <API_KEY>` header
+- `X-Api-Key: <API_KEY>` header
+
+Administrative endpoints under `/v1/admin/*` require `ADMIN_API_KEY` (independent of `API_KEY`).
+A missing key returns **401 Unauthorized**; a wrong key returns **403 Forbidden**.
+
+---
+
+### Rate Limiting
+
+Default: **60 requests / minute per IP** (configurable via `RATE_LIMIT_PER_MINUTE`).
+Requests that exceed the limit receive **429 Too Many Requests** with a `Retry-After` header.
+Set `RATE_LIMIT_PER_MINUTE=0` to disable rate limiting entirely.
+
+---
+
+### Guides & Resources
+
+- [Developer Onboarding](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/onboarding.md)
+- [API Usage Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/api-guide.md)
+- [SDK Integration Guide](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/sdk-integration-guide.md)
+- [Webhook Verification](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/webhook-verification.md)
+- [Contract Event Schemas](https://github.com/Soroban-Pulse/SorobanPulse/blob/main/docs/contract-event-schemas.md)"
     ),
     paths(
         handlers::health,
@@ -160,6 +196,9 @@ pub struct AppState {
         handlers::health_rpc,
         handlers::health_external,
         handlers::email_bounce_webhook,
+        handlers::get_cross_chain_trace,
+        handlers::analyze_causality,
+        handlers::get_feature_flag_status,
         handlers::status,
         handlers::get_events,
         handlers::get_events_feed,
@@ -184,6 +223,8 @@ pub struct AppState {
         handlers::start_reencrypt,
         handlers::register_contract_abi,
         handlers::get_contract_abi,
+        handlers::upsert_contract_metadata,
+        handlers::get_contract_metadata,
         handlers::anonymize_event,
         handlers::pause_indexer,
         handlers::resume_indexer,
@@ -216,6 +257,8 @@ pub struct AppState {
     ),
     components(schemas(
         crate::models::Event,
+        crate::contract_metadata::ContractMetadata,
+        crate::contract_metadata::UpsertContractMetadata,
         crate::models::EventType,
         crate::models::SortOrder,
         crate::models::PaginationParams,
@@ -469,6 +512,7 @@ pub fn create_router_with_tx_and_tenant_map(
         adaptive_pool,
         circuit_breaker_manager,
         bulk_export_manager,
+        role: config.role.clone(),
     };
 
     // Spawn cache invalidation task: subscribe to the broadcast channel and
@@ -497,7 +541,11 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/lua/preview", axum::routing::post(handlers::lua_preview))
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
         .route("/admin/reencrypt", axum::routing::post(handlers::start_reencrypt))
+        .route("/admin/token-transfers/backfill", axum::routing::post(crate::token_events::backfill_token_transfers))
+        .route("/admin/event-addresses/backfill", axum::routing::post(crate::account_events::backfill_event_addresses))
         .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
+        .route("/admin/contracts/{contract_id}/metadata", axum::routing::post(handlers::upsert_contract_metadata).delete(handlers::delete_contract_metadata))
+        .route("/admin/contracts/metadata/import", axum::routing::post(handlers::bulk_import_contract_metadata))
         .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
         .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
         .route("/admin/indexer/resume", axum::routing::post(handlers::resume_indexer))
@@ -507,6 +555,8 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/pool-config", axum::routing::get(handlers::get_pool_tuning_guide))
         .route("/admin/pool-config/statistics", axum::routing::get(handlers::get_pool_statistics))
         .route("/admin/pool-config/health", axum::routing::get(handlers::get_pool_health))
+        .route("/contracts/{id}/resources", axum::routing::get(handlers::get_contract_resources))
+        .route("/admin/indexer/gaps", axum::routing::get(handlers::get_indexer_gaps))
         .route("/admin/pool-config/adaptive", axum::routing::get(handlers::get_adaptive_pool_status))
         .route("/admin/pool-config/adaptive/config", axum::routing::put(handlers::update_adaptive_pool_config))
         .route("/admin/pool-config/adaptive/rollback", axum::routing::post(handlers::rollback_adaptive_pool_config))
@@ -592,6 +642,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/config/anonymization/scan", axum::routing::post(handlers::scan_event_for_pii))
         .route("/cross-chain/trace/{tx_hash}", get(handlers::get_cross_chain_trace))
         .route("/cross-chain/causality", get(handlers::analyze_causality))
+        .route("/contracts/{contract_id}/metadata", get(handlers::get_contract_metadata))
         .route("/contracts/{contract_id}/summary", get(handlers::get_contract_summary))
         .route("/contracts/{contract_id}/event-counts", get(handlers::get_contract_event_counts))
         .route("/admin/replay", axum::routing::post(handlers::replay_events))
@@ -601,6 +652,8 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/admin/mask-events/{job_id}", get(handlers::get_mask_job_status))
         .route("/admin/notifications/channels", axum::routing::post(handlers::create_notification_channel))
         .route("/admin/contracts/{contract_id}/abi", axum::routing::post(handlers::register_contract_abi).get(handlers::get_contract_abi))
+        .route("/admin/contracts/{contract_id}/metadata", axum::routing::post(handlers::upsert_contract_metadata).delete(handlers::delete_contract_metadata))
+        .route("/admin/contracts/metadata/import", axum::routing::post(handlers::bulk_import_contract_metadata))
         .route("/admin/events/{id}/anonymize", axum::routing::post(handlers::anonymize_event))
         .route("/admin/events/contract/{contract_id}", axum::routing::delete(handlers::delete_contract_events))
         .route("/admin/indexer/pause", axum::routing::post(handlers::pause_indexer))
@@ -668,6 +721,9 @@ pub fn create_router_with_tx_and_tenant_map(
         // Issue #610: Compression admin endpoints
         .route("/admin/compression/stats", axum::routing::get(handlers::compression_stats))
         .route("/admin/compression/migrate", axum::routing::post(handlers::start_compression_migration))
+        .route("/tokens/{contract_id}/transfers", axum::routing::get(crate::token_events::get_token_transfers))
+        .route("/accounts/{address}/events", axum::routing::get(crate::account_events::get_account_events))
+        .route("/contracts/{contract_id}/versions", axum::routing::get(crate::contract_versions::get_contract_versions))
         // Issue #607: Cached ABI endpoint
         .route("/contracts/{contract_id}/abi/cached", axum::routing::get(handlers::get_contract_abi_cached))
         // Issue #632: Feature flag client-side endpoint
@@ -735,26 +791,7 @@ pub fn create_router_with_tx_and_tenant_map(
         .route("/events/tx/{tx_hash}", get(handlers::get_events_by_tx))
         .route("/contracts", get(handlers::get_contracts))
         .layer(axum::middleware::from_fn(
-            |req: Request<Body>, next: axum::middleware::Next| async move {
-                let path = req.uri().path().to_string();
-                let mut resp = next.run(req).await;
-                resp.headers_mut()
-                    .insert("Deprecation", HeaderValue::from_static("true"));
-                resp.headers_mut().insert(
-                    "Sunset",
-                    HeaderValue::from_static("Sat, 24 Oct 2026 00:00:00 GMT"),
-                );
-                // Map the deprecated path to its versioned equivalent
-                let versioned_path = format!("/v1{}", path);
-                let link_value = format!("<{}>; rel=\"successor-version\"", versioned_path);
-                resp.headers_mut().insert(
-                    "Link",
-                    HeaderValue::from_str(&link_value).unwrap_or_else(|_| {
-                        HeaderValue::from_static("</v1/events>; rel=\"successor-version\"")
-                    }),
-                );
-                resp
-            },
+            middleware::deprecation_middleware,
         ));
 
     // Health endpoints — exempt from rate limiting.
@@ -795,16 +832,7 @@ pub fn create_router_with_tx_and_tenant_map(
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated)
-            .layer(axum::middleware::from_fn(
-                |req: Request<Body>, next: axum::middleware::Next| async move {
-                    let resp = next.run(req).await;
-                    if resp.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
-                        metrics::record_rate_limit_rejected();
-                        return rate_limit_json_response(resp);
-                    }
-                    resp
-                },
-            ))
+            .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
             .layer(GovernorLayer::new(governor_conf))
     } else if behind_proxy {
         let governor_conf = Arc::new(
@@ -823,16 +851,7 @@ pub fn create_router_with_tx_and_tenant_map(
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated)
-            .layer(axum::middleware::from_fn(
-                |req: Request<Body>, next: axum::middleware::Next| async move {
-                    let resp = next.run(req).await;
-                    if resp.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
-                        metrics::record_rate_limit_rejected();
-                        return rate_limit_json_response(resp);
-                    }
-                    resp
-                },
-            ))
+            .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
             .layer(GovernorLayer::new(governor_conf))
     } else {
         let governor_conf = Arc::new(
@@ -851,29 +870,20 @@ pub fn create_router_with_tx_and_tenant_map(
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated)
-            .layer(axum::middleware::from_fn(
-                |req: Request<Body>, next: axum::middleware::Next| async move {
-                    let resp = next.run(req).await;
-                    if resp.status() == axum::http::StatusCode::TOO_MANY_REQUESTS {
-                        metrics::record_rate_limit_rejected();
-                        return rate_limit_json_response(resp);
-                    }
-                    resp
-                },
-            ))
+            .layer(axum::middleware::from_fn(middleware::rate_limit_reject_middleware))
             .layer(GovernorLayer::new(governor_conf))
     };
 
+    // Issue #1112: static dashboard at /ui — outside auth-gated rate limiting.
+    let dashboard_routes = crate::dashboard::router(&app_state.config);
+
     Router::new()
         .merge(health_routes)
-        .merge(admin_routes)
+        .merge(dashboard_routes)
         .merge(rate_limited_routes)
         .layer(axum::middleware::from_fn({
-            let security_headers_config = middleware::SecurityHeadersConfig::from_env();
-            move |req, next| {
-                let config = security_headers_config.clone();
-                middleware::security_headers_middleware_with_config(config, req, next)
-            }
+            let config = middleware::SecurityHeadersConfig::from_env();
+            middleware::security_headers_with_config(config)
         }))
         .layer(axum::middleware::from_fn_with_state(
             app_state.clone(),
@@ -895,39 +905,7 @@ pub fn create_router_with_tx_and_tenant_map(
             auth_state,
             middleware::auth_middleware,
         ))
-        .layer(axum::middleware::from_fn({
-            let slow_request_threshold_ms = 1000u64;
-            move |req: axum::http::Request<Body>, next: axum::middleware::Next| async move {
-                let method = req.method().as_str().to_string();
-                let route = req
-                    .extensions()
-                    .get::<MatchedPath>()
-                    .map(|p| p.as_str().to_string())
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                let request_id = req
-                    .headers()
-                    .get("x-request-id")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("unknown")
-                    .to_owned();
-                let start = Instant::now();
-                let response = next.run(req).await;
-                let duration = start.elapsed();
-                let status = response.status().as_u16().to_string();
-                metrics::record_http_request_duration(duration, &method, &route, &status);
-                if duration.as_millis() as u64 > 500 {
-                    tracing::warn!(
-                        method = %method,
-                        path = %route,
-                        status = %status,
-                        duration_ms = duration.as_millis(),
-                        request_id = %request_id,
-                        "slow request"
-                    );
-                }
-                response
-            }
-        }))
+        .layer(axum::middleware::from_fn(middleware::slow_request_middleware(1000)))
         .layer(cors)
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
@@ -959,29 +937,6 @@ pub fn create_router_with_tx_and_tenant_map(
         .with_state(app_state)
 }
 
-/// Rewrite a 429 Too Many Requests response to the standard JSON ErrorResponse
-/// format (issue #424). Preserves all rate-limit headers from the original.
-fn rate_limit_json_response(original: axum::response::Response<Body>) -> axum::response::Response<Body> {
-    use axum::http::header;
-    let correlation_id = crate::error::get_request_id();
-    let body = serde_json::json!({
-        "error": "rate limit exceeded",
-        "code": "RATE_LIMIT_EXCEEDED",
-        "correlation_id": correlation_id,
-    });
-    let json_bytes = body.to_string();
-    let mut builder = axum::response::Response::builder()
-        .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
-        .header(header::CONTENT_TYPE, "application/json");
-    // Forward rate-limit headers from the original response.
-    for (name, value) in original.headers() {
-        if name != header::CONTENT_TYPE {
-            builder = builder.header(name, value);
-        }
-    }
-    builder.body(Body::from(json_bytes)).unwrap()
-}
-
 /// Issue #683: GraphQL API routes (requires `graphql` feature)
 fn graphql_routes() -> Router<AppState> {
     Router::new()
@@ -994,6 +949,9 @@ fn build_cors(allowed_origins: &[String]) -> CorsLayer {
         axum::http::header::CONTENT_TYPE,
         axum::http::header::HeaderName::from_static("x-api-key"),
         axum::http::header::HeaderName::from_static("x-request-id"),
+        // Lets cross-origin SSE clients (e.g. the embeddable feed widget, #1111)
+        // resume a stream after reconnecting.
+        axum::http::header::HeaderName::from_static("last-event-id"),
     ];
     let exposed_headers = [axum::http::header::HeaderName::from_static("x-request-id")];
     let max_age = std::time::Duration::from_secs(86400);
@@ -1507,4 +1465,100 @@ mod tests {
         assert!(v["error"].as_str().is_some());
         assert!(v["correlation_id"].as_str().is_some());
     }
+}
+
+/// Build a minimal HTTP router for `ROLE=indexer` pods.
+///
+/// Exposes only health probes (`/healthz/*`, `/health`) and the Prometheus
+/// `/metrics` endpoint.  No API routes, no rate limiting, no auth middleware.
+/// Kubernetes can still probe liveness/readiness and Prometheus can still
+/// scrape metrics from indexer pods.
+pub fn create_minimal_router(
+    pool: sqlx::PgPool,
+    health_state: std::sync::Arc<crate::config::HealthState>,
+    indexer_state: std::sync::Arc<crate::config::IndexerState>,
+    prometheus_handle: metrics_exporter_prometheus::PrometheusHandle,
+    config: crate::config::Config,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    sse_ring_buf: std::sync::Arc<crate::sse_ring_buffer::SseRingBuffer>,
+) -> Router {
+    use axum::routing::get;
+    use tokio::sync::broadcast;
+
+    // A dummy broadcast sender — no SSE on indexer pods, but AppState requires it.
+    let (event_tx, _) = broadcast::channel::<crate::models::SorobanEvent>(1);
+
+    let read_pool = pool.clone();
+
+    let contract_count_cache = moka::future::Cache::builder()
+        .max_capacity(config.contract_count_cache_size)
+        .time_to_live(std::time::Duration::from_secs(config.contract_count_cache_ttl_secs))
+        .build();
+
+    let stats_cache = moka::future::Cache::builder()
+        .max_capacity(128)
+        .time_to_live(std::time::Duration::from_secs(config.stats_cache_ttl_secs))
+        .build();
+
+    let query_result_cache = std::sync::Arc::new(
+        moka::future::Cache::builder()
+            .max_capacity(config.query_cache_max_capacity)
+            .time_to_live(std::time::Duration::from_secs(config.query_cache_ttl_secs))
+            .build(),
+    );
+
+    let abi_cache = crate::abi::AbiCache::new(
+        config.abi_cache_max_entries,
+        std::time::Duration::from_secs(config.abi_cache_ttl_secs),
+    );
+
+    let sse_connections_per_ip = std::sync::Arc::new(dashmap::DashMap::new());
+
+    let pool_stats = std::sync::Arc::new(crate::connection_pool::PoolStats::new(
+        config.db_max_connections,
+    ));
+    let adaptive_pool = std::sync::Arc::new(crate::adaptive_pool::AdaptiveTunerState::new(
+        crate::adaptive_pool::AdaptivePoolConfig::default(),
+    ));
+
+    let app_state = AppState {
+        pool: pool.clone(),
+        read_pool,
+        health_state,
+        indexer_state,
+        prometheus_handle,
+        event_tx,
+        sse_keepalive_interval_ms: config.sse_keepalive_interval_ms,
+        sse_connections: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        sse_max_connections: config.sse_max_connections,
+        health_check_timeout_ms: config.health_check_timeout_ms,
+        encryption_key: config.event_data_encryption_key,
+        encryption_key_old: config.event_data_encryption_key_old,
+        contract_count_cache,
+        config: config.clone(),
+        schema_validator: None,
+        tenant_map: std::sync::Arc::new(std::collections::HashMap::new()),
+        stats_cache,
+        shutdown_rx,
+        sse_connections_per_ip,
+        super_admin_key_hash: None,
+        abi_cache,
+        sse_ring_buffer: sse_ring_buf,
+        query_result_cache,
+        anonymization_config: None,
+        pool_stats,
+        adaptive_pool,
+        db: pool,
+        circuit_breaker_manager: crate::webhook_circuit_breaker::CircuitBreakerManager::new(),
+        bulk_export_manager: crate::bulk_export::BulkExportManager::new(),
+        role: config.role.clone(),
+    };
+
+    Router::new()
+        .route("/health", get(handlers::health))
+        .route("/healthz/live", get(handlers::health_live))
+        .route("/healthz/ready", get(handlers::health_ready))
+        .route("/healthz/postgres", get(handlers::health_postgres))
+        .route("/metrics", get(handlers::metrics))
+        .with_state(app_state)
 }

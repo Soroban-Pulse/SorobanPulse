@@ -1,0 +1,157 @@
+/*
+ * Theme tokens (Issue #1106).
+ *
+ * This is the ONLY file allowed to contain literal colours; everything else
+ * must reference these variables (enforced by `npm run lint:colors`).
+ *
+ * Contrast (WCAG 2.1 ratio against --color-bg / --color-surface):
+ *   light: text 15.8/14.8, text-muted 6.1/5.7, accent 5.2/4.9, ok 5.1/4.8, warn 4.9/4.6, danger 5.4/5.0
+ *   dark:  text 16.0/14.6, text-muted 6.5/5.9, accent 6.1/5.6, ok 7.5/6.8, warn 7.5/6.9, danger 5.7/5.2
+ *   status text on its own *-soft background: >= 4.5 in both themes.
+ * Every pair meets AA (4.5:1) for normal text. Re-check when changing a value.
+ */
+
+:root,
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-bg: #ffffff;
+  --color-surface: #f6f8fa;
+  --color-surface-raised: #ffffff;
+  --color-border: #d0d7de;
+  --color-border-strong: #8c959f;
+  --color-text: #1f2328;
+  --color-text-muted: #59636e;
+  --color-text-inverse: #ffffff;
+
+  --color-accent: #0969da;
+  --color-accent-hover: #0550ae;
+  --color-accent-soft: #ddf4ff;
+  --color-focus: #0969da;
+
+  --color-ok: #1a7f37;
+  --color-ok-soft: #dafbe1;
+  --color-warn: #9a6700;
+  --color-warn-soft: #fff8c5;
+  --color-danger: #cf222e;
+  --color-danger-soft: #ffebe9;
+  --color-neutral: #6e7781;
+  --color-neutral-soft: #eaeef2;
+
+  --color-overlay: #1f232880;
+  --color-shadow: #1f232826;
+
+  /* Code blocks and JSON trees */
+  --color-code-bg: #f6f8fa;
+  --color-code-text: #1f2328;
+  --color-code-key: #0550ae;
+  --color-code-string: #0a3069;
+  --color-code-number: #953800;
+  --color-code-bool: #8250df;
+  --color-code-null: #6e7781;
+
+  /* Charts */
+  --color-chart-1: #0969da;
+  --color-chart-2: #8250df;
+  --color-chart-3: #bf3989;
+  --color-chart-grid: #d0d7de;
+  --color-chart-axis: #59636e;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-bg: #0d1117;
+  --color-surface: #161b22;
+  --color-surface-raised: #1c2128;
+  --color-border: #30363d;
+  --color-border-strong: #6e7681;
+  --color-text: #e6edf3;
+  --color-text-muted: #9198a1;
+  --color-text-inverse: #0d1117;
+
+  --color-accent: #4493f8;
+  --color-accent-hover: #79b8ff;
+  --color-accent-soft: #388bfd26;
+  --color-focus: #4493f8;
+
+  --color-ok: #3fb950;
+  --color-ok-soft: #2ea04326;
+  --color-warn: #d29922;
+  --color-warn-soft: #bb800926;
+  --color-danger: #f85149;
+  --color-danger-soft: #f8514926;
+  --color-neutral: #8b949e;
+  --color-neutral-soft: #6e768133;
+
+  --color-overlay: #010409b3;
+  --color-shadow: #01040966;
+
+  --color-code-bg: #161b22;
+  --color-code-text: #e6edf3;
+  --color-code-key: #79c0ff;
+  --color-code-string: #a5d6ff;
+  --color-code-number: #ffa657;
+  --color-code-bool: #d2a8ff;
+  --color-code-null: #8b949e;
+
+  --color-chart-1: #4493f8;
+  --color-chart-2: #ab7df8;
+  --color-chart-3: #f778ba;
+  --color-chart-grid: #30363d;
+  --color-chart-axis: #9198a1;
+}
+
+/* No-JS fallback: follow the OS preference when no theme has been applied. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --color-bg: #0d1117;
+    --color-surface: #161b22;
+    --color-surface-raised: #1c2128;
+    --color-border: #30363d;
+    --color-border-strong: #6e7681;
+    --color-text: #e6edf3;
+    --color-text-muted: #9198a1;
+    --color-text-inverse: #0d1117;
+    --color-accent: #4493f8;
+    --color-accent-hover: #79b8ff;
+    --color-accent-soft: #388bfd26;
+    --color-focus: #4493f8;
+    --color-ok: #3fb950;
+    --color-ok-soft: #2ea04326;
+    --color-warn: #d29922;
+    --color-warn-soft: #bb800926;
+    --color-danger: #f85149;
+    --color-danger-soft: #f8514926;
+    --color-neutral: #8b949e;
+    --color-neutral-soft: #6e768133;
+    --color-overlay: #010409b3;
+    --color-shadow: #01040966;
+    --color-code-bg: #161b22;
+    --color-code-text: #e6edf3;
+    --color-code-key: #79c0ff;
+    --color-code-string: #a5d6ff;
+    --color-code-number: #ffa657;
+    --color-code-bool: #d2a8ff;
+    --color-code-null: #8b949e;
+    --color-chart-1: #4493f8;
+    --color-chart-2: #ab7df8;
+    --color-chart-3: #f778ba;
+    --color-chart-grid: #30363d;
+    --color-chart-axis: #9198a1;
+  }
+}
+
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --radius: 6px;
+  --radius-lg: 10px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+}

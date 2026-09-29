@@ -39,3 +39,10 @@
 
 # API_KEY = ""
 # API_KEY_SECONDARY = ""
+
+# --- Web dashboard (issue #1112) ---
+# Serve the built dashboard at /ui (defaults to true in the Docker image).
+# SERVE_DASHBOARD = "false"
+# DASHBOARD_DIR = "web/dist"
+# Extra API origins the dashboard may call (added to its CSP connect-src).
+# DASHBOARD_CONNECT_SRC = ""

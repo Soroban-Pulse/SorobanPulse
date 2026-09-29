@@ -39,7 +39,7 @@ setup(
     install_requires=REQUIRES,
     packages=find_packages(exclude=["test", "tests"]),
     include_package_data=True,
-    license="",
+    license="MIT",
     long_description_content_type='text/markdown',
     long_description="""\
     Indexes Soroban smart contract events on the Stellar network.

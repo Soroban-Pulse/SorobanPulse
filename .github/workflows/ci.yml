@@ -4,22 +4,58 @@ on:
   push:
     branches: [main]
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  # Nightly run covers the beta toolchain and full Postgres matrix that PRs skip.
+  schedule:
+    - cron: "0 3 * * *"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+# Minimal permissions — jobs that need extra permissions declare them locally.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_test
 
 jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      sdk: ${{ steps.filter.outputs.sdk }}
+      web: ${{ steps.filter.outputs.web }}
+      extension: ${{ steps.filter.outputs.extension }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            sdk:
+              - "sdk/**"
+              - "openapi.json"
+              - "openapitools.json"
+              - "Makefile"
+            web:
+              - "dashboard/**"
+            extension:
+              - "vscode-extension/**"
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: rustfmt
       - run: cargo fmt --check
@@ -28,20 +64,20 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check advisories
           arguments: --all-features
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check bans
           arguments: --all-features
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check licenses
           arguments: --all-features
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2
         with:
           command: check sources
           arguments: --all-features
@@ -50,22 +86,26 @@ jobs:
     name: Check Migrations
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash scripts/check-migrations.sh
 
   validate-sdk:
     name: Validate SDKs
     runs-on: ubuntu-latest
+    needs: changes
+    # openapi.json drift from the code is caught by the openapi job, so SDK
+    # drift can only come from the spec, the generator config or sdk/ itself.
+    if: github.event_name != 'pull_request' || needs.changes.outputs.sdk == 'true'
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
         with:
           distribution: "temurin"
           java-version: "17"
@@ -78,27 +118,180 @@ jobs:
             exit 1
           fi
 
+  web:
+    name: Dashboard Build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm install
+      - run: npm run build
+      - run: npm test
+
+  extension:
+    name: VS Code Extension Build
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.extension == 'true'
+    defaults:
+      run:
+        working-directory: vscode-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: vscode-extension/package-lock.json
+      - run: npm ci
+      - run: npm run compile
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - run: cargo clippy -- -D warnings
+      # Build with the committed .sqlx cache so query macros are verified without a live DB.
+      - run: SQLX_OFFLINE=true cargo clippy -- -D warnings
+
+  sqlx-prepare-check:
+    name: sqlx prepare --check
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: stable-nextest
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .sqlx
+          key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
+          restore-keys: ${{ runner.os }}-sqlx-
+      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest archive --archive-file nextest-archive.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nextest-archive
+          path: nextest-archive.tar.zst
+          retention-days: 1
+
+  features:
+    name: Check each feature (cargo-hack)
+    # Default-feature jobs never compile code behind optional features
+    # (quantum-crypto, istio, linkerd, full-observability, kafka, sqs, pubsub).
+    # `--each-feature` checks every feature on its own plus --no-default-features.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: features
+          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack,sqlx-cli
+      # cmake builds librdkafka for the `kafka` feature (rdkafka `cmake-build`).
+      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev cmake
+      # sqlx `query!` macros are checked against the live schema at compile time.
+      - run: sqlx migrate run
+      - run: cargo hack check --each-feature --no-dev-deps
 
   test:
-    name: Test (rust ${{ matrix.rust }}, pg ${{ matrix.postgres }})
+    name: Test (rust stable, pg ${{ matrix.postgres }})
     runs-on: ubuntu-latest
-    continue-on-error: ${{ matrix.rust == 'beta' }}
+    needs: build-tests
+    permissions:
+      contents: read
+      checks: write
     strategy:
       fail-fast: false
       matrix:
-        rust: [stable, beta]
+        # PRs run a single Postgres version; main and nightly run the full matrix.
+        postgres: ${{ fromJSON(github.event_name == 'pull_request' && '["16"]' || '["15", "16"]') }}
+    services:
+      postgres:
+        image: postgres:${{ matrix.postgres }}
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v4
+        with:
+          name: nextest-archive
+      - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci
+      - name: Publish test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Test report (rust stable, pg ${{ matrix.postgres }})
+          annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+
+  test-beta:
+    name: Test (rust beta, pg ${{ matrix.postgres }})
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    continue-on-error: true
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      fail-fast: false
+      matrix:
         postgres: ["15", "16"]
     services:
       postgres:
@@ -115,20 +308,24 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ matrix.rust }}
+      - uses: dtolnay/rust-toolchain@beta
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.rust }}-pg${{ matrix.postgres }}
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          key: beta-pg${{ matrix.postgres }}
       - uses: actions/cache@v4
         with:
           path: .sqlx
           key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
           restore-keys: ${{ runner.os }}-sqlx-
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - run: cargo test
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --profile ci
+      - name: Publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Test report (rust beta, pg ${{ matrix.postgres }})
 
   coverage:
     name: Coverage Report
@@ -148,17 +345,17 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          tool: cargo-llvm-cov,nextest
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
       - name: Run coverage
-        run: cargo llvm-cov --lcov --output-path lcov.info --summary-only
+        run: cargo llvm-cov nextest --lcov --output-path lcov.info
       - name: Write coverage summary
         run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage report
@@ -172,25 +369,50 @@ jobs:
   contract-tests:
     name: Contract Tests
     runs-on: ubuntu-latest
+    needs: build-tests
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v4
         with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - run: cargo test --test pact_contract_tests
+          name: nextest-archive
+      - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci -E 'binary(pact_contract_tests)'
+      - name: Publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
+        with:
+          report_paths: target/nextest/ci/junit.xml
+          check_name: Contract test report
+          annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       - name: Upload contract tests report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: contract-tests-report
-          path: target/debug/deps/pact_contract_tests-*
+          path: target/nextest/ci/junit.xml
           retention-days: 7
           if-no-files-found: ignore
 
-  integration-tests:
-    name: Integration Tests
+  suite-tests:
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    needs: build-tests
+    permissions:
+      contents: read
+      checks: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Integration Tests
+            binary: integration_tests
+          - name: Resilience Tests
+            binary: resilience
+          - name: Chaos Engineering Tests
+            binary: chaos_tests
     services:
       postgres:
         image: postgres:15
@@ -206,86 +428,27 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - uses: actions/download-artifact@v4
         with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: actions/cache@v4
+          name: nextest-archive
+      - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci -E 'binary(${{ matrix.binary }})'
+      - name: Publish test report
+        if: always()
+        uses: mikepenz/action-junit-report@v5
         with:
-          path: .sqlx
-          key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
-          restore-keys: ${{ runner.os }}-sqlx-
-      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - run: cargo test --test integration_tests
-
-  resilience-tests:
-    name: Resilience Tests
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: soroban_pulse_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: actions/cache@v4
-        with:
-          path: .sqlx
-          key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
-          restore-keys: ${{ runner.os }}-sqlx-
-      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - run: cargo test --test resilience
-
-  chaos-tests:
-    name: Chaos Engineering Tests
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:15
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: soroban_pulse_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: actions/cache@v4
-        with:
-          path: .sqlx
-          key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
-          restore-keys: ${{ runner.os }}-sqlx-
-      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - run: cargo test --test chaos_tests
+          report_paths: target/nextest/ci/junit.xml
+          check_name: ${{ matrix.name }} report
+          annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
 
   bench:
     name: Bench (non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - run: cargo bench
@@ -302,9 +465,9 @@ jobs:
           - module: src/indexer.rs
             description: "Event indexer"
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - run: cargo install cargo-mutants
@@ -312,7 +475,7 @@ jobs:
         run: cargo mutants -m ${{ matrix.module }} --shuffle -j 4 || true
       - name: Upload mutation report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: mutation-report-${{ matrix.module }}
           path: target/mutants/
@@ -323,9 +486,9 @@ jobs:
     name: Fuzz (60s per target)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - run: cargo install cargo-fuzz
@@ -337,7 +500,7 @@ jobs:
         working-directory: fuzz
       - name: Upload fuzz corpus artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: fuzz-corpus
           path: fuzz/corpus/
@@ -351,9 +514,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.os }}
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -369,9 +532,9 @@ jobs:
     name: Docker Build (validate)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           context: .
           push: false
@@ -384,8 +547,8 @@ jobs:
     name: Helm Chart Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
         with:
           version: "3.14.0"
       - name: Lint Helm chart
@@ -395,13 +558,36 @@ jobs:
       - name: Render template (existingSecret)
         run: helm template soroban-pulse helm/soroban-pulse --set existingSecret=my-secret
 
+  check-api-types:
+    name: Dashboard API types up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+      # Install only prod+dev deps needed for code generation (no Rust required)
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+      # Regenerate schema.d.ts and fail if it differs from the committed copy
+      - name: Check schema.d.ts is up to date
+        run: node scripts/check-api-up-to-date.mjs
+        working-directory: web
+      # TypeScript compile-check so a drift in openapi.json → TS error surfaces here
+      - name: Typecheck dashboard
+        run: npm run typecheck
+        working-directory: web
+
   openapi:
     name: OpenAPI Spec Validation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - run: sudo apt-get install -y pkg-config libssl-dev
@@ -428,9 +614,9 @@ jobs:
       run:
         working-directory: terraform
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: hashicorp/setup-terraform@v3
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
         with:
           terraform_version: "~> 1.6"
 

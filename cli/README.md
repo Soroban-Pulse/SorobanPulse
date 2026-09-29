@@ -94,6 +94,20 @@ spulse stats
 | `--event-type, -t` | Filter by event type | — |
 | `--max` | Max records | 100 000 |
 
+### `spulse tail --contract <ID> [--type <TYPE>]`
+
+Streams live events from `/v1/events/stream` and prints each one as a single
+compact JSON line (NDJSON), flushed as it arrives, until the server closes the
+stream or you press Ctrl-C. The request has no overall timeout.
+
+```bash
+spulse tail --contract CABC... | jq .ledger
+spulse tail -c CABC... --type contract >> events.ndjson
+```
+
+When jq's own output is piped further, add `jq --unbuffered` so lines are not
+held back.
+
 ### `spulse config`
 
 ```bash

@@ -1,0 +1,176 @@
+name: SDK Conformance
+
+# Run on every push/PR so an API change that breaks any SDK fails CI before merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: sdk-conformance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sdk-conformance:
+    name: SDK Conformance Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── 2. Set up language toolchains ────────────────────────────────────────
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache-dependency-path: sdk/conformance/runner_go/go.sum
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: sdk/conformance/runner_ts/package.json
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: sdk/conformance/runner_python/requirements.txt
+
+      # ── 3. Install runner dependencies ───────────────────────────────────────
+      - name: Install TypeScript runner dependencies
+        working-directory: sdk/conformance/runner_ts
+        run: npm ci
+
+      - name: Install Python runner dependencies
+        working-directory: sdk/conformance/runner_python
+        run: pip install -r requirements.txt
+
+      - name: Download Go module dependencies
+        working-directory: sdk/conformance/runner_go
+        run: go mod download
+
+      # ── 4. Start Docker Compose stack ────────────────────────────────────────
+      - name: Start conformance stack
+        run: |
+          docker compose -f docker-compose.conformance.yml build --quiet
+          docker compose -f docker-compose.conformance.yml up \
+            --detach \
+            --wait \
+            --wait-timeout 120
+
+      # ── 5. Seed conformance data ─────────────────────────────────────────────
+      - name: Seed database with conformance data
+        run: |
+          docker compose -f docker-compose.conformance.yml exec -T db \
+            psql -U conformance -d soroban_pulse_conformance \
+            -f /dev/stdin \
+            < sdk/conformance/seed.sql
+
+      # ── 6. Verify server health before running runners ───────────────────────
+      - name: Wait for application readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/healthz/ready | grep -q '"status":"ok"'; then
+              echo "✅ Application is ready"
+              exit 0
+            fi
+            echo "Waiting for application... (attempt $i/30)"
+            sleep 5
+          done
+          echo "❌ Application did not become ready in time"
+          docker compose -f docker-compose.conformance.yml logs app
+          exit 1
+
+      # ── 7. Run SDK conformance runners ───────────────────────────────────────
+      # Each runner exits 0 on full pass, 1 on any failure.
+      # We run all three regardless of individual failures and collect the exit
+      # codes so the job summary shows pass/fail for every SDK.
+
+      - name: Run TypeScript conformance runner
+        id: runner_ts
+        working-directory: sdk/conformance/runner_ts
+        env:
+          CONFORMANCE_BASE_URL: http://localhost:3000
+        run: npx ts-node runner.ts
+        continue-on-error: true
+
+      - name: Run Python conformance runner
+        id: runner_python
+        working-directory: sdk/conformance/runner_python
+        env:
+          CONFORMANCE_BASE_URL: http://localhost:3000
+        run: python runner.py
+        continue-on-error: true
+
+      - name: Run Go conformance runner
+        id: runner_go
+        working-directory: sdk/conformance/runner_go
+        env:
+          CONFORMANCE_BASE_URL: http://localhost:3000
+        run: go run runner.go
+        continue-on-error: true
+
+      # ── 8. Write per-SDK pass/fail to the job summary ───────────────────────
+      - name: Write final summary
+        if: always()
+        run: |
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "---" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Overall Result" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| SDK | Result |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
+
+          ts_result="${{ steps.runner_ts.outcome }}"
+          py_result="${{ steps.runner_python.outcome }}"
+          go_result="${{ steps.runner_go.outcome }}"
+
+          ts_badge=$([ "$ts_result" = "success" ] && echo "🟢 Pass" || echo "🔴 Fail")
+          py_badge=$([ "$py_result" = "success" ] && echo "🟢 Pass" || echo "🔴 Fail")
+          go_badge=$([ "$go_result" = "success" ] && echo "🟢 Pass" || echo "🔴 Fail")
+
+          echo "| TypeScript | $ts_badge |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Python     | $py_badge |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Go         | $go_badge |" >> "$GITHUB_STEP_SUMMARY"
+
+      # ── 9. Fail the job if any runner reported failures ──────────────────────
+      - name: Assert all runners passed
+        if: always()
+        run: |
+          ts="${{ steps.runner_ts.outcome }}"
+          py="${{ steps.runner_python.outcome }}"
+          go="${{ steps.runner_go.outcome }}"
+
+          failed=0
+          [ "$ts" != "success" ] && echo "❌ TypeScript conformance runner failed" && failed=1
+          [ "$py" != "success" ] && echo "❌ Python conformance runner failed"     && failed=1
+          [ "$go" != "success" ] && echo "❌ Go conformance runner failed"          && failed=1
+
+          if [ "$failed" -ne 0 ]; then
+            echo ""
+            echo "One or more SDK conformance runners reported failures."
+            echo "Check the step output and the job summary for details."
+            exit 1
+          fi
+
+          echo "✅ All SDK conformance runners passed."
+
+      # ── 10. Collect service logs on failure ───────────────────────────────────
+      - name: Dump service logs on failure
+        if: failure()
+        run: |
+          echo "=== app logs ==="
+          docker compose -f docker-compose.conformance.yml logs app --tail=100
+          echo "=== db logs ==="
+          docker compose -f docker-compose.conformance.yml logs db --tail=50
+          echo "=== webhook-sink logs ==="
+          docker compose -f docker-compose.conformance.yml logs webhook-sink --tail=50
+
+      # ── 11. Tear down ─────────────────────────────────────────────────────────
+      - name: Stop conformance stack
+        if: always()
+        run: docker compose -f docker-compose.conformance.yml down -v --remove-orphans

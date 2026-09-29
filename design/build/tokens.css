@@ -1,0 +1,286 @@
+/**
+ * Do not edit directly, this file was auto-generated.
+ */
+
+:root {
+  --sp-color-brand-violet: #5B3DF5; /** Pulse Violet — logo gradient start */
+  --sp-color-brand-cyan: #14B8D4; /** Signal Cyan — logo gradient end */
+  --sp-color-brand-ink: #0F1222; /** Wordmark ink and dark surfaces */
+  --sp-color-brand-gradient: linear-gradient(135deg, #5B3DF5 0%, #14B8D4 100%);
+  --sp-color-violet-50: #F3F0FF;
+  --sp-color-violet-100: #E6E0FF;
+  --sp-color-violet-200: #CEC2FF;
+  --sp-color-violet-300: #A594FF;
+  --sp-color-violet-400: #8A73FF;
+  --sp-color-violet-500: #6F55FA;
+  --sp-color-violet-600: #5B3DF5;
+  --sp-color-violet-700: #4A2CD6;
+  --sp-color-violet-800: #3B23A8;
+  --sp-color-violet-900: #2A1A78;
+  --sp-color-violet-950: #1B1150;
+  --sp-color-cyan-50: #ECFCFF;
+  --sp-color-cyan-300: #67E3F4;
+  --sp-color-cyan-500: #14B8D4;
+  --sp-color-cyan-700: #0B6B7D;
+  --sp-color-cyan-900: #083C47;
+  --sp-color-neutral-0: #FFFFFF;
+  --sp-color-neutral-50: #F7F8FB;
+  --sp-color-neutral-100: #EEF0F5;
+  --sp-color-neutral-200: #DDE1EA;
+  --sp-color-neutral-300: #C3C8D6;
+  --sp-color-neutral-400: #969CB0;
+  --sp-color-neutral-500: #6B7187;
+  --sp-color-neutral-600: #4E5468;
+  --sp-color-neutral-700: #363B4D;
+  --sp-color-neutral-800: #242839;
+  --sp-color-neutral-850: #1A1D2E;
+  --sp-color-neutral-900: #0F1222;
+  --sp-color-neutral-950: #0A0C17;
+  --sp-color-green-50: #ECFDF3;
+  --sp-color-green-300: #86EFAC;
+  --sp-color-green-400: #4ADE80;
+  --sp-color-green-600: #15803D;
+  --sp-color-green-700: #166534;
+  --sp-color-green-900: #0B2E1A;
+  --sp-color-amber-50: #FFF7E6;
+  --sp-color-amber-300: #FCD34D;
+  --sp-color-amber-400: #FBBF24;
+  --sp-color-amber-600: #B45309;
+  --sp-color-amber-700: #92400E;
+  --sp-color-amber-900: #33230A;
+  --sp-color-red-50: #FEF1F1;
+  --sp-color-red-300: #FCA5A5;
+  --sp-color-red-400: #F87171;
+  --sp-color-red-600: #DC2626;
+  --sp-color-red-700: #B91C1C;
+  --sp-color-red-900: #3A1212;
+  --sp-color-blue-50: #EEF4FF;
+  --sp-color-blue-300: #93C5FD;
+  --sp-color-blue-400: #60A5FA;
+  --sp-color-blue-600: #2563EB;
+  --sp-color-blue-700: #1D4ED8;
+  --sp-color-blue-900: #10214A;
+  --sp-color-bg-canvas: #F7F8FB;
+  --sp-color-bg-surface: #FFFFFF;
+  --sp-color-bg-raised: #FFFFFF;
+  --sp-color-bg-subtle: #EEF0F5;
+  --sp-color-bg-hover: #EEF0F5;
+  --sp-color-bg-selected: #F3F0FF;
+  --sp-color-bg-inverse: #0F1222;
+  --sp-color-bg-overlay: rgba(15, 18, 34, 0.45);
+  --sp-color-text-primary: #0F1222;
+  --sp-color-text-secondary: #4E5468;
+  --sp-color-text-muted: #6B7187;
+  --sp-color-text-inverse: #FFFFFF;
+  --sp-color-text-on-accent: #FFFFFF;
+  --sp-color-text-link: #5B3DF5;
+  --sp-color-border-default: #DDE1EA;
+  --sp-color-border-strong: #C3C8D6;
+  --sp-color-border-subtle: #EEF0F5;
+  --sp-color-accent-default: #5B3DF5;
+  --sp-color-accent-hover: #4A2CD6;
+  --sp-color-accent-active: #3B23A8;
+  --sp-color-accent-subtle: #F3F0FF;
+  --sp-color-accent-fg: #4A2CD6;
+  --sp-color-focus-ring: #6F55FA;
+  --sp-color-success-fg: #166534;
+  --sp-color-success-bg: #ECFDF3;
+  --sp-color-success-border: #15803D;
+  --sp-color-success-solid: #15803D;
+  --sp-color-warn-fg: #92400E;
+  --sp-color-warn-bg: #FFF7E6;
+  --sp-color-warn-border: #B45309;
+  --sp-color-warn-solid: #B45309;
+  --sp-color-error-fg: #B91C1C;
+  --sp-color-error-bg: #FEF1F1;
+  --sp-color-error-border: #DC2626;
+  --sp-color-error-solid: #DC2626;
+  --sp-color-info-fg: #1D4ED8;
+  --sp-color-info-bg: #EEF4FF;
+  --sp-color-info-border: #2563EB;
+  --sp-color-info-solid: #2563EB;
+  --sp-color-event-contract: #5B3DF5;
+  --sp-color-event-system: #0B6B7D;
+  --sp-color-event-diagnostic: #92400E;
+  --sp-color-code-bg: #F7F8FB;
+  --sp-color-code-key: #4A2CD6;
+  --sp-color-code-string: #166534;
+  --sp-color-code-number: #1D4ED8;
+  --sp-color-code-literal: #92400E;
+  --sp-space-0: 0;
+  --sp-space-1: 0.25rem; /** 4px */
+  --sp-space-2: 0.5rem; /** 8px */
+  --sp-space-3: 0.75rem; /** 12px */
+  --sp-space-4: 1rem; /** 16px */
+  --sp-space-5: 1.25rem; /** 20px */
+  --sp-space-6: 1.5rem; /** 24px */
+  --sp-space-8: 2rem; /** 32px */
+  --sp-space-10: 2.5rem; /** 40px */
+  --sp-space-12: 3rem; /** 48px */
+  --sp-space-16: 4rem; /** 64px */
+  --sp-space-0-5: 0.125rem; /** 2px */
+  --sp-radius-none: 0;
+  --sp-radius-sm: 4px; /** Badges, checkboxes, inline code */
+  --sp-radius-md: 6px; /** Buttons, inputs, selects */
+  --sp-radius-lg: 10px; /** Cards, toasts, code blocks */
+  --sp-radius-xl: 16px; /** Drawers, modals */
+  --sp-radius-full: 9999px; /** Pills, avatars, status dots */
+  --sp-size-control-sm: 1.75rem; /** 28px */
+  --sp-size-control-md: 2.25rem; /** 36px */
+  --sp-size-control-lg: 2.75rem; /** 44px — minimum touch target */
+  --sp-size-drawer: 32rem;
+  --sp-size-content-max: 80rem;
+  --sp-z-sticky: 10;
+  --sp-z-drawer: 40;
+  --sp-z-toast: 50;
+  --sp-motion-duration-instant: 0ms;
+  --sp-motion-duration-fast: 100ms; /** Hover, press, focus */
+  --sp-motion-duration-normal: 180ms; /** Tabs, toggles, small reveals */
+  --sp-motion-duration-slow: 280ms; /** Drawers, toasts entering */
+  --sp-motion-duration-pulse: 1600ms; /** Live indicator heartbeat loop */
+  --sp-motion-easing-standard: cubic-bezier(0.2, 0, 0, 1);
+  --sp-motion-easing-enter: cubic-bezier(0, 0, 0.2, 1);
+  --sp-motion-easing-exit: cubic-bezier(0.4, 0, 1, 1);
+  --sp-font-family-sans: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --sp-font-family-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  --sp-font-weight-regular: 400;
+  --sp-font-weight-medium: 500;
+  --sp-font-weight-semibold: 600;
+  --sp-font-weight-bold: 700;
+  --sp-font-size-xs: 0.75rem; /** 12px — captions, table meta */
+  --sp-font-size-sm: 0.8125rem; /** 13px — dense UI, code */
+  --sp-font-size-md: 0.875rem; /** 14px — default UI text */
+  --sp-font-size-lg: 1rem; /** 16px — body copy, docs */
+  --sp-font-size-xl: 1.125rem; /** 18px — section titles */
+  --sp-font-size-2xl: 1.375rem; /** 22px — page titles */
+  --sp-font-size-3xl: 1.75rem; /** 28px — hero numbers */
+  --sp-font-size-4xl: 2.25rem; /** 36px — marketing headings */
+  --sp-font-line-height-tight: 1.2;
+  --sp-font-line-height-snug: 1.35;
+  --sp-font-line-height-normal: 1.5;
+  --sp-font-line-height-code: 1.6;
+  --sp-font-letter-spacing-tight: -0.02em;
+  --sp-font-letter-spacing-normal: 0;
+  --sp-font-letter-spacing-caps: 0.06em;
+  --sp-elevation-0: none;
+  --sp-elevation-1: 0 1px 2px rgba(15, 18, 34, 0.06), 0 1px 3px rgba(15, 18, 34, 0.08); /** Cards, table headers */
+  --sp-elevation-2: 0 2px 4px rgba(15, 18, 34, 0.06), 0 4px 12px rgba(15, 18, 34, 0.08); /** Dropdowns, popovers */
+  --sp-elevation-3: 0 8px 24px rgba(15, 18, 34, 0.12), 0 2px 6px rgba(15, 18, 34, 0.08); /** Toasts */
+  --sp-elevation-4: 0 16px 48px rgba(15, 18, 34, 0.18), 0 4px 12px rgba(15, 18, 34, 0.08); /** Drawers, modals */
+  --sp-color-scheme: light;
+}
+
+
+:root[data-theme="dark"] {
+  --sp-color-bg-canvas: #0A0C17;
+  --sp-color-bg-surface: #0F1222;
+  --sp-color-bg-raised: #1A1D2E;
+  --sp-color-bg-subtle: #242839;
+  --sp-color-bg-hover: #242839;
+  --sp-color-bg-selected: #1B1150;
+  --sp-color-bg-inverse: #F7F8FB;
+  --sp-color-bg-overlay: rgba(0, 0, 0, 0.6);
+  --sp-color-text-primary: #F7F8FB;
+  --sp-color-text-secondary: #C3C8D6;
+  --sp-color-text-muted: #969CB0;
+  --sp-color-text-inverse: #0F1222;
+  --sp-color-text-on-accent: #FFFFFF;
+  --sp-color-text-link: #A594FF;
+  --sp-color-border-default: #363B4D;
+  --sp-color-border-strong: #4E5468;
+  --sp-color-border-subtle: #242839;
+  --sp-color-accent-default: #6F55FA;
+  --sp-color-accent-hover: #8A73FF;
+  --sp-color-accent-active: #A594FF;
+  --sp-color-accent-subtle: #1B1150;
+  --sp-color-accent-fg: #A594FF;
+  --sp-color-focus-ring: #A594FF;
+  --sp-color-success-fg: #86EFAC;
+  --sp-color-success-bg: #0B2E1A;
+  --sp-color-success-border: #4ADE80;
+  --sp-color-success-solid: #4ADE80;
+  --sp-color-warn-fg: #FCD34D;
+  --sp-color-warn-bg: #33230A;
+  --sp-color-warn-border: #FBBF24;
+  --sp-color-warn-solid: #FBBF24;
+  --sp-color-error-fg: #FCA5A5;
+  --sp-color-error-bg: #3A1212;
+  --sp-color-error-border: #F87171;
+  --sp-color-error-solid: #F87171;
+  --sp-color-info-fg: #93C5FD;
+  --sp-color-info-bg: #10214A;
+  --sp-color-info-border: #60A5FA;
+  --sp-color-info-solid: #60A5FA;
+  --sp-color-event-contract: #A594FF;
+  --sp-color-event-system: #67E3F4;
+  --sp-color-event-diagnostic: #FCD34D;
+  --sp-color-code-bg: #0A0C17;
+  --sp-color-code-key: #A594FF;
+  --sp-color-code-string: #86EFAC;
+  --sp-color-code-number: #93C5FD;
+  --sp-color-code-literal: #FCD34D;
+  --sp-elevation-0: none;
+  --sp-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.4); /** Cards, table headers */
+  --sp-elevation-2: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04); /** Dropdowns, popovers */
+  --sp-elevation-3: 0 8px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06); /** Toasts */
+  --sp-elevation-4: 0 16px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.06); /** Drawers, modals */
+  --sp-color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sp-color-bg-canvas: #0A0C17;
+    --sp-color-bg-surface: #0F1222;
+    --sp-color-bg-raised: #1A1D2E;
+    --sp-color-bg-subtle: #242839;
+    --sp-color-bg-hover: #242839;
+    --sp-color-bg-selected: #1B1150;
+    --sp-color-bg-inverse: #F7F8FB;
+    --sp-color-bg-overlay: rgba(0, 0, 0, 0.6);
+    --sp-color-text-primary: #F7F8FB;
+    --sp-color-text-secondary: #C3C8D6;
+    --sp-color-text-muted: #969CB0;
+    --sp-color-text-inverse: #0F1222;
+    --sp-color-text-on-accent: #FFFFFF;
+    --sp-color-text-link: #A594FF;
+    --sp-color-border-default: #363B4D;
+    --sp-color-border-strong: #4E5468;
+    --sp-color-border-subtle: #242839;
+    --sp-color-accent-default: #6F55FA;
+    --sp-color-accent-hover: #8A73FF;
+    --sp-color-accent-active: #A594FF;
+    --sp-color-accent-subtle: #1B1150;
+    --sp-color-accent-fg: #A594FF;
+    --sp-color-focus-ring: #A594FF;
+    --sp-color-success-fg: #86EFAC;
+    --sp-color-success-bg: #0B2E1A;
+    --sp-color-success-border: #4ADE80;
+    --sp-color-success-solid: #4ADE80;
+    --sp-color-warn-fg: #FCD34D;
+    --sp-color-warn-bg: #33230A;
+    --sp-color-warn-border: #FBBF24;
+    --sp-color-warn-solid: #FBBF24;
+    --sp-color-error-fg: #FCA5A5;
+    --sp-color-error-bg: #3A1212;
+    --sp-color-error-border: #F87171;
+    --sp-color-error-solid: #F87171;
+    --sp-color-info-fg: #93C5FD;
+    --sp-color-info-bg: #10214A;
+    --sp-color-info-border: #60A5FA;
+    --sp-color-info-solid: #60A5FA;
+    --sp-color-event-contract: #A594FF;
+    --sp-color-event-system: #67E3F4;
+    --sp-color-event-diagnostic: #FCD34D;
+    --sp-color-code-bg: #0A0C17;
+    --sp-color-code-key: #A594FF;
+    --sp-color-code-string: #86EFAC;
+    --sp-color-code-number: #93C5FD;
+    --sp-color-code-literal: #FCD34D;
+    --sp-elevation-0: none;
+    --sp-elevation-1: 0 1px 2px rgba(0, 0, 0, 0.4); /** Cards, table headers */
+    --sp-elevation-2: 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04); /** Dropdowns, popovers */
+    --sp-elevation-3: 0 8px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06); /** Toasts */
+    --sp-elevation-4: 0 16px 48px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.06); /** Drawers, modals */
+    --sp-color-scheme: dark;
+  }
+}

@@ -338,6 +338,26 @@ fn rows_to_json(
     enc_key_old: Option<&[u8; 32]>,
     compact: bool,
 ) -> Result<Vec<Value>, AppError> {
+    rows_to_json_with_format(
+        rows,
+        columns,
+        enc_key,
+        enc_key_old,
+        compact,
+        crate::scval_format::ScValFormat::Json,
+    )
+}
+
+/// Like `rows_to_json`, but renders `event_data` (Issue #1064: `value` and
+/// `topic` ScVals) in the requested `format` (`native`, `json` or `xdr`).
+fn rows_to_json_with_format(
+    rows: &[sqlx::postgres::PgRow],
+    columns: &[&str],
+    enc_key: Option<&[u8; 32]>,
+    enc_key_old: Option<&[u8; 32]>,
+    compact: bool,
+    format: crate::scval_format::ScValFormat,
+) -> Result<Vec<Value>, AppError> {
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
         let mut event = serde_json::Map::new();
@@ -367,10 +387,11 @@ fn rows_to_json(
                 "event_data" => {
                     let raw: Value = row.try_get::<Value, _>(col)?;
                     let decrypted = decrypt_event_data(&raw, enc_key, enc_key_old);
+                    let rendered = crate::scval_format::render_event_data(&decrypted, format);
                     if compact {
-                        event.insert(col.to_string(), compact_event_data(&decrypted)?);
+                        event.insert(col.to_string(), compact_event_data(&rendered)?);
                     } else {
-                        event.insert(col.to_string(), decrypted);
+                        event.insert(col.to_string(), rendered);
                     }
                 }
                 "event_data_normalized" => {
@@ -575,8 +596,75 @@ pub async fn health_live() -> (StatusCode, Json<Value>) {
     )
 )]
 pub async fn health_ready(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
-    let (status, body) = build_health_response(&state).await;
-    (status, Json(body))
+    use crate::config::Role;
+
+    match state.config.role {
+        // ── ROLE=indexer ─────────────────────────────────────────────────────
+        // Ready when the advisory lock is held (i.e. this pod is the active
+        // indexer leader).  A standby pod that lost the lock is intentionally
+        // not ready so that rolling updates don't stall on the standby, and
+        // Kubernetes won't route traffic to it while it waits for promotion.
+        Role::Indexer => {
+            let is_leader = state
+                .indexer_state
+                .is_active_indexer
+                .load(std::sync::atomic::Ordering::SeqCst);
+
+            if is_leader {
+                (
+                    StatusCode::OK,
+                    Json(json!({ "status": "ok", "role": "indexer", "lock": "held" })),
+                )
+            } else {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "status": "degraded",
+                        "role": "indexer",
+                        "lock": "standby",
+                        "reason": "advisory lock not held; this replica is on standby"
+                    })),
+                )
+            }
+        }
+
+        // ── ROLE=api ──────────────────────────────────────────────────────────
+        // Ready when the database is reachable.  No indexer stall check —
+        // api pods never run the indexer, so an indexer stall on another pod
+        // should not make every api pod unready.
+        Role::Api => {
+            let timeout = Duration::from_millis(state.health_check_timeout_ms);
+            let db_check =
+                tokio::time::timeout(timeout, sqlx::query("SELECT 1").fetch_one(&state.pool))
+                    .await;
+
+            let (db_ok, db_status) = match db_check {
+                Ok(Ok(_)) => (true, "ok"),
+                Ok(Err(sqlx::Error::PoolTimedOut)) => (false, "pool_exhausted"),
+                Ok(Err(_)) => (false, "unreachable"),
+                Err(_) => (false, "timeout"),
+            };
+
+            if db_ok {
+                (
+                    StatusCode::OK,
+                    Json(json!({ "status": "ok", "role": "api", "db": "ok" })),
+                )
+            } else {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({ "status": "degraded", "role": "api", "db": db_status })),
+                )
+            }
+        }
+
+        // ── ROLE=all (default) ────────────────────────────────────────────────
+        // Backward-compatible: DB reachable AND indexer not stalled.
+        Role::All => {
+            let (status, body) = build_health_response(&state).await;
+            (status, Json(body))
+        }
+    }
 }
 
 /// Query parameters for the email unsubscribe endpoint (Issue #483).
@@ -616,7 +704,27 @@ pub async fn unsubscribe(
             .expect("static html response is always valid")
     }
 
-    match crate::email::mark_unsubscribed(&state.pool, &query.token).await {
+    // Verify the HMAC-signed, time-limited token (issue #1158).
+    // The subject carried in the token is the opaque DB token string that
+    // `mark_unsubscribed` looks up; we verify purpose = Unsubscribe before
+    // touching the DB.
+    let db_token = match crate::email_token::verify_token(
+        &query.token,
+        Some(&crate::email_token::TokenPurpose::Unsubscribe),
+        None,
+    ) {
+        Ok(claims) => claims.subject,
+        Err(_) => {
+            // Return 404 (not 400) to avoid leaking why the token failed.
+            return html_page(
+                StatusCode::NOT_FOUND,
+                "Invalid link",
+                "This unsubscribe link is not valid.",
+            );
+        }
+    };
+
+    match crate::email::mark_unsubscribed(&state.pool, &db_token).await {
         Ok(true) => html_page(
             StatusCode::OK,
             "Unsubscribed",
@@ -754,7 +862,7 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
 
     let indexer_paused = state.indexer_state.is_paused.load(Ordering::Relaxed);
 
-    let total_events: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+    let total_events: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM events")
         .fetch_one(&state.pool)
         .await
         .unwrap_or(0);
@@ -790,7 +898,14 @@ pub async fn status(State(state): State<AppState>) -> Json<Value> {
         "indexer_status": indexer_status,
         "indexer_mode": indexer_mode,
         "indexer_paused": indexer_paused,
+        "rpc_version": crate::rpc_meta::current_version(),
+        "gaps": crate::rpc_meta::list_gaps(&state.pool).await,
     }))
+}
+
+/// GET /v1/admin/indexer/gaps
+pub async fn get_indexer_gaps(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({ "gaps": crate::rpc_meta::list_gaps(&state.pool).await }))
 }
 
 /// Returns aggregate statistics about indexed events.
@@ -1086,17 +1201,91 @@ pub async fn openapi_json() -> impl IntoResponse {
     Json(ApiDoc::openapi())
 }
 
-/// Serve a minimal Swagger UI HTML page.
+/// Serve the branded SorobanPulse Swagger UI page.
+///
+/// The inline `<style>` block applies SorobanPulse brand colours and full dark
+/// mode on top of the stock Swagger UI stylesheet loaded from unpkg.com.
+/// The `<script>` block initialises SwaggerUIBundle.
+///
+/// Both blocks carry a SHA-256 hash that is allow-listed in the `/docs` CSP so
+/// `unsafe-inline` is **not** needed.  If you modify either block you must
+/// recompute the hash with:
+///
+/// ```sh
+/// printf '%s' 'THE CONTENT' | openssl dgst -sha256 -binary | base64
+/// ```
+///
+/// and update `csp_docs` in `src/middleware/security_headers.rs` accordingly.
 pub async fn swagger_ui() -> impl IntoResponse {
-    axum::response::Html(
-        "<!DOCTYPE html><html><head><title>Soroban Pulse API</title>\
-        <meta charset=\"utf-8\"/>\
-        <link rel=\"stylesheet\" href=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui.css\"></head>\
-        <body><div id=\"swagger-ui\"></div>\
-        <script src=\"https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js\"></script>\
-        <script>SwaggerUIBundle({url:\"/openapi.json\",dom_id:\"#swagger-ui\"})</script>\
-        </body></html>"
-    )
+    // Inline CSS — SHA-256: t5Nfs8a1PFuEVO00S72ZGB4P65C74f37u8w0VCVsqBw=
+    let style = r#":root{--sp-bg:#0f1117;--sp-surface:#1a1d2e;--sp-border:#2d3158;--sp-accent:#7c3aed;--sp-accent-light:#a78bfa;--sp-text:#e2e8f0;--sp-text-muted:#94a3b8;--sp-success:#10b981;--sp-warning:#f59e0b;--sp-danger:#ef4444}
+body{background:var(--sp-bg)!important;color:var(--sp-text)!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
+#swagger-ui .swagger-ui .info{margin:2rem 0}
+#swagger-ui .swagger-ui .info .title{color:var(--sp-accent-light)!important;font-size:2rem!important;font-weight:700}
+#swagger-ui .swagger-ui .info .description p,#swagger-ui .swagger-ui .info .description li{color:var(--sp-text)!important}
+#swagger-ui .swagger-ui .info .description a{color:var(--sp-accent-light)!important}
+#swagger-ui .topbar{background:var(--sp-surface)!important;border-bottom:1px solid var(--sp-border)!important;padding:.75rem 1rem}
+#swagger-ui .swagger-ui .scheme-container{background:var(--sp-surface)!important;border-bottom:1px solid var(--sp-border)!important}
+#swagger-ui .swagger-ui .opblock-tag{color:var(--sp-text)!important;border-bottom:1px solid var(--sp-border)!important}
+#swagger-ui .swagger-ui .opblock{background:var(--sp-surface)!important;border:1px solid var(--sp-border)!important;border-radius:.5rem!important;margin-bottom:.75rem}
+#swagger-ui .swagger-ui .opblock .opblock-summary{border-bottom:1px solid var(--sp-border)!important}
+#swagger-ui .swagger-ui .opblock .opblock-summary-method{border-radius:.25rem!important;font-weight:600}
+#swagger-ui .swagger-ui .opblock.opblock-get .opblock-summary-method{background:var(--sp-success)!important}
+#swagger-ui .swagger-ui .opblock.opblock-post .opblock-summary-method{background:var(--sp-accent)!important}
+#swagger-ui .swagger-ui .opblock.opblock-delete .opblock-summary-method{background:var(--sp-danger)!important}
+#swagger-ui .swagger-ui .opblock.opblock-patch .opblock-summary-method{background:var(--sp-warning)!important}
+#swagger-ui .swagger-ui .opblock-description-wrapper p,.swagger-ui .markdown p{color:var(--sp-text)!important}
+#swagger-ui .swagger-ui section.models{background:var(--sp-surface)!important;border:1px solid var(--sp-border)!important;border-radius:.5rem}
+#swagger-ui .swagger-ui section.models h4{color:var(--sp-text)!important}
+#swagger-ui .swagger-ui .model-box{background:var(--sp-bg)!important}
+#swagger-ui .swagger-ui .parameter__name,#swagger-ui .swagger-ui .parameter__type{color:var(--sp-text-muted)!important}
+#swagger-ui .swagger-ui input[type=text],#swagger-ui .swagger-ui textarea{background:var(--sp-bg)!important;border:1px solid var(--sp-border)!important;color:var(--sp-text)!important}
+#swagger-ui .swagger-ui select{background:var(--sp-bg)!important;color:var(--sp-text)!important;border:1px solid var(--sp-border)!important}
+#swagger-ui .swagger-ui .btn.authorize{background:var(--sp-accent)!important;border-color:var(--sp-accent)!important;color:#fff!important}
+#swagger-ui .swagger-ui .btn.execute{background:var(--sp-success)!important;border-color:var(--sp-success)!important;color:#fff!important}
+#swagger-ui .swagger-ui .response-col_status{color:var(--sp-text)!important}
+#swagger-ui .swagger-ui .response-col_description{color:var(--sp-text-muted)!important}
+#swagger-ui .swagger-ui pre.microlight{background:var(--sp-bg)!important;color:var(--sp-accent-light)!important;border:1px solid var(--sp-border)!important;border-radius:.375rem}
+#swagger-ui .swagger-ui .highlight-code{background:var(--sp-bg)!important}"#;
+
+    // Inline JS — SHA-256: OlhJ06FtsPaiJ/1A+8VpeJOGKCgqkf63ajgd7nrxk98=
+    let script = r##"SwaggerUIBundle({url:"/openapi.json",dom_id:"#swagger-ui",deepLinking:true,presets:[SwaggerUIBundle.presets.apis,SwaggerUIBundle.SwaggerUIStandalonePreset],layout:"BaseLayout",docExpansion:"list",defaultModelsExpandDepth:1})"##;
+
+    // SorobanPulse logo — inline SVG, no external fetch required
+    let logo_svg = r#"<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true">
+  <circle cx="18" cy="18" r="18" fill="#7c3aed"/>
+  <path d="M10 18 Q18 8 26 18 Q18 28 10 18Z" fill="#a78bfa"/>
+  <circle cx="18" cy="18" r="4" fill="#0f1117"/>
+</svg>"#;
+
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SorobanPulse — API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css"/>
+  <style>{style}</style>
+</head>
+<body>
+  <header style="display:flex;align-items:center;gap:.75rem;padding:1rem 1.5rem;background:#1a1d2e;border-bottom:1px solid #2d3158;position:sticky;top:0;z-index:100">
+    {logo_svg}
+    <span style="font-size:1.25rem;font-weight:700;color:#a78bfa;letter-spacing:-.01em">SorobanPulse</span>
+    <span style="font-size:.875rem;color:#94a3b8;margin-left:.25rem">API Explorer</span>
+    <a href="/openapi.json" style="margin-left:auto;font-size:.8125rem;color:#a78bfa;text-decoration:none;border:1px solid #2d3158;padding:.25rem .625rem;border-radius:.375rem">OpenAPI JSON ↗</a>
+  </header>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>{script}</script>
+</body>
+</html>"#,
+        style = style,
+        logo_svg = logo_svg,
+        script = script,
+    );
+
+    axum::response::Html(html)
 }
 
 /// Stream new events in real time via Server-Sent Events.
@@ -1128,7 +1317,9 @@ pub async fn stream_events(
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
     let tenant_id = extract_tenant_id(&extensions).map(|s| s.to_owned());
     let client_ip = extract_client_ip(&headers);
-    stream_events_internal(State(state), params.contract_id, params.fields, params.event_type, headers, tenant_id, client_ip)
+    let scval_format = crate::scval_format::parse_format(params.format.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e, "code": "VALIDATION_ERROR" }))))?;
+    stream_events_internal(State(state), params.contract_id, params.fields, params.event_type, headers, tenant_id, client_ip, scval_format)
         .await
 }
 
@@ -1162,7 +1353,9 @@ pub async fn stream_events_by_contract(
     })?;
     let tenant_id = extract_tenant_id(&extensions).map(|s| s.to_owned());
     let client_ip = extract_client_ip(&headers);
-    stream_events_internal(State(state), Some(contract_id), params.fields, params.event_type, headers, tenant_id, client_ip)
+    let scval_format = crate::scval_format::parse_format(params.format.as_deref())
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e, "code": "VALIDATION_ERROR" }))))?;
+    stream_events_internal(State(state), Some(contract_id), params.fields, params.event_type, headers, tenant_id, client_ip, scval_format)
         .await
 }
 
@@ -1558,6 +1751,7 @@ async fn stream_events_internal(
     headers: axum::http::HeaderMap,
     tenant_id: Option<String>,
     client_ip: String,
+    scval_format: crate::scval_format::ScValFormat,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, (StatusCode, Json<Value>)> {
     // Check if we've reached the max SSE connections limit
     let current_connections = state
@@ -1745,6 +1939,7 @@ async fn stream_events_internal(
     // DB fallback replay stream: full Event records from DB.
     let db_replay_stream = stream::iter(db_replay.into_iter().filter_map(move |mut ev| {
         ev.event_data = decrypt_event_data(&ev.event_data, enc_key.as_ref(), enc_key_old.as_ref());
+        ev.event_data = crate::scval_format::render_event_data(&ev.event_data, scval_format);
         let data = match &field_columns_replay {
             Some(cols) => serde_json::to_string(&filter_fields(
                 &ev,
@@ -2296,6 +2491,13 @@ pub async fn get_events(
             bind_idx += 3;
         }
         maybe_add_tenant_condition(&mut conditions, &mut bind_idx, tenant_id);
+        // Issue #1063: filter to one network when indexing multiple
+        // networks concurrently from this deployment. Omitted returns
+        // events from every configured network.
+        if params.network.is_some() {
+            conditions.push(format!("chain_id = ${bind_idx}"));
+            bind_idx += 1;
+        }
 
         let where_clause = format!("WHERE {}", conditions.join(" AND "));
 
@@ -2343,6 +2545,13 @@ pub async fn get_events(
 
         let order_clause = if params.rank_by_relevance.unwrap_or(false) {
             "relevance_score DESC, id DESC".to_string()
+        } else if sort_col == "ledger" {
+            // Issue #1065: within a ledger, order deterministically by the
+            // decoded TOID fields before falling back to insertion id.
+            format!(
+                "ledger {dir}, tx_index {dir} NULLS LAST, op_index {dir} NULLS LAST, event_index {dir} NULLS LAST, id {dir}",
+                dir = dir
+            )
         } else {
             format!("{col} {dir}, id {dir}", col = sort_col, dir = dir)
         };
@@ -2447,6 +2656,9 @@ pub async fn get_events(
         if let Some(tid) = tenant_id {
             q = q.bind(tid);
         }
+        if let Some(ref network) = params.network {
+            q = q.bind(network);
+        }
         q = q.bind(limit);
 
         let _db_span = info_span!("db_query", query_type = "get_events_cursor").entered();
@@ -2486,12 +2698,15 @@ pub async fn get_events(
             None
         };
 
-        let events = rows_to_json(
+        let scval_format = crate::scval_format::parse_format(params.format.as_deref())
+            .map_err(AppError::Validation)?;
+        let events = rows_to_json_with_format(
             &rows,
             &columns,
             state.encryption_key.as_ref(),
             state.encryption_key_old.as_ref(),
             params.compact.unwrap_or(false),
+            scval_format,
         )?;
 
         // Build ETag from last row's id + created_at
@@ -2851,8 +3066,9 @@ pub async fn get_events(
                     .await?;
             (count, false)
         } else {
-            let count = sqlx::query_scalar::<_, i64>(
-                "SELECT reltuples::bigint FROM pg_class WHERE relname = 'events'",
+            // query_scalar! gives compile-time SQL verification via the .sqlx offline cache.
+            let count = sqlx::query_scalar!(
+                "SELECT reltuples::bigint AS estimate FROM pg_class WHERE relname = 'events'",
             )
             .fetch_one(&state.read_pool)
             .await?;
@@ -3050,7 +3266,12 @@ pub async fn get_events_feed(
             query.push_bind(tid);
         }
     }
-    query.push(" ORDER BY ledger DESC, id DESC LIMIT ");
+    // Issue #1065: order deterministically within a ledger using the
+    // decoded TOID fields before falling back to insertion id, so
+    // re-indexing and replicas agree on order regardless of insert order.
+    query.push(
+        " ORDER BY ledger DESC, tx_index DESC NULLS LAST, op_index DESC NULLS LAST, event_index DESC NULLS LAST, id DESC LIMIT ",
+    );
     query.push_bind(limit);
 
     let rows = query.build().fetch_all(&state.read_pool).await?;
@@ -3747,9 +3968,9 @@ pub async fn get_events_by_contract(
             cached
         } else {
             crate::metrics::update_contract_count_cache_hit_ratio(0, 1);
+            // query_scalar! gives compile-time SQL verification via the .sqlx offline cache.
             let count: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE contract_id = $1")
-                    .bind(&contract_id)
+                sqlx::query_scalar!("SELECT COUNT(*) FROM events WHERE contract_id = $1", &contract_id as &str)
                     .fetch_one(&state.pool)
                     .await?;
             state
@@ -4317,6 +4538,96 @@ pub async fn get_contract_abi(
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
     Ok(Json(json!({ "contract_id": contract_id, "abi": abi, "created_at": created_at, "updated_at": updated_at })))
+}
+
+/// Admin: create or update a contract's label/metadata (#1066).
+#[utoipa::path(
+    post,
+    path = "/v1/admin/contracts/{contract_id}/metadata",
+    tag = "admin",
+    params(
+        ("contract_id" = String, Path, description = "Stellar contract ID"),
+    ),
+    request_body = crate::contract_metadata::UpsertContractMetadata,
+    responses(
+        (status = 200, description = "Metadata upserted", body = crate::contract_metadata::ContractMetadata),
+        (status = 400, description = "Invalid contract_id", body = ErrorResponse),
+        (status = 401, description = "Unauthorized", body = ErrorResponse),
+    )
+)]
+pub async fn upsert_contract_metadata(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+    Json(input): Json<crate::contract_metadata::UpsertContractMetadata>,
+) -> Result<Json<crate::contract_metadata::ContractMetadata>, AppError> {
+    validate_contract_id(&contract_id)?;
+    let metadata =
+        crate::contract_metadata::upsert_contract_metadata(&state.pool, &contract_id, input)
+            .await?;
+    Ok(Json(metadata))
+}
+
+/// Admin: delete a contract's label/metadata (#1066).
+pub async fn delete_contract_metadata(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+) -> Result<Json<Value>, AppError> {
+    validate_contract_id(&contract_id)?;
+    let deleted =
+        crate::contract_metadata::delete_contract_metadata(&state.pool, &contract_id).await?;
+    if !deleted {
+        return Err(AppError::NotFound);
+    }
+    Ok(Json(json!({ "contract_id": contract_id, "status": "deleted" })))
+}
+
+/// Public: read a contract's label/metadata (#1066).
+#[utoipa::path(
+    get,
+    path = "/v1/contracts/{contract_id}/metadata",
+    tag = "contracts",
+    params(
+        ("contract_id" = String, Path, description = "Stellar contract ID"),
+    ),
+    responses(
+        (status = 200, description = "Contract metadata", body = crate::contract_metadata::ContractMetadata),
+        (status = 400, description = "Invalid contract_id", body = ErrorResponse),
+        (status = 404, description = "No metadata registered", body = ErrorResponse),
+    )
+)]
+pub async fn get_contract_metadata(
+    State(state): State<AppState>,
+    Path(contract_id): Path<String>,
+) -> Result<Json<crate::contract_metadata::ContractMetadata>, AppError> {
+    validate_contract_id(&contract_id)?;
+    let metadata =
+        crate::contract_metadata::get_contract_metadata(&state.read_pool, &contract_id)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    Ok(Json(metadata))
+}
+
+/// Admin: bulk import contract labels from a JSON array of
+/// `{contract_id, name, description, project_url, source_repo, tags, verified}` (#1066).
+pub async fn bulk_import_contract_metadata(
+    State(state): State<AppState>,
+    Json(entries): Json<Vec<Value>>,
+) -> Result<Json<Value>, AppError> {
+    let mut parsed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let contract_id = entry
+            .get("contract_id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AppError::Validation("missing contract_id".into()))?
+            .to_string();
+        validate_contract_id(&contract_id)?;
+        let input: crate::contract_metadata::UpsertContractMetadata =
+            serde_json::from_value(entry)
+                .map_err(|e| AppError::Validation(format!("invalid metadata entry: {e}")))?;
+        parsed.push((contract_id, input));
+    }
+    let count = crate::contract_metadata::bulk_import(&state.pool, parsed).await?;
+    Ok(Json(json!({ "imported": count })))
 }
 
 /// Anonymize a specific event for GDPR compliance.
@@ -4894,14 +5205,20 @@ pub async fn reindex_index(
     ))
 }
 
-/// Start a background re-encryption job to migrate events from old key to new key.
+/// Start background re-encryption jobs after a key rotation.
+///
+/// - Events: migrates `event_data` from `ENCRYPTION_KEY_OLD` to `ENCRYPTION_KEY`
+///   (requires the `encryption` feature).
+/// - Integration credentials (Issue #1162): re-encrypts every stored token,
+///   webhook URL and routing key from `INTEGRATION_ENCRYPTION_KEY_OLD` to
+///   `INTEGRATION_ENCRYPTION_KEY`, encrypting any remaining plaintext rows.
 #[utoipa::path(
     post,
     path = "/v1/admin/reencrypt",
     tag = "admin",
     responses(
-        (status = 202, description = "Re-encryption job started"),
-        (status = 400, description = "Encryption not enabled or no old key configured", body = ErrorResponse),
+        (status = 202, description = "Re-encryption job(s) started"),
+        (status = 400, description = "No old key configured for events or integration credentials", body = ErrorResponse),
         (status = 409, description = "Re-encryption job already running", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
     )
@@ -4909,50 +5226,63 @@ pub async fn reindex_index(
 pub async fn start_reencrypt(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    #[cfg(not(feature = "encryption"))]
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "encryption feature not enabled" })),
-        ));
+    let batch_size = 1000;
+    let mut jobs: Vec<&str> = Vec::new();
+
+    if crate::integration_secrets::rotation_configured() {
+        if !crate::integration_secrets::start_reencrypt_job(state.pool.clone(), batch_size as i64) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "integration credential re-encryption job already running" })),
+            ));
+        }
+        jobs.push("integration_credentials");
     }
 
     #[cfg(feature = "encryption")]
     {
-        let new_key = state.encryption_key.ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "ENCRYPTION_KEY not configured" })),
-        ))?;
+        if let (Some(new_key), Some(old_key)) = (state.encryption_key, state.encryption_key_old) {
+            // Create or get the reencrypt state from app state
+            // For now, we'll create a new one per request (in production, store in AppState)
+            let reencrypt_state = crate::reencrypt::ReencryptState::new();
 
-        let old_key = state.encryption_key_old.ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "ENCRYPTION_KEY_OLD not configured" })),
-        ))?;
+            if reencrypt_state.is_running() {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "re-encryption job already running" })),
+                ));
+            }
 
-        // Create or get the reencrypt state from app state
-        // For now, we'll create a new one per request (in production, store in AppState)
-        let reencrypt_state = crate::reencrypt::ReencryptState::new();
-
-        if reencrypt_state.is_running() {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "re-encryption job already running" })),
-            ));
+            crate::reencrypt::start_reencrypt_job(
+                state.pool.clone(),
+                new_key,
+                old_key,
+                batch_size,
+                reencrypt_state,
+            );
+            jobs.push("events");
         }
-
-        let pool = state.pool.clone();
-        let batch_size = 1000;
-
-        crate::reencrypt::start_reencrypt_job(pool, new_key, old_key, batch_size, reencrypt_state);
-
-        Ok((
-            StatusCode::ACCEPTED,
-            Json(json!({
-                "message": "re-encryption job started",
-                "batch_size": batch_size
-            })),
-        ))
     }
+
+    if jobs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "nothing to re-encrypt: configure ENCRYPTION_KEY and ENCRYPTION_KEY_OLD \
+                          (events, requires the encryption feature) and/or INTEGRATION_ENCRYPTION_KEY \
+                          and INTEGRATION_ENCRYPTION_KEY_OLD (integration credentials)"
+            })),
+        ));
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "message": "re-encryption job started",
+            "jobs": jobs,
+            "batch_size": batch_size
+        })),
+    ))
 }
 
 #[utoipa::path(
@@ -6059,6 +6389,17 @@ pub async fn test_notification_channel(
     let channel_name: String = channel.try_get("name").unwrap_or_default();
     let channel_type: String = channel.try_get("channel_type").unwrap_or_default();
     let config: serde_json::Value = channel.try_get("config").unwrap_or(serde_json::json!({}));
+    // Issue #1162: sensitive config values are stored encrypted.
+    let config = match crate::integration_secrets::open_config(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to decrypt notification channel credentials");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to decrypt channel credentials" })),
+            ).into_response();
+        }
+    };
 
     let test_subject = format!("[TEST] Soroban Pulse notification test – channel '{channel_name}'");
     let test_body = format!(
@@ -11477,9 +11818,13 @@ pub async fn create_notification_channel(
     if req.name.trim().is_empty() {
         return Err(AppError::Validation("name is required".to_string()));
     }
-    if !matches!(req.channel_type.as_str(), "webhook" | "email" | "sms") {
+    if !matches!(
+        req.channel_type.as_str(),
+        "webhook" | "email" | "sms" | "slack" | "discord" | "telegram" | "pagerduty" | "github"
+    ) {
         return Err(AppError::Validation(
-            "channel_type must be one of: webhook, email, sms".to_string(),
+            "channel_type must be one of: webhook, email, sms, slack, discord, telegram, pagerduty, github"
+                .to_string(),
         ));
     }
 
@@ -11492,13 +11837,18 @@ pub async fn create_notification_channel(
         None => None,
     };
 
+    // Issue #1162: provider credentials (e.g. SMS auth tokens) in the channel
+    // config are encrypted before they reach the database.
+    let sealed_config = crate::integration_secrets::seal_config(&req.config)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO notification_channels (name, channel_type, config, content_filter) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(&req.name)
     .bind(&req.channel_type)
-    .bind(&req.config)
+    .bind(&sealed_config)
     .bind(&content_filter_json)
     .fetch_one(&state.pool)
     .await?;
@@ -12067,23 +12417,38 @@ pub async fn track_email_open(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> impl IntoResponse {
-    let pool = state.pool.clone();
-    tokio::spawn(async move {
-        let updated = sqlx::query_scalar::<_, i64>(
-            "WITH upd AS (
-                UPDATE email_opens SET opened_at = NOW()
-                WHERE token = $1 AND opened_at IS NULL
-                RETURNING 1
-             ) SELECT COUNT(*) FROM upd",
-        )
-        .bind(&token)
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(0);
-        if updated > 0 {
-            crate::metrics::record_email_open();
-        }
-    });
+    // Verify the HMAC-signed, time-limited token (issue #1158).
+    // The subject is the DB token string; verification failure silently
+    // returns the pixel anyway (to avoid leaking validity to enumerators)
+    // but does NOT record an open event.
+    let db_subject = match crate::email_token::verify_token(
+        &token,
+        Some(&crate::email_token::TokenPurpose::Open),
+        None,
+    ) {
+        Ok(claims) => Some(claims.subject),
+        Err(_) => None,
+    };
+
+    if let Some(subject) = db_subject {
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            let updated = sqlx::query_scalar::<_, i64>(
+                "WITH upd AS (
+                    UPDATE email_opens SET opened_at = NOW()
+                    WHERE token = $1 AND opened_at IS NULL
+                    RETURNING 1
+                 ) SELECT COUNT(*) FROM upd",
+            )
+            .bind(&subject)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0);
+            if updated > 0 {
+                crate::metrics::record_email_open();
+            }
+        });
+    }
 
     Response::builder()
         .status(StatusCode::OK)
@@ -12134,16 +12499,31 @@ pub async fn track_email_click(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> impl IntoResponse {
+    // Verify the HMAC-signed, time-limited token (issue #1158).
+    let db_subject = match crate::email_token::verify_token(
+        &token,
+        Some(&crate::email_token::TokenPurpose::Click),
+        None,
+    ) {
+        Ok(claims) => claims.subject,
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("click token not found"))
+                .unwrap();
+        }
+    };
+
     let dest: Option<String> = sqlx::query_scalar(
         "SELECT destination_url FROM email_clicks WHERE token = $1",
     )
-    .bind(&token)
+    .bind(&db_subject)
     .fetch_optional(&state.pool)
     .await
     .unwrap_or(None);
 
     let pool = state.pool.clone();
-    let token_clone = token.clone();
+    let subject_clone = db_subject.clone();
     tokio::spawn(async move {
         let updated = sqlx::query_scalar::<_, i64>(
             "WITH upd AS (
@@ -12152,7 +12532,7 @@ pub async fn track_email_click(
                 RETURNING 1
              ) SELECT COUNT(*) FROM upd",
         )
-        .bind(&token_clone)
+        .bind(&subject_clone)
         .fetch_one(&pool)
         .await
         .unwrap_or(0);
@@ -12499,7 +12879,8 @@ pub async fn verify_ledger_hash_chain(
 pub async fn compression_stats(
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events")
+    // query_scalar! gives compile-time SQL verification via the .sqlx offline cache.
+    let total: i64 = sqlx::query_scalar!("SELECT COUNT(*) FROM events")
         .fetch_one(&state.pool)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
@@ -15245,110 +15626,307 @@ pub async fn cleanup_export_files(
     })))
 }
 
-// ── Issue #1151: router smoke test stubs ─────────────────────────────────────
-// These handlers are referenced in `src/routes.rs` but had no implementation,
-// which previously meant the router could not even be built. They return
-// `501 Not Implemented` so the smoke test can assert "registered (non-404)"
-// while the real logic lands in follow-up issues.
-
-/// GET /v1/events/tx/{tx_hash}/related (cross-chain trace stub, see #1151).
-pub async fn get_cross_chain_trace(Path(_tx_hash): Path<String>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+/// Get cross-chain trace for a transaction
+/// Issue #682: Implement cross-chain event correlation
+#[utoipa::path(
+    get,
+    path = "/v1/cross-chain/trace/{tx_hash}",
+    tag = "cross-chain",
+    params(
+        ("tx_hash" = String, Path, description = "Transaction hash to trace")
+    ),
+    responses(
+        (status = 200, description = "Cross-chain trace", body = serde_json::Value),
+        (status = 404, description = "No trace found"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn get_cross_chain_trace(
+    State(state): State<AppState>,
+    Path(tx_hash): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    // Query all events related to this transaction
+    let events = sqlx::query_as::<_, (String, String, String, String, String, i32, String)>(
+        "SELECT id, contract_id, event_type, tx_hash, topic, ledger, ledger_close_time FROM events WHERE tx_hash = $1 ORDER BY ledger"
     )
+    .bind(&tx_hash)
+    .fetch_all(&state.read_pool)
+    .await
+    .map_err(|_| AppError::NotFound)?;
+
+    if events.is_empty() {
+        return Err(AppError::NotFound);
+    }
+
+    // Build cross-chain trace
+    let root_tx = crate::cross_chain_correlation::TransactionId::new("soroban-mainnet", tx_hash.clone());
+    let mut builder = crate::cross_chain_correlation::CrossChainTraceBuilder::new(root_tx);
+
+    for (event_id, contract_id, event_type, _, _, ledger, ledger_close_time) in events {
+        let trace_event = crate::cross_chain_correlation::TraceEvent {
+            event_id,
+            chain: "soroban-mainnet".to_string(),
+            contract_id,
+            event_type,
+            tx_hash: tx_hash.clone(),
+            ledger: ledger as u64,
+            ledger_close_time: ledger_close_time.parse().unwrap_or_else(|_| chrono::Utc::now()),
+            depth: 0,
+            confidence: 1.0,
+        };
+        builder = builder.add_event(trace_event);
+    }
+
+    let trace = builder.build().ok_or(AppError::NotFound)?;
+
+    Ok(Json(json!({
+        "id": trace.id,
+        "root_transaction": {
+            "chain": trace.root_transaction.chain,
+            "tx_hash": trace.root_transaction.tx_hash
+        },
+        "events_count": trace.events.len(),
+        "correlations_count": trace.correlations.len(),
+        "chain_sequence": trace.chain_sequence,
+        "overall_confidence": trace.overall_confidence,
+        "created_at": trace.created_at,
+        "events": trace.events.iter().map(|e| json!({
+            "event_id": e.event_id,
+            "chain": e.chain,
+            "contract_id": e.contract_id,
+            "event_type": e.event_type,
+            "ledger": e.ledger,
+            "confidence": e.confidence
+        })).collect::<Vec<_>>()
+    })))
 }
 
-/// GET /v1/cross-chain/causality (stub, see #1151).
-pub async fn analyze_causality() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+/// Get causality analysis between two events
+/// Issue #682: Implement cross-chain event correlation
+#[utoipa::path(
+    get,
+    path = "/v1/cross-chain/causality",
+    tag = "cross-chain",
+    params(
+        ("event1" = String, Query, description = "First event ID"),
+        ("event2" = String, Query, description = "Second event ID")
+    ),
+    responses(
+        (status = 200, description = "Causality analysis", body = serde_json::Value),
+        (status = 400, description = "Bad request"),
+        (status = 500, description = "Internal server error")
+    ),
+    security(("api_key" = []))
+)]
+pub async fn analyze_causality(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, AppError> {
+    let event1_id = params.get("event1")
+        .ok_or(AppError::BadRequest("event1 parameter required".to_string()))?;
+    let event2_id = params.get("event2")
+        .ok_or(AppError::BadRequest("event2 parameter required".to_string()))?;
+
+    // Fetch both events
+    let event1 = sqlx::query_as::<_, (String, String, String, String, i32, String)>(
+        "SELECT id, contract_id, event_type, tx_hash, ledger, ledger_close_time FROM events WHERE id = $1"
     )
+    .bind(event1_id)
+    .fetch_optional(&state.read_pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let event2 = sqlx::query_as::<_, (String, String, String, String, i32, String)>(
+        "SELECT id, contract_id, event_type, tx_hash, ledger, ledger_close_time FROM events WHERE id = $1"
+    )
+    .bind(event2_id)
+    .fetch_optional(&state.read_pool)
+    .await?
+    .ok_or(AppError::NotFound)?;
+
+    let engine = crate::cross_chain_correlation::CorrelationEngine::new();
+
+    let trace1 = crate::cross_chain_correlation::TraceEvent {
+        event_id: event1.0,
+        chain: "soroban-mainnet".to_string(),
+        contract_id: event1.1,
+        event_type: event1.2,
+        tx_hash: event1.3,
+        ledger: event1.4 as u64,
+        ledger_close_time: event1.5.parse().unwrap_or_else(|_| chrono::Utc::now()),
+        depth: 0,
+        confidence: 1.0,
+    };
+
+    let trace2 = crate::cross_chain_correlation::TraceEvent {
+        event_id: event2.0,
+        chain: "soroban-mainnet".to_string(),
+        contract_id: event2.1,
+        event_type: event2.2,
+        tx_hash: event2.3,
+        ledger: event2.4 as u64,
+        ledger_close_time: event2.5.parse().unwrap_or_else(|_| chrono::Utc::now()),
+        depth: 1,
+        confidence: 1.0,
+    };
+
+    let similarity = engine.calculate_similarity(&trace1, &trace2);
+    let causality = engine.detect_causality(&trace1, &trace2);
+
+    Ok(Json(json!({
+        "event1_id": event1_id,
+        "event2_id": event2_id,
+        "similarity_score": similarity,
+        "causality": causality.map(|c| format!("{:?}", c)),
+        "related": causality.is_some()
+    })))
+}
+++ b/src/main.rs
+mod cross_chain_correlation;
+#[utoipa::path(
+    get,
+    path = "/v1/features",
+    tag = "system",
+    params(
+        ("flag_name" = String, Query, description = "Feature flag name (required)"),
+        ("contract_id" = String, Query, description = "Contract ID for targeting (optional)"),
+        ("user_id" = String, Query, description = "User ID for targeting (optional)"),
+        ("ip_address" = String, Query, description = "IP address for targeting (optional)"),
+        ("region" = String, Query, description = "Region for targeting (optional)"),
+    ),
+    responses(
+        (status = 200, description = "Feature flag status"),
+        (status = 400, description = "Missing required parameters"),
+        (status = 500, description = "Internal server error"),
+    )
+)]
+pub async fn get_feature_flag_status(
+    State(state): State<AppState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Value>, AppError> {
+    let flag_name = params
+        .get("flag_name")
+        .ok_or_else(|| AppError::BadRequest("Missing required parameter: flag_name".to_string()))?
+        .clone();
+
+    let context = crate::feature_flags::FeatureFlagContext {
+        contract_id: params.get("contract_id").cloned(),
+        user_id: params.get("user_id").cloned(),
+        ip_address: params.get("ip_address").cloned(),
+        region: params.get("region").cloned(),
+    };
+
+    let enabled = crate::feature_flags::is_feature_enabled(&state.pool, &flag_name, &context)
+        .await
+        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
+
+    Ok(Json(json!({
+        "flag_name": flag_name,
+        "enabled": enabled,
+        "context": {
+            "contract_id": context.contract_id,
+            "user_id": context.user_id,
+            "ip_address": context.ip_address,
+            "region": context.region,
+        }
+    })))
+}
+++ b/src/metrics.rs
+// ── Issue #630: Resource utilization metrics ────────────────────────────────
+
+/// Update file descriptor count gauge
+pub fn update_fd_count(count: u64) {
+    m::gauge!("soroban_pulse_fd_count").set(count as f64);
 }
 
-/// GET /v1/features (client-side feature flag status stub, see #1151).
-pub async fn get_feature_flag_status() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+/// Update disk I/O read bytes gauge
+pub fn update_disk_read_bytes(bytes: u64) {
+/// Webhook that receives email bounce notifications from SendGrid, AWS SES
+/// (including SNS-wrapped notifications) and Mailgun (Issue #484). Bounced
+/// addresses are persisted so future notifications skip them.
+///
+/// Bounce webhook authentication (issue #1158): the provider signature is
+/// verified before any DB write.  The provider is determined from the
+/// `X-Bounce-Provider` header:
+///   - `sns` — Amazon SNS (SES)
+///   - `sendgrid` — SendGrid Event Webhook
+///   - `shared_secret` (default) — generic HMAC shared secret
+#[utoipa::path(
+    post,
+    path = "/v1/notifications/email/bounce",
+    tag = "system",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Bounce payload processed", body = serde_json::Value),
+        (status = 401, description = "Missing or invalid provider signature"),
     )
-}
-
-/// POST /v1/notifications/email/bounce (stub, see #1151).
-pub async fn email_bounce_webhook() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}
-
-/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-config (stub).
-pub async fn create_anomaly_config(
-    Path(_subscription_id): Path<String>,
+)]
+pub async fn email_bounce_webhook(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
 ) -> impl IntoResponse {
+    use axum::body::to_bytes;
+    use crate::email_token::{verify_bounce_signature, BounceProvider};
+
+    // Read the raw body so we can verify the signature over it.
+    let headers = request.headers().clone();
+    let provider_header = headers
+        .get("x-bounce-provider")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("shared_secret");
+    let provider = match provider_header {
+        "sns" => BounceProvider::Sns,
+        "sendgrid" => BounceProvider::SendGrid,
+        _ => BounceProvider::SharedSecret,
+    };
+
+    let body_bytes = match to_bytes(request.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to read bounce webhook body");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "failed to read request body" })),
+            );
+        }
+    };
+
+    // Verify signature before touching the DB.
+    if let Err(e) = verify_bounce_signature(&provider, &headers, &body_bytes, None) {
+        tracing::warn!(error = %e, "Bounce webhook signature verification failed");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid or missing provider signature" })),
+        );
+    }
+
+    let payload: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid JSON: {e}") })),
+            );
+        }
+    };
+
+    let recipients = crate::email::extract_bounced_recipients(&payload);
+    let mut recorded = 0usize;
+    for recipient in &recipients {
+        match crate::email::record_bounce(&state.pool, recipient).await {
+            Ok(()) => {
+                crate::metrics::record_email_bounce();
+                recorded += 1;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, email = %recipient.email, "Failed to record email bounce");
+            }
+        }
+    }
     (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
+        StatusCode::OK,
+        Json(json!({ "received": recipients.len(), "recorded": recorded })),
     )
 }
 
-/// GET /v1/admin/subscriptions/{subscription_id}/anomaly-alerts (stub).
-pub async fn get_anomaly_alerts(
-    Path(_subscription_id): Path<String>,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}
-
-/// POST /v1/admin/subscriptions/{subscription_id}/anomaly-alerts/{alert_id}/acknowledge (stub).
-pub async fn acknowledge_anomaly_alert(
-    Path((_subscription_id, _alert_id)): Path<(String, String)>,
-) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}
-
-/// POST /v1/admin/alerts/silences (stub, see #897/#1151).
-pub async fn create_alert_silence() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}
-
-/// GET /v1/admin/alerts/silences (stub, see #897/#1151).
-pub async fn get_alert_silences() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}
-
-/// DELETE /v1/admin/alerts/silences/{silence_id} (stub).
-pub async fn delete_alert_silence(Path(_silence_id): Path<String>) -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}
-
-/// GET /v1/admin/backup/verification/report (stub, see #894/#1151).
-pub async fn get_backup_verification_report() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}
-
-/// POST /v1/admin/backup/verification/trigger (stub, see #894/#1151).
-pub async fn trigger_backup_verification() -> impl IntoResponse {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(json!({"error": "not implemented", "code": "NOT_IMPLEMENTED"})),
-    )
-}

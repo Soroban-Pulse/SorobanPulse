@@ -1,0 +1,11 @@
+[
+  {
+    "contract_id": "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
+    "name": "XLM (Stellar Asset Contract)",
+    "description": "Native XLM wrapped as the Stellar Asset Contract on testnet",
+    "project_url": "https://stellar.org",
+    "source_repo": "https://github.com/stellar/rs-soroban-env",
+    "tags": ["sac", "native-asset", "testnet"],
+    "verified": true
+  }
+]

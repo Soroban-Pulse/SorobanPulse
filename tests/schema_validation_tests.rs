@@ -53,6 +53,8 @@ async fn make_router_with_schema(pool: PgPool, api_key: Option<String>) -> axum:
         indexer_event_types: Vec::new(),
         event_data_encryption_key: None,
         event_data_encryption_key_old: None,
+        integration_encryption_key: None,
+        integration_encryption_key_old: None,
         webhook_url: None,
         webhook_secret: None,
         webhook_contract_filter: Vec::new(),

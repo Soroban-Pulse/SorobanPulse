@@ -821,6 +821,17 @@ pub fn update_network_health(chain_id: &str, healthy: bool) {
     .set(if healthy { 1.0 } else { 0.0 });
 }
 
+/// Indexer lag labeled by network (Issue #1063), so each concurrently
+/// indexed network (testnet, mainnet, ...) gets its own lag gauge instead of
+/// sharing the single global `soroban_pulse_indexer_lag_ledgers` metric.
+pub fn update_network_indexer_lag(chain_id: &str, lag: u64) {
+    m::gauge!(
+        "soroban_pulse_network_indexer_lag_ledgers",
+        "chain_id" => chain_id.to_string()
+    )
+    .set(lag as f64);
+}
+
 pub fn update_network_latest_ledger(chain_id: &str, ledger: u64) {
     m::gauge!(
         "soroban_pulse_network_latest_ledger",

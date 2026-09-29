@@ -1,0 +1,74 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "soroban-pulse.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+
+  # ── Ingress ───────────────────────────────────────────────────────────────
+  ingress:
+    # Allow traffic from the ingress controller namespace/pod selector
+    - from:
+        {{- if .Values.networkPolicy.ingressController.namespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+        {{- end }}
+        {{- if .Values.networkPolicy.ingressController.podSelector }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+
+    # Allow Prometheus scraping /metrics on the same port
+    - from:
+        {{- if .Values.networkPolicy.prometheus.namespaceSelector }}
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.prometheus.namespaceSelector | nindent 12 }}
+        {{- end }}
+        {{- if .Values.networkPolicy.prometheus.podSelector }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.prometheus.podSelector | nindent 12 }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.targetPort }}
+
+  # ── Egress ────────────────────────────────────────────────────────────────
+  egress:
+    # DNS resolution (UDP + TCP port 53 to kube-dns / any nameserver)
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+    # PostgreSQL
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.postgresPort }}
+
+    # Stellar Soroban RPC (HTTPS)
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.networkPolicy.egress.rpcPort }}
+
+    {{- with .Values.networkPolicy.egress.extraPorts }}
+    # User-defined extra egress ports
+    {{- range . }}
+    - ports:
+        - protocol: {{ .protocol | default "TCP" }}
+          port: {{ .port }}
+    {{- end }}
+    {{- end }}
+{{- end }}

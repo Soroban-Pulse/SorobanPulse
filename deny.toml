@@ -2,6 +2,48 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 # =====================================================================
+# Handling false positives / temporary ignores
+# =====================================================================
+#
+# If cargo-deny or the GitHub Dependency Review action flags a dependency
+# that you have determined is safe in this context:
+#
+# 1. **cargo-deny advisory ignore** — add an entry to `[advisories].ignore`:
+#
+#      [[advisories.ignore]]
+#      id = "RUSTSEC-0000-0000"
+#      reason = "Vulnerability in feature X which we do not use; see <link>"
+#
+# 2. **cargo-deny licence ignore** — add the crate to the licence `exceptions`
+#    list:
+#
+#      [[licenses.exceptions]]
+#      allow = ["GPL-2.0"]
+#      name = "some-crate"
+#      version = "1.0"
+#
+# 3. **npm / pip / Go advisories** — for non-Rust ecosystems caught by the
+#    `dependency-review-action` (.github/workflows/dependency-review.yml):
+#
+#    - npm: add a `"overrides"` entry in `package.json`, or pin the
+#      transitive dep to a safe version.  Add a comment referencing the
+#      advisory ID and the expected fix release.
+#    - pip: pin the fixed version in `requirements.txt` and add a comment.
+#    - Go: run `go get <module>@<safe-version>` to update `go.sum`, then
+#      commit the change with a comment referencing the advisory.
+#
+#    If the advisory is a false positive for your use case, open an issue
+#    on the upstream advisory database and document your reasoning in the
+#    PR description.  Do NOT silently ignore an advisory without a comment.
+#
+# 4. **Temporary CI skip** — in exceptional cases (e.g. waiting for an
+#    upstream patch), set the advisory ID in the `ignore` list above with
+#    a comment including the advisory URL and a target removal date.
+#    Removal is tracked by a follow-up issue linked in the comment.
+#
+# =====================================================================
+
+# =====================================================================
 # Advisories - Check for known security vulnerabilities
 # =====================================================================
 [advisories]
@@ -51,6 +93,7 @@ allow-wildcard-dependencies = false
 unlicensed = "deny"
 # List of allowed licenses
 allow = [
+    # Soroban Pulse itself is MIT-licensed (see LICENSE); keep MIT allowed.
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
@@ -63,7 +106,6 @@ allow = [
     "0BSD",
     "BSL-1.0",
     "CC0-1.0",
-    "Zlib",
 ]
 # Confidence threshold for license detection
 confidence-threshold = 0.8

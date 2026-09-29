@@ -1,0 +1,21 @@
+{
+  "method": "getEvents",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "getEvents",
+    "params": {
+      "startLedger": 5000000,
+      "filters": [],
+      "pagination": { "limit": 100 }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "error": {
+      "code": -32603,
+      "message": "Internal RPC error"
+    }
+  }
+}

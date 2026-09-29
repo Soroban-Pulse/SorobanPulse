@@ -7,6 +7,8 @@
 #   - A WireMock instance that simulates the Stellar Soroban RPC
 #   - The SorobanPulse application (built from source)
 #   - A lightweight webhook receiver used by the E2E test suite
+#   - A one-shot seed job that loads tests/e2e/seed.sql
+#   - The built web dashboard (nginx) on http://localhost:5174
 #
 # Usage:
 #   docker compose -f docker-compose.e2e.yml up --build --wait
@@ -88,6 +90,51 @@ services:
       timeout: 5s
       retries: 12
       start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Seed — loads tests/e2e/seed.sql once the app is healthy (the app runs the
+  # migrations on startup, so the schema exists by then), then exits.
+  # ---------------------------------------------------------------------------
+  seed:
+    image: postgres:16-alpine
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: e2e
+    volumes:
+      - ./tests/e2e/seed.sql:/seed/seed.sql:ro
+    command:
+      - psql
+      - --host=db
+      - --username=e2e
+      - --dbname=soroban_pulse_e2e
+      - --set=ON_ERROR_STOP=1
+      - --file=/seed/seed.sql
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Dashboard — the built SPA served by nginx, proxying /api/* to the app.
+  # Open http://localhost:5174 once the stack is up.
+  # ---------------------------------------------------------------------------
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    depends_on:
+      app:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    environment:
+      API_UPSTREAM: http://app:3000
+    ports:
+      - "5174:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   # ---------------------------------------------------------------------------
   # Webhook receiver — tiny HTTP server that records webhook deliveries.

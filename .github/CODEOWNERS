@@ -1,0 +1,57 @@
+# Code owners for Soroban Pulse.
+# Keep this file in sync with MAINTAINERS.md — see GOVERNANCE.md.
+# Later rules take precedence over earlier ones.
+
+# Default owners for everything not matched below
+*                               @Soroban-Pulse/maintainers
+
+# Backend: indexer, API, database
+/src/                           @Soroban-Pulse/backend
+/migrations/                    @Soroban-Pulse/backend
+/.sqlx/                         @Soroban-Pulse/backend
+/benches/                       @Soroban-Pulse/backend
+/tests/                         @Soroban-Pulse/backend
+/Cargo.toml                     @Soroban-Pulse/backend
+/Cargo.lock                     @Soroban-Pulse/backend
+
+# Security-sensitive code and policy
+/src/encryption.rs              @Soroban-Pulse/security @Soroban-Pulse/backend
+/src/reencrypt.rs               @Soroban-Pulse/security @Soroban-Pulse/backend
+/src/crypto/                    @Soroban-Pulse/security @Soroban-Pulse/backend
+/src/zero_trust.rs              @Soroban-Pulse/security @Soroban-Pulse/backend
+/tests/security/                @Soroban-Pulse/security
+/deny.toml                      @Soroban-Pulse/security
+/.gitleaks.toml                 @Soroban-Pulse/security
+
+# SDKs and client tooling
+/sdk/                           @Soroban-Pulse/sdk
+/packages/                      @Soroban-Pulse/sdk
+/cli/                           @Soroban-Pulse/sdk
+/vscode-extension/              @Soroban-Pulse/sdk
+/openapi.json                   @Soroban-Pulse/sdk @Soroban-Pulse/backend
+
+# Frontend
+/dashboard/                     @Soroban-Pulse/frontend
+/frontend/                      @Soroban-Pulse/frontend
+/web/                           @Soroban-Pulse/frontend
+
+# Infrastructure and CI
+/.github/workflows/             @Soroban-Pulse/infra
+/Dockerfile                     @Soroban-Pulse/infra
+/docker-compose*.yml            @Soroban-Pulse/infra
+/helm/                          @Soroban-Pulse/infra
+/k8s/                           @Soroban-Pulse/infra
+/terraform/                     @Soroban-Pulse/infra
+/gitops/                        @Soroban-Pulse/infra
+
+# Documentation
+/docs/                          @Soroban-Pulse/docs
+*.md                            @Soroban-Pulse/docs
+
+# Governance, policy and legal (after *.md so these win)
+/SECURITY.md                    @Soroban-Pulse/security @Soroban-Pulse/maintainers
+/LICENSE                        @Soroban-Pulse/maintainers
+/CODE_OF_CONDUCT.md             @Soroban-Pulse/maintainers
+/GOVERNANCE.md                  @Soroban-Pulse/maintainers
+/MAINTAINERS.md                 @Soroban-Pulse/maintainers
+/.github/CODEOWNERS             @Soroban-Pulse/maintainers

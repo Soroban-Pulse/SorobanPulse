@@ -5,7 +5,7 @@ description = "Soroban Pulse API"
 authors = [
   {name = "OpenAPI Generator Community",email = "team@openapitools.org"},
 ]
-license = { text = "" }
+license = { text = "MIT" }
 readme = "README.md"
 keywords = ["OpenAPI", "OpenAPI-Generator", "Soroban Pulse API"]
 requires-python = ">=3.9"

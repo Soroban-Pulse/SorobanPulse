@@ -13,8 +13,24 @@ use uuid::Uuid;
 use crate::{
     discord::DiscordConfig,
     github::GitHubOAuthConfig,
+    integration_secrets::{self, SecretError},
     slack::SlackOAuthConfig,
 };
+
+/// Map a credential encryption failure to an HTTP error (Issue #1162).
+/// Never includes the credential itself.
+fn secret_error(e: SecretError) -> (StatusCode, String) {
+    match e {
+        SecretError::NotConfigured => (StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+        SecretError::Crypto(_) => {
+            error!(error = %e, "Integration credential encryption failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to process integration credentials".to_string(),
+            )
+        }
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitHubIntegrationRequest {
@@ -53,6 +69,7 @@ pub struct TelegramIntegrationRequest {
     pub webhook_enabled: Option<bool>,
     pub webhook_url: Option<String>,
     pub message_thread_support: Option<bool>,
+    pub button_support: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,6 +100,7 @@ pub async fn setup_github_integration(
     Json(req): Json<GitHubIntegrationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let id = Uuid::new_v4();
+    let access_token = integration_secrets::seal(&req.access_token).map_err(secret_error)?;
 
     let result = sqlx::query(
         "INSERT INTO github_integrations (
@@ -101,7 +119,7 @@ pub async fn setup_github_integration(
     )
     .bind(&id)
     .bind(&subscription_id)
-    .bind(&req.access_token)
+    .bind(&access_token)
     .bind(&req.owner)
     .bind(&req.repository)
     .bind(&req.issue_title_template)
@@ -150,6 +168,8 @@ pub async fn setup_discord_integration(
     Json(req): Json<DiscordIntegrationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let id = Uuid::new_v4();
+    // Discord webhook URLs embed the webhook token, so they are credentials.
+    let webhook_url = integration_secrets::seal(&req.webhook_url).map_err(secret_error)?;
 
     let result = sqlx::query(
         "INSERT INTO discord_integrations (
@@ -166,7 +186,7 @@ pub async fn setup_discord_integration(
     )
     .bind(&id)
     .bind(&subscription_id)
-    .bind(&req.webhook_url)
+    .bind(&webhook_url)
     .bind(&req.bot_name)
     .bind(&req.avatar_url)
     .bind(req.embed_enabled.unwrap_or(true))
@@ -178,7 +198,6 @@ pub async fn setup_discord_integration(
         Ok(_) => {
             info!(
                 subscription_id = %subscription_id,
-                webhook = %req.webhook_url,
                 "Discord integration setup successful"
             );
 
@@ -212,6 +231,8 @@ pub async fn setup_slack_integration(
     Json(req): Json<SlackIntegrationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let id = Uuid::new_v4();
+    let webhook_url = integration_secrets::seal_opt(req.webhook_url.as_deref()).map_err(secret_error)?;
+    let bot_token = integration_secrets::seal_opt(req.bot_token.as_deref()).map_err(secret_error)?;
 
     let result = sqlx::query(
         "INSERT INTO slack_integrations (
@@ -229,8 +250,8 @@ pub async fn setup_slack_integration(
     )
     .bind(&id)
     .bind(&subscription_id)
-    .bind(&req.webhook_url)
-    .bind(&req.bot_token)
+    .bind(&webhook_url)
+    .bind(&bot_token)
     .bind(&req.channel)
     .bind(req.block_kit_enabled.unwrap_or(true))
     .bind(req.thread_support.unwrap_or(false))
@@ -276,6 +297,7 @@ pub async fn setup_telegram_integration(
     Json(req): Json<TelegramIntegrationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let id = Uuid::new_v4();
+    let bot_token = integration_secrets::seal(&req.bot_token).map_err(secret_error)?;
 
     let result = sqlx::query(
         "INSERT INTO telegram_integrations (
@@ -293,7 +315,7 @@ pub async fn setup_telegram_integration(
     )
     .bind(&id)
     .bind(&subscription_id)
-    .bind(&req.bot_token)
+    .bind(&bot_token)
     .bind(&req.chat_id)
     .bind(req.webhook_enabled.unwrap_or(false))
     .bind(&req.webhook_url)
@@ -339,14 +361,14 @@ pub async fn get_github_integration(
     Path(subscription_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let result = sqlx::query_as::<_, (Uuid, String, String, String)>(
-        "SELECT id, owner, repository, webhook_url FROM github_integrations WHERE subscription_id = $1"
+        "SELECT id, owner, repository, access_token FROM github_integrations WHERE subscription_id = $1"
     )
     .bind(&subscription_id)
     .fetch_optional(&pool)
     .await;
 
     match result {
-        Ok(Some((id, owner, repository, _))) => {
+        Ok(Some((id, owner, repository, access_token))) => {
             Ok((
                 StatusCode::OK,
                 Json(json!({
@@ -354,6 +376,7 @@ pub async fn get_github_integration(
                     "integration_type": "github",
                     "owner": owner,
                     "repository": repository,
+                    "access_token": integration_secrets::mask_stored(&access_token),
                 })),
             ))
         }
@@ -387,7 +410,7 @@ pub async fn get_discord_integration(
                 Json(json!({
                     "id": id,
                     "integration_type": "discord",
-                    "webhook_url": webhook_url,
+                    "webhook_url": integration_secrets::mask_stored(&webhook_url),
                     "bot_name": bot_name,
                 })),
             ))
@@ -408,21 +431,23 @@ pub async fn get_slack_integration(
     State(pool): State<PgPool>,
     Path(subscription_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let result = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, channel FROM slack_integrations WHERE subscription_id = $1"
+    let result = sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>)>(
+        "SELECT id, channel, webhook_url, bot_token FROM slack_integrations WHERE subscription_id = $1"
     )
     .bind(&subscription_id)
     .fetch_optional(&pool)
     .await;
 
     match result {
-        Ok(Some((id, channel))) => {
+        Ok(Some((id, channel, webhook_url, bot_token))) => {
             Ok((
                 StatusCode::OK,
                 Json(json!({
                     "id": id,
                     "integration_type": "slack",
                     "channel": channel,
+                    "webhook_url": integration_secrets::mask_stored_opt(webhook_url.as_deref()),
+                    "bot_token": integration_secrets::mask_stored_opt(bot_token.as_deref()),
                 })),
             ))
         }
@@ -442,21 +467,22 @@ pub async fn get_telegram_integration(
     State(pool): State<PgPool>,
     Path(subscription_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let result = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id, chat_id FROM telegram_integrations WHERE subscription_id = $1"
+    let result = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT id, chat_id, bot_token FROM telegram_integrations WHERE subscription_id = $1"
     )
     .bind(&subscription_id)
     .fetch_optional(&pool)
     .await;
 
     match result {
-        Ok(Some((id, chat_id))) => {
+        Ok(Some((id, chat_id, bot_token))) => {
             Ok((
                 StatusCode::OK,
                 Json(json!({
                     "id": id,
                     "integration_type": "telegram",
                     "chat_id": chat_id,
+                    "bot_token": integration_secrets::mask_stored(&bot_token),
                 })),
             ))
         }
@@ -622,6 +648,8 @@ pub async fn setup_pagerduty_integration(
     Json(req): Json<PagerDutyIntegrationRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     let id = Uuid::new_v4();
+    let routing_key = integration_secrets::seal(&req.routing_key).map_err(secret_error)?;
+    let api_key = integration_secrets::seal_opt(req.api_key.as_deref()).map_err(secret_error)?;
 
     let service_name = req.service_name.unwrap_or_else(|| "Soroban Pulse".to_string());
     let contract_filter: Vec<String> = req.contract_filter.unwrap_or_default();
@@ -652,9 +680,9 @@ pub async fn setup_pagerduty_integration(
     )
     .bind(&id)
     .bind(&subscription_id)
-    .bind(&req.routing_key)
+    .bind(&routing_key)
     .bind(&service_name)
-    .bind(&req.api_key)
+    .bind(&api_key)
     .bind(&req.escalation_policy_id)
     .bind(&contract_filter)
     .bind(&event_type_filter)
@@ -695,8 +723,9 @@ pub async fn get_pagerduty_integration(
     State(pool): State<PgPool>,
     Path(subscription_id): Path<Uuid>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let result = sqlx::query_as::<_, (Uuid, String, Option<String>, bool, i32)>(
-        "SELECT id, service_name, escalation_policy_id, auto_resolve, auto_resolve_threshold_min
+    let result = sqlx::query_as::<_, (Uuid, String, Option<String>, bool, i32, String, Option<String>)>(
+        "SELECT id, service_name, escalation_policy_id, auto_resolve, auto_resolve_threshold_min,
+                routing_key, api_key
          FROM pagerduty_integrations
          WHERE subscription_id = $1",
     )
@@ -705,12 +734,14 @@ pub async fn get_pagerduty_integration(
     .await;
 
     match result {
-        Ok(Some((id, service_name, escalation_policy_id, auto_resolve, threshold))) => Ok((
+        Ok(Some((id, service_name, escalation_policy_id, auto_resolve, threshold, routing_key, api_key))) => Ok((
             StatusCode::OK,
             Json(json!({
                 "id":                       id,
                 "integration_type":         "pagerduty",
                 "service_name":             service_name,
+                "routing_key":              integration_secrets::mask_stored(&routing_key),
+                "api_key":                  integration_secrets::mask_stored_opt(api_key.as_deref()),
                 "escalation_policy_id":     escalation_policy_id,
                 "auto_resolve":             auto_resolve,
                 "auto_resolve_threshold_min": threshold,
@@ -785,7 +816,7 @@ pub async fn acknowledge_pagerduty_incident(
     })?;
 
     let mut config = crate::pagerduty::PagerDutyConfig::default();
-    config.routing_key = routing_key;
+    config.routing_key = integration_secrets::open(&routing_key).map_err(secret_error)?;
     let client = crate::pagerduty::PagerDutyClient::new(config);
 
     client
@@ -840,7 +871,7 @@ pub async fn resolve_pagerduty_incident(
     })?;
 
     let mut config = crate::pagerduty::PagerDutyConfig::default();
-    config.routing_key = routing_key;
+    config.routing_key = integration_secrets::open(&routing_key).map_err(secret_error)?;
     let client = crate::pagerduty::PagerDutyClient::new(config);
 
     client

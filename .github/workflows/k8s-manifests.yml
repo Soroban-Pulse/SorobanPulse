@@ -1,0 +1,49 @@
+name: Kubernetes Manifests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "k8s/**"
+      - ".github/workflows/k8s-manifests.yml"
+  pull_request:
+    paths:
+      - "k8s/**"
+      - ".github/workflows/k8s-manifests.yml"
+
+permissions:
+  contents: read
+
+env:
+  KUBECONFORM_VERSION: v0.6.7
+
+jobs:
+  kubeconform:
+    name: kubeconform (Kubernetes ${{ matrix.kubernetes }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        kubernetes: ["1.28.0", "1.31.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar xz -C /usr/local/bin kubeconform
+
+      # Istio and Linkerd CRDs are validated with the datreeio CRDs-catalog
+      # schemas. Skipped kinds:
+      #   TrafficSplit - SMI (split.smi-spec.io) publishes no JSON schema.
+      #   HTTPRoute    - the catalog schema checks `format: duration` as
+      #                  ISO-8601, so valid Kubernetes durations such as `5s`
+      #                  are rejected.
+      - name: Validate k8s/ manifests
+        run: |
+          kubeconform -strict -summary -output text \
+            -kubernetes-version "${{ matrix.kubernetes }}" \
+            -skip TrafficSplit,HTTPRoute \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+            k8s/*.yaml

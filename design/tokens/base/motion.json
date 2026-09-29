@@ -1,0 +1,16 @@
+{
+  "motion": {
+    "duration": {
+      "instant": { "value": "0ms" },
+      "fast": { "value": "100ms", "comment": "Hover, press, focus" },
+      "normal": { "value": "180ms", "comment": "Tabs, toggles, small reveals" },
+      "slow": { "value": "280ms", "comment": "Drawers, toasts entering" },
+      "pulse": { "value": "1600ms", "comment": "Live indicator heartbeat loop" }
+    },
+    "easing": {
+      "standard": { "value": "cubic-bezier(0.2, 0, 0, 1)" },
+      "enter": { "value": "cubic-bezier(0, 0, 0.2, 1)" },
+      "exit": { "value": "cubic-bezier(0.4, 0, 1, 1)" }
+    }
+  }
+}

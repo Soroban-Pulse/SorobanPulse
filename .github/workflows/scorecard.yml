@@ -1,0 +1,51 @@
+name: OpenSSF Scorecard
+
+on:
+  # Run weekly on Sundays to keep the score current.
+  schedule:
+    - cron: '0 6 * * 0'
+  # Run on push to main so the badge reflects the latest state.
+  push:
+    branches:
+      - main
+  # Allow manual triggers.
+  workflow_dispatch:
+
+# Required by ossf/scorecard-action to publish results.
+permissions:
+  contents: read
+  # Needed to write SARIF results to the Security tab.
+  security-events: write
+  # Needed to publish results and access the token for scorecard API.
+  id-token: write
+
+jobs:
+  scorecard:
+    name: Scorecard Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Run OpenSSF Scorecard
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: scorecard-results.sarif
+          results_format: sarif
+          # Publish results to the OpenSSF REST API for the public badge.
+          # Set to false for private repos or if you don't want public results.
+          publish_results: true
+
+      - name: Upload Scorecard results to Security tab
+        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3
+        with:
+          sarif_file: scorecard-results.sarif
+
+      - name: Upload Scorecard results as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: scorecard-results
+          path: scorecard-results.sarif
+          retention-days: 90

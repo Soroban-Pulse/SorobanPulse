@@ -1,0 +1,394 @@
+name: Nightly Testnet Soak Test
+
+# Issue #1155 — Run SorobanPulse against the real Soroban testnet for ~60
+# minutes nightly.  Validates that the indexer:
+#   1. Keeps lag under the configured threshold (default: 100 ledgers)
+#   2. Produces no ERROR-level log lines (outside an explicit allowlist)
+#   3. Has flat memory growth (no unbounded leaks)
+#   4. Indexes at least one event during the run
+#   5. Sampled events match a direct getEvents RPC call (cross-check)
+#
+# On failure, the workflow opens (or updates) a GitHub Issue with logs and
+# metrics snapshots so regressions are traceable.
+
+on:
+  # Run every night at 02:30 UTC (offset from the security scan).
+  schedule:
+    - cron: '30 2 * * *'
+  # Allow a manual trigger for debugging.
+  workflow_dispatch:
+    inputs:
+      soak_duration_minutes:
+        description: 'How long to run the soak test (minutes)'
+        required: false
+        default: '60'
+      rpc_url:
+        description: 'Soroban RPC endpoint (defaults to public testnet)'
+        required: false
+        default: 'https://soroban-testnet.stellar.org'
+
+concurrency:
+  group: soak-testnet
+  cancel-in-progress: false   # Never cancel a running soak — let it finish.
+
+permissions:
+  contents: read
+  issues: write    # Needed to open/update the failure issue.
+
+env:
+  CARGO_TERM_COLOR: always
+  # Soak duration in minutes.
+  SOAK_MINUTES: ${{ github.event.inputs.soak_duration_minutes || '60' }}
+  # Public testnet RPC (no auth required).
+  STELLAR_RPC_URL: ${{ github.event.inputs.rpc_url || 'https://soroban-testnet.stellar.org' }}
+  # Maximum acceptable lag (ledgers).
+  MAX_LAG_LEDGERS: '100'
+  # Maximum acceptable memory growth ratio (1.5 = 50% growth allowed).
+  MAX_MEMORY_RATIO: '1.5'
+
+jobs:
+  soak:
+    name: Soak Test (${{ github.event.inputs.soak_duration_minutes || '60' }} min)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90    # Hard cap: soak (60) + startup + analysis + teardown
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: soroban_pulse_soak
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # ── 1. Checkout & Rust toolchain ──────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Rust stable toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-soak-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-soak-
+
+      # ── 2. Build ───────────────────────────────────────────────────────────
+      - name: Build release binary
+        run: cargo build --release --locked
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_soak
+          SQLX_OFFLINE: "true"
+
+      # ── 3. Run the soak test ───────────────────────────────────────────────
+      - name: Run soak test
+        id: soak
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_soak
+          STELLAR_RPC_URL: ${{ env.STELLAR_RPC_URL }}
+          RUST_LOG: info
+          RUST_LOG_FORMAT: json
+          PORT: 3000
+          START_LEDGER: '0'
+          INDEXER_LAG_WARN_THRESHOLD: ${{ env.MAX_LAG_LEDGERS }}
+          SOAK_MINUTES: ${{ env.SOAK_MINUTES }}
+        run: |
+          set -euo pipefail
+
+          echo "▶ Starting SorobanPulse (${SOAK_MINUTES}m soak against ${STELLAR_RPC_URL})"
+
+          # Start the service, capturing structured JSON logs to a file.
+          ./target/release/soroban-pulse > /tmp/soak-app.log 2>&1 &
+          APP_PID=$!
+          echo "app_pid=${APP_PID}" >> "$GITHUB_OUTPUT"
+
+          # Give the service 30 s to initialise and run migrations.
+          echo "Waiting for service to start..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/healthz/ready >/dev/null 2>&1; then
+              echo "Service is ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+          # Record baseline memory RSS (kB → bytes).
+          BASELINE_RSS=$(ps -o rss= -p "$APP_PID" | tr -d '[:space:]')
+          echo "baseline_rss=${BASELINE_RSS}" >> "$GITHUB_OUTPUT"
+          echo "Baseline RSS: ${BASELINE_RSS} kB"
+
+          # Run for SOAK_MINUTES.
+          SOAK_SECS=$(( SOAK_MINUTES * 60 ))
+          echo "Soaking for ${SOAK_SECS}s..."
+          sleep "${SOAK_SECS}"
+
+          # ── Collect metrics snapshot ─────────────────────────────────────
+          curl -sf http://localhost:3000/metrics > /tmp/soak-metrics.txt || echo "metrics unavailable"
+
+          # ── Check lag ────────────────────────────────────────────────────
+          LAG=$(grep 'soroban_pulse_indexer_lag_ledgers ' /tmp/soak-metrics.txt \
+                | awk '{print $2}' | head -1 || echo "0")
+          echo "lag_ledgers=${LAG}" >> "$GITHUB_OUTPUT"
+          echo "Indexer lag: ${LAG} ledgers"
+
+          # ── Check event count ────────────────────────────────────────────
+          EVENT_COUNT=$(grep 'soroban_pulse_events_indexed_total ' /tmp/soak-metrics.txt \
+                        | awk '{print $2}' | head -1 || echo "0")
+          echo "event_count=${EVENT_COUNT}" >> "$GITHUB_OUTPUT"
+          echo "Events indexed: ${EVENT_COUNT}"
+
+          # ── Check memory growth ──────────────────────────────────────────
+          FINAL_RSS=$(ps -o rss= -p "$APP_PID" | tr -d '[:space:]')
+          echo "final_rss=${FINAL_RSS}" >> "$GITHUB_OUTPUT"
+          echo "Final RSS: ${FINAL_RSS} kB"
+
+          # ── Graceful shutdown ────────────────────────────────────────────
+          kill -SIGTERM "$APP_PID" || true
+          wait "$APP_PID" 2>/dev/null || true
+          echo "Service stopped"
+
+      # ── 4. Assertions ─────────────────────────────────────────────────────
+      - name: Assert lag is within threshold
+        run: |
+          LAG="${{ steps.soak.outputs.lag_ledgers }}"
+          MAX="${{ env.MAX_LAG_LEDGERS }}"
+          echo "Lag: ${LAG} | Max allowed: ${MAX}"
+          if [ -z "${LAG}" ] || ! [[ "${LAG}" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Could not read lag metric from Prometheus output"
+            exit 1
+          fi
+          if awk "BEGIN { exit !(${LAG} > ${MAX}) }"; then
+            echo "::error::Indexer lag ${LAG} exceeds threshold ${MAX}"
+            exit 1
+          fi
+          echo "✅ Lag ${LAG} is within threshold ${MAX}"
+
+      - name: Assert at least one event was indexed
+        run: |
+          COUNT="${{ steps.soak.outputs.event_count }}"
+          echo "Events indexed: ${COUNT}"
+          if [ -z "${COUNT}" ] || [ "${COUNT}" = "0" ]; then
+            echo "::error::No events were indexed during the soak run"
+            exit 1
+          fi
+          echo "✅ ${COUNT} events indexed"
+
+      - name: Assert no unexpected ERROR log lines
+        run: |
+          # Allowlisted error patterns that are known-benign on testnet.
+          ALLOWLIST=(
+            "soroban_pulse_rpc_errors_total"
+            "rate limit"
+            "connection reset by peer"
+            "advisory lock"
+          )
+
+          ERRORS=$(grep '"level":"ERROR"' /tmp/soak-app.log || true)
+          if [ -z "${ERRORS}" ]; then
+            echo "✅ No ERROR log lines found"
+            exit 0
+          fi
+
+          # Filter out allowlisted patterns.
+          FILTERED="${ERRORS}"
+          for pattern in "${ALLOWLIST[@]}"; do
+            FILTERED=$(echo "${FILTERED}" | grep -v "${pattern}" || true)
+          done
+
+          if [ -n "${FILTERED}" ]; then
+            echo "::error::Unexpected ERROR log lines:"
+            echo "${FILTERED}" | head -20
+            exit 1
+          fi
+          echo "✅ Only allowlisted ERROR lines found"
+
+      - name: Assert memory growth is flat
+        run: |
+          BASELINE="${{ steps.soak.outputs.baseline_rss }}"
+          FINAL="${{ steps.soak.outputs.final_rss }}"
+          RATIO="${{ env.MAX_MEMORY_RATIO }}"
+
+          if [ -z "${BASELINE}" ] || [ "${BASELINE}" = "0" ]; then
+            echo "::warning::Could not measure baseline RSS, skipping memory check"
+            exit 0
+          fi
+
+          echo "Baseline RSS: ${BASELINE} kB | Final RSS: ${FINAL} kB"
+          GROWTH=$(awk "BEGIN { printf \"%.2f\", ${FINAL} / ${BASELINE} }")
+          echo "Memory growth ratio: ${GROWTH}x (limit: ${RATIO}x)"
+
+          if awk "BEGIN { exit !(${GROWTH} > ${RATIO}) }"; then
+            echo "::error::Memory grew by ${GROWTH}x, exceeding ${RATIO}x limit"
+            exit 1
+          fi
+          echo "✅ Memory growth ${GROWTH}x is within ${RATIO}x limit"
+
+      # ── 5. Cross-check sampled events against direct RPC ──────────────────
+      - name: Cross-check sampled events against RPC
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_soak
+          STELLAR_RPC_URL: ${{ env.STELLAR_RPC_URL }}
+        run: |
+          set -euo pipefail
+
+          # Fetch the last 5 indexed events from the API.
+          API_EVENTS=$(curl -sf \
+            "http://localhost:3000/v1/events?limit=5&page=1" \
+            2>/dev/null || echo "{}")
+
+          COUNT=$(echo "${API_EVENTS}" | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          print(len(d.get('data', [])))
+          " 2>/dev/null || echo "0")
+
+          if [ "${COUNT}" = "0" ]; then
+            echo "::warning::No events returned from API for cross-check"
+            exit 0
+          fi
+
+          echo "Cross-checking ${COUNT} sampled events against RPC..."
+
+          # For each event, verify its tx_hash exists by querying getEvents
+          # with the event's ledger as startLedger.  A non-zero result means
+          # the RPC agrees the event belongs on-chain.
+          MISMATCHES=0
+          echo "${API_EVENTS}" | python3 -c "
+          import json, sys, urllib.request, os
+
+          rpc_url = os.environ['STELLAR_RPC_URL']
+          d = json.load(sys.stdin)
+          events = d.get('data', [])
+          mismatches = 0
+
+          for ev in events:
+              ledger = ev.get('ledger', 0)
+              tx_hash = ev.get('tx_hash', '')
+              if not ledger or not tx_hash:
+                  continue
+
+              body = json.dumps({
+                  'jsonrpc': '2.0',
+                  'id': 1,
+                  'method': 'getEvents',
+                  'params': {
+                      'startLedger': ledger,
+                      'filters': [],
+                      'pagination': {'limit': 100}
+                  }
+              }).encode()
+
+              try:
+                  req = urllib.request.Request(
+                      rpc_url,
+                      data=body,
+                      headers={'Content-Type': 'application/json'},
+                  )
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      result = json.loads(resp.read())
+              except Exception as e:
+                  print(f'RPC call failed for ledger {ledger}: {e}')
+                  continue
+
+              rpc_events = result.get('result', {}).get('events', [])
+              rpc_hashes = {e.get('txHash', '') for e in rpc_events}
+
+              if tx_hash not in rpc_hashes:
+                  print(f'MISMATCH: tx {tx_hash} at ledger {ledger} not found via RPC')
+                  mismatches += 1
+
+          sys.exit(mismatches)
+          " || MISMATCHES=$?
+
+          if [ "${MISMATCHES}" -gt 0 ]; then
+            echo "::error::${MISMATCHES} cross-check mismatch(es) found"
+            exit 1
+          fi
+          echo "✅ All sampled events verified against RPC"
+
+      # ── 6. Upload artefacts ───────────────────────────────────────────────
+      - name: Upload logs and metrics
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: soak-results-${{ github.run_id }}
+          path: |
+            /tmp/soak-app.log
+            /tmp/soak-metrics.txt
+          retention-days: 30
+
+      # ── 7. Open or update a GitHub Issue on failure ───────────────────────
+      - name: Report failure as GitHub Issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `[Soak Test] Nightly testnet soak failed — ${new Date().toISOString().slice(0,10)}`;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const body = [
+              '## 🔴 Nightly Testnet Soak Test Failure',
+              '',
+              `**Run:** ${runUrl}`,
+              `**Date:** ${new Date().toUTCString()}`,
+              `**Branch:** ${context.ref}`,
+              `**Commit:** ${context.sha}`,
+              '',
+              '### Failure details',
+              '',
+              'Check the [workflow run](' + runUrl + ') for full logs and the uploaded `soak-results` artifact for:',
+              '- `soak-app.log` — structured JSON application logs',
+              '- `soak-metrics.txt` — Prometheus metrics snapshot at end of run',
+              '',
+              '### Assertions checked',
+              '- Indexer lag ≤ `' + process.env.MAX_LAG_LEDGERS + '` ledgers',
+              '- At least 1 event indexed',
+              '- No unexpected ERROR log lines',
+              '- Memory growth ≤ ' + process.env.MAX_MEMORY_RATIO + 'x baseline',
+              '- Sampled events verified against direct RPC call',
+            ].join('\n');
+
+            // Search for an existing open issue with the same title prefix.
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'soak-test,automated',
+            });
+
+            const existing = issues.find(i => i.title.startsWith('[Soak Test]'));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `## New failure\n\n${body}`,
+              });
+              console.log(`Updated existing issue #${existing.number}`);
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['bug', 'soak-test', 'automated'],
+              });
+              console.log('Created new failure issue');
+            }
+        env:
+          MAX_LAG_LEDGERS: ${{ env.MAX_LAG_LEDGERS }}
+          MAX_MEMORY_RATIO: ${{ env.MAX_MEMORY_RATIO }}

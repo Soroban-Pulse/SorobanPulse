@@ -1,0 +1,21 @@
+{
+  "name": "@soroban-pulse/design-tokens",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SorobanPulse design tokens (Style Dictionary source + generated CSS/JSON/JS).",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    "./tokens.css": "./build/tokens.css",
+    "./components.css": "./components.css",
+    "./tokens.json": "./build/tokens.json",
+    "./tokens.dark.json": "./build/tokens.dark.json",
+    "./tokens.js": "./build/tokens.js"
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "style-dictionary": "^4.3.0"
+  }
+}

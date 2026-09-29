@@ -390,7 +390,7 @@ export class EventsApi extends runtime.BaseAPI {
      * ```
      */
     streamEventsSSE(options?: SSEStreamOptions): SSEStream {
-        const url = `${this.basePath}/v1/events/stream`;
+        const url = `${this.configuration.basePath}/v1/events/stream`;
         return new SSEStream(url, options);
     }
 
@@ -422,7 +422,7 @@ export class EventsApi extends runtime.BaseAPI {
                 'Required parameter "contractId" was null or undefined when calling streamEventsByContractSSE().'
             );
         }
-        const url = `${this.basePath}/v1/events/stream/multi?contract_ids=${encodeURIComponent(contractId)}`;
+        const url = `${this.configuration.basePath}/v1/events/stream/multi?contract_ids=${encodeURIComponent(contractId)}`;
         return new SSEStream(url, options);
     }
 
@@ -455,6 +455,7 @@ export class EventsApi extends runtime.BaseAPI {
             );
         }
         const ids = contractIds.map(id => encodeURIComponent(id)).join(',');
-        const url = `${this.basePath}/v1/events/stream/multi?contract_ids=${ids}`;
+        const url = `${this.configuration.basePath}/v1/events/stream/multi?contract_ids=${ids}`;
         return new SSEStream(url, options);
     }
+}

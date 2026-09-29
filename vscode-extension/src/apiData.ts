@@ -1,4 +1,4 @@
-import { ApiEndpoint, EndpointGroup } from './types';
+import { EndpointGroup } from './types';
 
 export const API_GROUPS: EndpointGroup[] = [
     {

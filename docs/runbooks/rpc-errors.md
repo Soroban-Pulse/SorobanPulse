@@ -77,3 +77,21 @@ curl -v https://soroban-testnet.stellar.org/health
 - Use multiple RPC endpoints with automatic failover
 - Implement circuit breakers to fail fast on persistent RPC errors
 - Test RPC endpoint changes in staging before production
+
+## Protocol upgrades and version mismatches
+
+SorobanPulse calls `getVersionInfo` periodically and logs `protocol_version`, `version` and
+`commit_hash`. The result is exposed as `rpc_version` on `/v1/status` and as the
+`soroban_pulse_rpc_info` Prometheus metric. Supported protocol range is defined by
+`SUPPORTED_PROTOCOL_MIN`/`MAX` in `src/rpc_meta.rs`.
+
+- WARN "RPC protocol N is outside supported range": upgrade SorobanPulse to a release that
+  supports the new protocol, or point `STELLAR_RPC_URL` at a compatible RPC.
+- Set `RPC_PROTOCOL_STRICT=true` to fail negotiation (logged as ERROR) on unsupported protocols.
+
+## Retention gaps
+
+If the checkpoint is older than the RPC's `oldestLedger`, an ERROR is logged, the
+`soroban_pulse_indexer_gap_ledgers` gauge is set, and the range is stored in `indexer_gaps`
+(visible in `/v1/status` and `GET /v1/admin/indexer/gaps`). Fill it with the backfill job
+(see `docs/backfill.md`).

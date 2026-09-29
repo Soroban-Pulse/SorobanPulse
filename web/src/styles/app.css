@@ -1,0 +1,147 @@
+/* Dashboard layout. Component styles live in design/components.css. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--sp-color-bg-canvas);
+}
+
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--sp-z-sticky);
+  background: var(--sp-color-bg-surface);
+  border-bottom: 1px solid var(--sp-color-border-default);
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.app-header__inner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-space-2) var(--sp-space-6);
+  max-width: var(--sp-size-content-max);
+  margin: 0 auto;
+  padding: 0 var(--sp-space-4);
+  min-height: 3.5rem;
+}
+.app-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-space-2);
+  color: var(--sp-color-text-primary);
+  text-decoration: none;
+  font-size: var(--sp-font-size-xl);
+  font-weight: var(--sp-font-weight-medium);
+  letter-spacing: var(--sp-font-letter-spacing-tight);
+}
+.app-brand__word b {
+  color: var(--sp-color-accent-fg);
+  font-weight: var(--sp-font-weight-bold);
+}
+.app-logo {
+  width: 28px;
+  height: 28px;
+}
+.app-logo__bg {
+  fill: var(--sp-color-brand-violet);
+}
+.app-tabs {
+  border-bottom: 0;
+  align-self: stretch;
+  align-items: stretch;
+}
+.app-header__end {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-space-3);
+}
+.app-theme {
+  width: auto;
+  height: var(--sp-size-control-sm);
+  font-size: var(--sp-font-size-sm);
+}
+
+.app-main {
+  display: grid;
+  gap: var(--sp-space-4);
+  max-width: var(--sp-size-content-max);
+  margin: 0 auto;
+  padding: var(--sp-space-6) var(--sp-space-4) var(--sp-space-12);
+}
+
+.app-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--sp-space-3);
+}
+.app-filters__contract {
+  flex: 1 1 20rem;
+}
+.app-filters__actions {
+  display: flex;
+  gap: var(--sp-space-2);
+}
+
+.app-pager {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-space-3);
+  margin-top: var(--sp-space-3);
+}
+.app-pager__label {
+  color: var(--sp-color-text-muted);
+  font-size: var(--sp-font-size-sm);
+}
+
+.app-error {
+  color: var(--sp-color-error-fg);
+}
+
+.app-settings {
+  display: grid;
+  gap: var(--sp-space-4);
+  max-width: 36rem;
+}
+.app-settings__title {
+  margin: 0;
+  font-size: var(--sp-font-size-xl);
+  font-weight: var(--sp-font-weight-semibold);
+}
+
+.app-dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--sp-space-2) var(--sp-space-4);
+  margin: 0;
+}
+.app-dl dt {
+  color: var(--sp-color-text-muted);
+}
+.app-dl dd {
+  margin: 0;
+  min-width: 0;
+}
+.app-break {
+  overflow-wrap: anywhere;
+}
+.app-drawer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-space-2);
+}
+
+@media (max-width: 40rem) {
+  .app-header__end .sp-badge {
+    display: none;
+  }
+}

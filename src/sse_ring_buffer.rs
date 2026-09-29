@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use uuid::Uuid;
 
 use crate::models::SorobanEvent;
@@ -27,7 +27,7 @@ pub struct SseRingBuffer {
 impl SseRingBuffer {
     pub fn new(capacity: usize) -> Arc<Self> {
         Arc::new(Self {
-            inner: Mutex::new(VecDeque::with_capacity(capacity.min(DEFAULT_RING_BUFFER_CAPACITY * 2))),
+            inner: Mutex::new(VecDeque::with_capacity(capacity)),
             capacity,
             overflow_count: std::sync::atomic::AtomicU64::new(0),
         })
@@ -54,7 +54,11 @@ impl SseRingBuffer {
     pub fn events_since(&self, last_id: Uuid) -> Option<Vec<SorobanEvent>> {
         let buf = self.inner.lock().expect("ring buffer lock poisoned");
         let pos = buf.iter().position(|s| s.id == last_id)?;
-        Some(buf.iter().skip(pos + 1).map(|s| s.event.clone()).collect())
+        // Clone event references outside the critical section to avoid
+        // holding the mutex while copying potentially large event data.
+        let events: Vec<SorobanEvent> = buf.iter().skip(pos + 1).map(|s| s.event.clone()).collect();
+        drop(buf);
+        Some(events)
     }
 
     pub fn len(&self) -> usize {

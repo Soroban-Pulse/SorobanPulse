@@ -57,11 +57,12 @@ export class SSEStream {
   private reconnectAttempts = 0;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private isManuallyClosed = false;
+  private fetchController: AbortController | null = null;
 
   constructor(url: string, options: SSEStreamOptions = {}) {
     this.url = url;
     this.options = {
-      apiKey: options.apiKey,
+      apiKey: options.apiKey ?? '',
       headers: options.headers || {},
       onMessage: options.onMessage || (() => {}),
       onPing: options.onPing || (() => {}),
@@ -140,7 +141,7 @@ export class SSEStream {
       });
 
     // Store controller for cleanup
-    (this as any).fetchController = controller;
+    this.fetchController = controller;
   }
 
   /**
@@ -335,10 +336,10 @@ export class SSEStream {
       this.reconnectTimer = null;
     }
 
-    const controller = (this as any).fetchController;
+    const controller = this.fetchController;
     if (controller) {
       controller.abort();
-      (this as any).fetchController = null;
+      this.fetchController = null;
     }
 
     this.reconnectAttempts = 0;
@@ -384,6 +385,6 @@ export class SSEStream {
    * Check if the stream is currently connected
    */
   isConnected(): boolean {
-    return this.eventSource !== null || (this as any).fetchController !== null;
+    return this.eventSource !== null || this.fetchController !== null;
   }
 }

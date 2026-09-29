@@ -134,6 +134,27 @@ done
 
 ---
 
+## ScVal rendering formats
+
+Event `event_data` (the `value` field and each `topic` entry) is stored as
+stellar-xdr's serde JSON. Every event endpoint (`/v1/events`, `/v1/events/{id}`,
+`/v1/events/stream` and the export endpoints) accepts a `format` query
+parameter to control how those ScVals are rendered:
+
+- `json` (default): stellar-xdr's own serde JSON representation. Unchanged
+  from before this parameter existed, for backward compatibility.
+- `native`: a friendly JSON shape — `i128`/`u128`/`i64`/`u64` are rendered as
+  strings (to avoid precision loss) and addresses as strkeys (`G...`/`C...`).
+- `xdr`: the base64-encoded raw XDR bytes for the value.
+
+```bash
+curl "http://localhost:3000/v1/events?format=native"
+curl "http://localhost:3000/v1/events?format=xdr"
+```
+
+`xdr` round-trips losslessly through `json`: decoding the stored JSON back
+into an `ScVal` and re-encoding to XDR always produces the same bytes.
+
 ## Filtering
 
 ### By contract ID

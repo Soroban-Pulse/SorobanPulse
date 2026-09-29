@@ -23,7 +23,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Database
-sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "uuid", "chrono", "json", "macros"] }
 diesel = { version = "2.1", features = ["postgres", "uuid", "chrono", "serde_json"], optional = true }
 
 # Cryptography - Classical
@@ -87,6 +87,9 @@ toml = "0.8"
 secrecy = "0.5"
 rand = "0.8"
 
+# HTTP middleware / static files (the `fs` feature is enabled by `dashboard`)
+tower-http = { version = "0.5", features = ["trace", "cors", "compression-full", "metrics", "request-id", "limit"] }
+
 # Service mesh integration
 tonic = { version = "0.10", optional = true }
 prost = { version = "0.12", optional = true }
@@ -95,17 +98,21 @@ prost = { version = "0.12", optional = true }
 rdkafka = { version = "0.36", features = ["cmake-build"], optional = true }
 google-cloud-pubsub = { version = "0.33", optional = true }
 google-cloud-googleapis = { version = "0.16", optional = true }
-url = { version = "2.5", optional = true }
+url = { version = "2.5" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 mockall = "0.12"
 wiremock = "0.6"
-insta = { version = "1.40", features = ["json"] }
+insta = "1"
 
 [features]
-default = ["classical-crypto"]
+default = ["classical-crypto", "dashboard"]
+
+# Issue #1112: serve the built web dashboard at /ui (runtime opt-in: SERVE_DASHBOARD=true).
+# Build with --no-default-features --features classical-crypto to drop it.
+dashboard = ["tower-http/fs"]
 
 # Cryptography features
 classical-crypto = []
@@ -127,8 +134,23 @@ full-observability = ["tracing-opentelemetry", "opentelemetry-jaeger"]
 
 # Messaging integrations
 kafka = ["dep:rdkafka"]
-sqs = ["dep:url"]
+sqs = []
 pubsub = ["dep:google-cloud-pubsub", "dep:google-cloud-googleapis"]
+
+[lints.clippy]
+# Lint policy — replaces the crate-level #![deny]/#![allow] that used to live
+# in src/main.rs. Keeping it here makes the configuration visible and applies
+# consistently to both the library and binary targets.
+all = "deny"
+pedantic = "deny"
+# AppError, AppState, etc. — repeating the module name is idiomatic in Rust.
+module_name_repetitions = "allow"
+# Internal service; these are not public library APIs.
+missing_errors_doc = "allow"
+# Panics only occur on misconfiguration at startup.
+missing_panics_doc = "allow"
+# Used sparingly in test modules only.
+wildcard_imports = "allow"
 
 [profile.release]
 opt-level = 3

@@ -1,0 +1,43 @@
+# .lycheeignore
+#
+# Patterns for links that lychee should skip entirely.
+# Uses the same glob/regex syntax as .gitignore — each line is a pattern.
+#
+# Add a comment after the pattern to explain *why* it is excluded.
+
+# ── Localhost / development ───────────────────────────────────────────────────
+http://localhost:*
+http://127.0.0.1:*
+http://0.0.0.0:*
+
+# ── GitHub — frequently rate-limited in CI (HTTP 429) ────────────────────────
+# Anchors on GitHub rendered Markdown are not stable / resolvable.
+https://github.com/*/*/blob/*/*#*
+https://github.com/*/*/tree/*/*
+
+# ── Example / placeholder domains used in documentation ──────────────────────
+https://your-domain.example.com
+https://example.com
+https://my-instance.example.com
+https://soroban-pulse.example.com
+
+# ── Stellar network endpoints — may be unreachable from CI ───────────────────
+https://soroban-testnet.stellar.org
+https://horizon-testnet.stellar.org
+https://horizon.stellar.org
+https://rpc-futurenet.stellar.org
+
+# ── Internal docs anchor links — checked by Docusaurus build instead ─────────
+# (Docusaurus throws on broken markdown links when onBrokenLinks = 'throw')
+#/docs/*
+#/guides/*
+
+# ── crates.io / docs.rs — occasionally flaky in CI ───────────────────────────
+https://crates.io/crates/*
+https://docs.rs/*
+
+# ── CDN / unpkg — used in api-reference.tsx, not a real docs page ────────────
+https://unpkg.com/*
+
+# ── Known redirects that are intentionally not updated ───────────────────────
+# (Add specific URLs here as needed rather than broad patterns)

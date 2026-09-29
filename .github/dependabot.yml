@@ -1,5 +1,6 @@
 version: 2
 updates:
+  # Keep Cargo dependencies up to date
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
@@ -7,6 +8,8 @@ updates:
     labels:
       - "dependencies"
       - "rust"
+
+  # Keep Docker base images up to date
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -14,3 +17,16 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+
+  # Keep GitHub Actions pinned SHAs current.
+  # Dependabot will open PRs to update the SHA comment and the pinned hash
+  # whenever an action cuts a new release, so pins never go stale.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "ci"

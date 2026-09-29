@@ -106,6 +106,53 @@ impl IndexerState {
     }
 }
 
+/// Deployment role — controls which subsystems start on this instance.
+///
+/// | Value      | Starts indexer? | Starts HTTP server? |
+/// |------------|-----------------|---------------------|
+/// | `All`      | ✓               | ✓ (default)         |
+/// | `Api`      | ✗               | ✓                   |
+/// | `Indexer`  | ✓               | ✓ (health + metrics only) |
+///
+/// Set via `ROLE=all|api|indexer`.  The default (`all`) preserves
+/// backward-compatible behaviour — a single pod runs everything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// Run both the indexer and the full HTTP server (default).
+    All,
+    /// Run only the HTTP API server; skip indexer startup entirely.
+    Api,
+    /// Run only the indexer; expose a minimal HTTP server for health/metrics.
+    Indexer,
+}
+
+impl Role {
+    fn from_str(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "api" => Self::Api,
+            "indexer" => Self::Indexer,
+            _ => Self::All,
+        }
+    }
+
+    /// Returns `true` when the indexer background task should be spawned.
+    pub fn runs_indexer(&self) -> bool {
+        matches!(self, Self::All | Self::Indexer)
+    }
+
+    /// Returns `true` when the full Axum HTTP server should bind.
+    /// Even the `Indexer` role binds a minimal server for health/metrics.
+    pub fn runs_http_server(&self) -> bool {
+        true
+    }
+
+    /// Returns `true` when all API routes should be registered.
+    /// The `Indexer` role only registers health + metrics routes.
+    pub fn runs_full_api(&self) -> bool {
+        matches!(self, Self::All | Self::Api)
+    }
+}
+
 /// Deployment environment — controls strictness of defaults.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Environment {
@@ -260,6 +307,11 @@ pub struct Config {
     pub event_data_encryption_key: Option<[u8; 32]>,
     /// Previous encryption key for rotation
     pub event_data_encryption_key_old: Option<[u8; 32]>,
+    /// AES-GCM key for integration credentials (Issue #1162), separate from
+    /// the event_data key (32 bytes, hex-encoded)
+    pub integration_encryption_key: Option<[u8; 32]>,
+    /// Previous integration credential key for rotation
+    pub integration_encryption_key_old: Option<[u8; 32]>,
     /// How often the index usage monitor runs (hours)
     pub index_check_interval_hours: u64,
     /// Health check timeout in milliseconds
@@ -448,6 +500,18 @@ pub struct Config {
     /// Disabled by default. Set ENABLE_PUSH_PRELOAD=true to opt in.
     pub enable_push_preload: bool,
 
+    // Issue #1112: built-in web dashboard
+    /// Serve the web dashboard (web/dist) at /ui. Requires the `dashboard`
+    /// cargo feature. Set SERVE_DASHBOARD=true to opt in.
+    pub serve_dashboard: bool,
+    /// Directory containing the built dashboard (index.html + assets/).
+    /// Defaults to `web/dist`. Set via DASHBOARD_DIR.
+    pub dashboard_dir: String,
+    /// Extra origins the dashboard may call, appended to the `connect-src`
+    /// directive of its Content-Security-Policy (comma-separated
+    /// DASHBOARD_CONNECT_SRC). Same-origin API calls are always allowed.
+    pub dashboard_connect_src: Vec<String>,
+
     // Issue #705: Kafka event publishing
     /// Comma-separated list of Kafka broker addresses (e.g., "localhost:9092,localhost:9093").
     /// When set, events are published to Kafka topic specified by kafka_topic.
@@ -486,6 +550,10 @@ pub struct Config {
     pub ml_confidence_threshold: f64,
     /// Enable automatic model retraining
     pub ml_auto_retrain: bool,
+
+    /// Deployment role: controls which subsystems start on this instance.
+    /// Set via `ROLE=all|api|indexer`. Default: `all` (backward-compatible).
+    pub role: Role,
 }
 
 impl Default for Config {
@@ -536,6 +604,8 @@ impl Default for Config {
             indexer_event_types: Vec::new(),
             event_data_encryption_key: None,
             event_data_encryption_key_old: None,
+            integration_encryption_key: None,
+            integration_encryption_key_old: None,
             index_check_interval_hours: 24,
             health_check_timeout_ms: 2000,
             tls_cert_file: None,
@@ -642,6 +712,9 @@ impl Default for Config {
             query_cache_ttl_secs: crate::query_cache::DEFAULT_TTL_SECS,
             query_cache_max_capacity: crate::query_cache::DEFAULT_MAX_CAPACITY,
             enable_push_preload: false,
+            serve_dashboard: false,
+            dashboard_dir: "web/dist".to_string(),
+            dashboard_connect_src: Vec::new(),
             kafka_brokers: None,
             kafka_topic: None,
             kafka_batch_size: 16384,
@@ -658,6 +731,7 @@ impl Default for Config {
             ml_min_training_samples: 100,
             ml_confidence_threshold: 0.8,
             ml_auto_retrain: true,
+            role: Role::All,
         }
     }
 }
@@ -957,7 +1031,59 @@ fn parse_tenant_contract_filter() -> std::collections::HashMap<String, Vec<Strin
     map
 }
 
+/// One network to run a concurrent indexer worker against (Issue #1063).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkTarget {
+    pub chain_id: String,
+    pub rpc_url: String,
+}
+
 impl Config {
+    /// Resolve the set of networks this deployment should index concurrently
+    /// (Issue #1063). The primary network is always `chain_id` /
+    /// `stellar_rpc_url`. Each entry in `additional_chain_ids` becomes a
+    /// second worker, with its RPC URL taken from the
+    /// `STELLAR_RPC_URL_<CHAIN_ID>` environment variable (chain id
+    /// upper-cased, non-alphanumeric characters replaced with `_`) — e.g.
+    /// `ADDITIONAL_CHAIN_IDS=testnet` reads `STELLAR_RPC_URL_TESTNET`.
+    /// An additional chain id with no matching RPC URL is skipped with a
+    /// warning rather than aborting the whole deployment.
+    pub fn network_targets(&self) -> Vec<NetworkTarget> {
+        let mut targets = vec![NetworkTarget {
+            chain_id: self.chain_id.clone(),
+            rpc_url: self.stellar_rpc_url.clone(),
+        }];
+        for chain_id in &self.additional_chain_ids {
+            if chain_id == &self.chain_id {
+                continue; // already the primary network
+            }
+            let env_key = format!(
+                "STELLAR_RPC_URL_{}",
+                chain_id
+                    .to_ascii_uppercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect::<String>()
+            );
+            match std::env::var(&env_key) {
+                Ok(rpc_url) if !rpc_url.trim().is_empty() => {
+                    targets.push(NetworkTarget {
+                        chain_id: chain_id.clone(),
+                        rpc_url,
+                    });
+                }
+                _ => {
+                    tracing::warn!(
+                        chain_id = %chain_id,
+                        env_key = %env_key,
+                        "additional chain_id has no RPC URL configured; skipping this network"
+                    );
+                }
+            }
+        }
+        targets
+    }
+
     /// Returns the DATABASE_URL with credentials stripped — safe to log.
     pub fn safe_db_url(&self) -> String {
         Url::parse(&self.database_url)
@@ -1337,6 +1463,12 @@ impl Config {
         let event_data_encryption_key_old = env_or_file("EVENT_DATA_ENCRYPTION_KEY_OLD", &file)
             .and_then(|v| parse_hex_key_checked("EVENT_DATA_ENCRYPTION_KEY_OLD", &v, &mut errors));
 
+        let integration_encryption_key = env_or_file("INTEGRATION_ENCRYPTION_KEY", &file)
+            .and_then(|v| parse_hex_key_checked("INTEGRATION_ENCRYPTION_KEY", &v, &mut errors));
+
+        let integration_encryption_key_old = env_or_file("INTEGRATION_ENCRYPTION_KEY_OLD", &file)
+            .and_then(|v| parse_hex_key_checked("INTEGRATION_ENCRYPTION_KEY_OLD", &v, &mut errors));
+
         let rpc_headers = parse_rpc_headers_checked(&mut errors);
         let indexer_event_types = parse_indexer_event_types_checked(&mut errors);
 
@@ -1433,6 +1565,8 @@ impl Config {
             indexer_event_types,
             event_data_encryption_key,
             event_data_encryption_key_old,
+            integration_encryption_key,
+            integration_encryption_key_old,
             index_check_interval_hours,
             health_check_timeout_ms,
             tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),
@@ -1718,6 +1852,18 @@ impl Config {
             enable_push_preload: env_or_file("ENABLE_PUSH_PRELOAD", &file)
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
                 .unwrap_or(false),
+            serve_dashboard: env_or_file("SERVE_DASHBOARD", &file)
+                .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes"))
+                .unwrap_or(false),
+            dashboard_dir: env_or_file_or("DASHBOARD_DIR", &file, "web/dist"),
+            dashboard_connect_src: env_or_file("DASHBOARD_CONNECT_SRC", &file)
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             // Issue #705: Kafka event publishing
             kafka_brokers: env_or_file("KAFKA_BROKERS", &file),
             kafka_topic: env_or_file("KAFKA_TOPIC", &file),
@@ -1759,6 +1905,7 @@ impl Config {
             ml_auto_retrain: env_or_file("ML_AUTO_RETRAIN", &file)
                 .map(|v| matches!(v.to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "y"))
                 .unwrap_or(true),
+            role: Role::from_str(&env_or_file_or("ROLE", &file, "all")),
         }
     }
 }

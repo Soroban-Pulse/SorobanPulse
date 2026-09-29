@@ -5,6 +5,10 @@ on:
     - cron: '0 3 * * *'  # Daily at 03:00 UTC
   workflow_dispatch:
 
+# Minimal default permissions.
+permissions:
+  contents: read
+
 jobs:
   backup-restore-test:
     name: Backup restore integrity test
@@ -46,7 +50,7 @@ jobs:
       BACKUP_ENCRYPTION_KEY: ci-test-key-12345
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y gnupg postgresql-client
@@ -152,7 +156,7 @@ jobs:
 
       - name: Upload backup quality report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: backup-quality-report
           retention-days: 30

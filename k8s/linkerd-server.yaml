@@ -26,27 +26,40 @@ metadata:
 spec:
   server:
     name: soroban-pulse-http
+  # `client` is a single object, so the three meshTLS identities share one
+  # list and unauthenticated access is a separate ServerAuthorization below.
   client:
-    # Allow traffic from ingress
     meshTLS:
       serviceAccounts:
+      # Allow traffic from ingress
       - name: linkerd-proxy
         namespace: linkerd
-    # Allow traffic from prometheus for metrics scraping
-    - meshTLS:
-        serviceAccounts:
-        - name: prometheus
-          namespace: monitoring
-    # Allow authenticated traffic from other services
-    - meshTLS:
-        serviceAccounts:
-        - name: soroban-pulse
-          namespace: default
+      # Allow traffic from prometheus for metrics scraping
+      - name: prometheus
+        namespace: monitoring
+      # Allow authenticated traffic from other services
+      - name: soroban-pulse
+        namespace: default
+
+---
+apiVersion: policy.linkerd.io/v1alpha1
+kind: ServerAuthorization
+metadata:
+  name: soroban-pulse-authz-unauthenticated
+  namespace: default
+  labels:
+    app: soroban-pulse
+    component: service-mesh
+spec:
+  server:
+    name: soroban-pulse-http
+  client:
     # Allow unauthenticated traffic for health checks
     unauthenticated: true
 
 ---
-apiVersion: policy.linkerd.io/v1beta1
+# v1beta3 is the first policy.linkerd.io HTTPRoute version with `timeouts`.
+apiVersion: policy.linkerd.io/v1beta3
 kind: HTTPRoute
 metadata:
   name: soroban-pulse-routes

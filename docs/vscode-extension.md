@@ -29,6 +29,15 @@ Request Tester reads from secure storage first and falls back to the
 has been saved that way — existing configs keep working, but new users
 should prefer the commands. See `src/apiKeyManager.ts`.
 
+### Migration from plaintext settings
+
+On activation the extension checks the user and workspace scopes for
+`sorobanpulse.apiKey` / `sorobanpulse.adminApiKey`. Each value found is
+copied into `SecretStorage` (unless a key was already saved there, which
+wins) and the setting is removed from every scope that defined it, with a
+one-time notification. After that first activation `settings.json` holds no
+key material. See `src/keyMigration.ts`.
+
 ## Testing a webhook
 
 **Soroban Pulse: Test Webhook** (also available as the radio-tower icon in
@@ -57,3 +66,14 @@ configured `sorobanpulse.baseUrl` and does not require an API key.
 | `sorobanpulse.apiKey` | `""` | Legacy fallback — prefer **Set API Key**. |
 | `sorobanpulse.adminApiKey` | `""` | Legacy fallback — prefer **Set Admin API Key**. |
 | `sorobanpulse.timeoutMs` | `10000` | Request timeout for both the Request Tester and Test Webhook. |
+
+## Contract ID hover
+
+Hovering a 56-character contract ID (`C` followed by 55 base32 characters)
+in Rust, TypeScript, JavaScript or JSON files shows its summary from
+`GET /v1/contracts/{contract_id}/summary`: total events, last seen ledger
+(`ledger_range.max`) and last event time. Responses are cached for 30
+seconds (the cache is dropped when any `sorobanpulse.*` setting changes).
+Unknown contracts, non-200 responses, timeouts (3 s) and an unreachable
+server show no hover. The cache and rendering live in `src/contractHover.ts`
+(unit tested, `npm test`); the provider is in `src/contractHoverProvider.ts`.

@@ -1,3 +1,5 @@
+{{- if not .Values.splitMode }}
+{{/* ── COMBINED MODE: single PDB ───────────────────────────────────────── */}}
 {{- if .Values.podDisruptionBudget.enabled }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
@@ -10,4 +12,39 @@ spec:
   selector:
     matchLabels:
       {{- include "soroban-pulse.selectorLabels" . | nindent 6 }}
+{{- end }}
+
+{{- else }}
+{{/* ── SPLIT MODE: separate PDBs for api and indexer ─────────────────── */}}
+{{- if .Values.api.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}-api-pdb
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  minAvailable: {{ .Values.api.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "soroban-pulse.apiSelectorLabels" . | nindent 6 }}
+{{- end }}
+{{- if .Values.indexer.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "soroban-pulse.fullname" . }}-indexer-pdb
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  # Keep at least 1 indexer pod running during node maintenance so the
+  # advisory lock is always held by some pod.
+  minAvailable: {{ .Values.indexer.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "soroban-pulse.indexerSelectorLabels" . | nindent 6 }}
+{{- end }}
 {{- end }}

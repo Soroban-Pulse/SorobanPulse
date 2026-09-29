@@ -1,0 +1,39 @@
+name: Release Please
+
+# release-please inspects the commit history of `main` (using Conventional
+# Commits) and opens/updates a "Release PR" that bumps the version, writes
+# CHANGELOG.md entries, and sets the `version` field in Cargo.toml and the
+# `appVersion` field in the Helm chart (via extra-files in the config).
+#
+# When that PR is merged, release-please creates a GitHub Release and pushes
+# a semver tag (e.g. v1.2.3).  The `release.yml` workflow is then triggered
+# by that tag and builds the multi-arch images, binaries, and SBOMs.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write        # create tags and releases
+  pull-requests: write   # open / update the release PR
+
+jobs:
+  release-please:
+    name: Open / Update Release PR
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name:        ${{ steps.rp.outputs.tag_name }}
+      version:         ${{ steps.rp.outputs.version }}
+      upload_url:      ${{ steps.rp.outputs.upload_url }}
+    steps:
+      - name: Run release-please
+        id: rp
+        uses: googleapis/release-please-action@a02a34c4d625b9a2a61bf37e16e6fd0aff5bfb8e # v4
+        with:
+          # Uses .release-please-config.json and .release-please-manifest.json
+          # from the root of the repository (no additional config needed here).
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json
+          token: ${{ secrets.GITHUB_TOKEN }}

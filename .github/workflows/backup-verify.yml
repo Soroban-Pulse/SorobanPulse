@@ -5,6 +5,10 @@ on:
     - cron: '0 2 * * 0'  # Weekly on Sunday at 02:00 UTC
   workflow_dispatch:
 
+# Minimal default permissions.
+permissions:
+  contents: read
+
 jobs:
   verify-backup:
     name: Verify backup and restore integrity
@@ -46,7 +50,7 @@ jobs:
       BACKUP_ENCRYPTION_KEY: test-encryption-key-12345
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install GPG
         run: sudo apt-get update && sudo apt-get install -y gnupg

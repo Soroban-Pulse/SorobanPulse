@@ -34,6 +34,27 @@ pub trait RpcClient: Send + Sync {
 /// Postgres advisory lock key for the indexer singleton.
 const INDEXER_LOCK_KEY: i64 = 0x536f726f62616e50; // "SorobanP"
 
+/// Derive a per-network advisory lock key (Issue #1063) so that concurrent
+/// indexer workers for different networks (e.g. testnet and mainnet) don't
+/// contend for the same singleton lock. The primary network (whatever
+/// `CHAIN_ID` is set to) keeps the original constant so single-network
+/// deployments upgrading to this version don't lose their lock continuity;
+/// every other chain_id gets a distinct derived key.
+fn lock_key_for_chain(chain_id: &str) -> i64 {
+    if chain_id == "mainnet" {
+        return INDEXER_LOCK_KEY;
+    }
+    // FNV-1a over the chain_id, folded into a non-zero i64. Advisory lock
+    // keys just need to be stable and (very likely) distinct per network —
+    // they are not used cryptographically.
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in chain_id.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash as i64) ^ INDEXER_LOCK_KEY
+}
+
 #[derive(Debug, thiserror::Error)]
 enum IndexerFetchError {
     #[error("{0}")]
@@ -427,6 +448,10 @@ impl<R: RpcClient> Indexer<R> {
         let mut interval = tokio::time::interval(retry_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let lock_wait_start = std::time::Instant::now();
+        // Issue #1063: each network's indexer worker takes its own advisory
+        // lock key, so testnet/mainnet/etc. can each have a leader running
+        // concurrently instead of contending for one global lock.
+        let lock_key = lock_key_for_chain(&self.config.chain_id);
 
         loop {
             // Respect shutdown signal while waiting to acquire the lock.
@@ -443,14 +468,14 @@ impl<R: RpcClient> Indexer<R> {
             }
 
             let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-                .bind(INDEXER_LOCK_KEY)
+                .bind(lock_key)
                 .fetch_one(&self.pool)
                 .await
                 .unwrap_or(false);
 
             if acquired {
                 info!(
-                    lock_key = INDEXER_LOCK_KEY,
+                    lock_key = lock_key,
                     "Indexer lock acquired, starting indexing"
                 );
                 if let Some(ref s) = self.indexer_state {
@@ -465,7 +490,7 @@ impl<R: RpcClient> Indexer<R> {
             let lock_holder_pid: Option<i32> = sqlx::query_scalar(
                 "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND objid = $1 LIMIT 1"
             )
-            .bind(INDEXER_LOCK_KEY as i32)
+            .bind(lock_key as i32)
             .fetch_optional(&self.pool)
             .await
             .ok()
@@ -475,7 +500,7 @@ impl<R: RpcClient> Indexer<R> {
             metrics::update_indexer_lock_wait_duration(lock_wait_secs);
 
             warn!(
-                lock_key = INDEXER_LOCK_KEY,
+                lock_key = lock_key,
                 lock_holder_pid = lock_holder_pid,
                 retry_secs = self.config.indexer_lock_retry_secs,
                 wait_secs = lock_wait_secs,
@@ -497,7 +522,7 @@ impl<R: RpcClient> Indexer<R> {
 
         // Explicitly release the advisory lock on graceful shutdown.
         let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(INDEXER_LOCK_KEY)
+            .bind(lock_key)
             .execute(&self.pool)
             .await;
         metrics::record_indexer_is_leader(false);
@@ -509,6 +534,13 @@ impl<R: RpcClient> Indexer<R> {
     }
 
     async fn run_loop(&self) {
+        crate::resources::spawn_sync(self.pool.clone(), self.config.stellar_rpc_url.clone());
+        crate::rpc_meta::spawn_monitor(
+            self.pool.clone(),
+            self.config.stellar_rpc_url.clone(),
+            self.indexer_state.clone(),
+            self.config.start_ledger,
+        );
         let mut current_ledger = self.config.start_ledger;
         let mut consecutive_db_errors = 0u32;
         let mut rpc_backoff_ms = 1000u64; // Start with 1 second backoff
@@ -600,6 +632,7 @@ impl<R: RpcClient> Indexer<R> {
                             let lag = result.latest_ledger - current_ledger;
                             metrics::update_indexer_lag(lag);
                             metrics::record_indexer_lag_observation(lag);
+                            metrics::update_network_indexer_lag(&self.config.chain_id, lag);
 
                             // Warn if lag exceeds threshold
                             if lag > self.config.indexer_lag_warn_threshold {
@@ -619,6 +652,7 @@ impl<R: RpcClient> Indexer<R> {
                             let lag = latest.saturating_sub(current_ledger);
                             metrics::update_indexer_lag(lag);
                             metrics::record_indexer_lag_observation(lag);
+                            metrics::update_network_indexer_lag(&self.config.chain_id, lag);
                         }
                         sleep(Duration::from_millis(self.config.indexer_poll_interval_ms)).await;
                     }
@@ -1094,22 +1128,17 @@ impl<R: RpcClient> Indexer<R> {
         };
 
         // RETURNING (xmax = 0) distinguishes a true INSERT (xmax=0) from an UPDATE (xmax≠0).
-        let inserted: bool = sqlx::query_scalar(
-            r#"
-            INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, schema_version)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            ON CONFLICT (tx_hash, contract_id, event_type)
-            DO UPDATE SET event_data = events.event_data || EXCLUDED.event_data
-            RETURNING (xmax = 0)
-            "#,
+        // query_scalar! gives compile-time SQL verification via the .sqlx offline cache.
+        let inserted: bool = sqlx::query_scalar!(
+            "INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, schema_version)\nVALUES ($1, $2, $3, $4, $5, $6, $7)\nON CONFLICT (tx_hash, contract_id, event_type)\nDO UPDATE SET event_data = events.event_data || EXCLUDED.event_data\nRETURNING (xmax = 0)",
+            &event.contract_id as &str,
+            event.event_type.to_string() as String,
+            &event.tx_hash as &str,
+            ledger,
+            timestamp,
+            event_data,
+            schema_version,
         )
-        .bind(&event.contract_id)
-        .bind(&event.event_type)
-        .bind(&event.tx_hash)
-        .bind(ledger)
-        .bind(timestamp)
-        .bind(event_data)
-        .bind(schema_version)
         .fetch_one(&self.pool)
         .await?;
 
@@ -1237,9 +1266,20 @@ impl<R: RpcClient> Indexer<R> {
         // Issue #609: stamp chain_id on every inserted event.
         let chain_id = &self.config.chain_id;
 
+        // Issue #1065: decode the RPC event id (TOID + event index) into
+        // deterministic (tx_index, op_index, event_index) columns so that
+        // ordering within a ledger is stable across re-indexing/replicas.
+        let ordinal = event
+            .rpc_id
+            .as_deref()
+            .and_then(crate::toid::parse_event_id);
+        let tx_index = ordinal.map(|o| o.tx_index);
+        let op_index = ordinal.map(|o| o.op_index);
+        let event_index = ordinal.map(|o| o.event_index);
+
         let result = sqlx::query(
-            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, ledger_hash, in_successful_call, event_data_decoded, tenant_id, fingerprint, event_data_compressed, compression_algo, chain_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            r#"INSERT INTO events (contract_id, event_type, tx_hash, ledger, timestamp, event_data, ledger_hash, in_successful_call, event_data_decoded, tenant_id, fingerprint, event_data_compressed, compression_algo, chain_id, tx_index, op_index, event_index)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
                ON CONFLICT (tx_hash, contract_id, event_type) DO NOTHING"#,
         )
         .bind(&event.contract_id)
@@ -1256,6 +1296,9 @@ impl<R: RpcClient> Indexer<R> {
         .bind(compressed_bytes.as_deref())
         .bind(compression_algo)
         .bind(chain_id)
+        .bind(tx_index)
+        .bind(op_index)
+        .bind(event_index)
         .execute(&mut **tx)
         .await?;
 
@@ -1519,6 +1562,8 @@ mod tests {
                 indexer_event_types: Vec::new(),
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
+                integration_encryption_key: None,
+                integration_encryption_key_old: None,
                 index_check_interval_hours: 24,
                 health_check_timeout_ms: 2000,
                 tls_cert_file: None,
@@ -1789,6 +1834,8 @@ mod tests {
                 indexer_event_types: Vec::new(),
                 event_data_encryption_key: None,
                 event_data_encryption_key_old: None,
+                integration_encryption_key: None,
+                integration_encryption_key_old: None,
                 index_check_interval_hours: 24,
                 health_check_timeout_ms: 2000,
                 tls_cert_file: None,

@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { describeMigration, LegacySettings, migrateLegacyKeys } from './keyMigration';
 
 // ---------------------------------------------------------------------------
 // API key management — Issue #963
@@ -63,4 +64,37 @@ export async function clearApiKeys(context: vscode.ExtensionContext): Promise<vo
     await context.secrets.delete(SECRET_KEY_API);
     await context.secrets.delete(SECRET_KEY_ADMIN);
     vscode.window.showInformationMessage('Soroban Pulse API keys cleared from secure storage.');
+}
+
+// Issue #1123: move plaintext keys out of settings.json on activation.
+// The settings are window-scoped, so only the user and workspace scopes can
+// hold a value; clear whichever ones do.
+function vscodeLegacySettings(): LegacySettings {
+    const section = () => vscode.workspace.getConfiguration('sorobanpulse');
+    return {
+        read(setting: string): string {
+            const info = section().inspect<string>(setting);
+            return info?.workspaceValue || info?.globalValue || '';
+        },
+        async clear(setting: string): Promise<void> {
+            const info = section().inspect<string>(setting);
+            if (info?.workspaceValue !== undefined) {
+                await section().update(setting, undefined, vscode.ConfigurationTarget.Workspace);
+            }
+            if (info?.globalValue !== undefined) {
+                await section().update(setting, undefined, vscode.ConfigurationTarget.Global);
+            }
+        },
+    };
+}
+
+export async function migrateLegacyApiKeys(context: vscode.ExtensionContext): Promise<void> {
+    try {
+        const result = await migrateLegacyKeys(context.secrets, vscodeLegacySettings());
+        const message = describeMigration(result);
+        if (message) { vscode.window.showInformationMessage(message); }
+    } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        vscode.window.showWarningMessage(`Soroban Pulse could not migrate API keys to secure storage: ${reason}`);
+    }
 }

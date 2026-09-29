@@ -1,0 +1,61 @@
+{
+  "method": "getEvents",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "getEvents",
+    "params": {
+      "startLedger": 4000000,
+      "filters": [],
+      "pagination": { "limit": 100 }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "events": [
+        {
+          "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+          "type": "contract",
+          "txHash": "ab00000000000000000000000000000000000000000000000000000000000001",
+          "ledger": 4000000,
+          "ledgerClosedAt": "2026-06-01T00:00:00Z",
+          "value": { "xdr": "AAAABQAAAAA=" },
+          "topic": [{ "xdr": "AAAADwAAAAh0cmFuc2Zlcg==" }],
+          "id": "4000000-0",
+          "unknownFieldAddedInProtocol22": "some-opaque-value",
+          "anotherNewField": { "nested": true, "version": 22 }
+        },
+        {
+          "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+          "type": "contract",
+          "txHash": "ab00000000000000000000000000000000000000000000000000000000000002",
+          "ledger": 4000001,
+          "ledgerClosedAt": "2026-06-01T00:00:05Z",
+          "value": { "xdr": "AAAABQAAAAE=" },
+          "topic": [{ "xdr": "AAAADwAAAAh0cmFuc2Zlcg==" }],
+          "id": "4000001-0",
+          "unknownFieldAddedInProtocol22": "another-opaque-value",
+          "anotherNewField": { "nested": false, "version": 22 }
+        },
+        {
+          "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+          "type": "diagnostic",
+          "txHash": "ab00000000000000000000000000000000000000000000000000000000000003",
+          "ledger": 4000002,
+          "ledgerClosedAt": "2026-06-01T00:00:10Z",
+          "value": { "xdr": "AAAABQAAAAI=" },
+          "topic": [{ "xdr": "AAAADwAAAAhkaWFnbm9zdA==" }],
+          "id": "4000002-0",
+          "unknownFieldAddedInProtocol22": "diagnostic-opaque",
+          "anotherNewField": null
+        }
+      ],
+      "latestLedger": 4000100,
+      "cursor": "4000002-0",
+      "_protocolVersion": 22,
+      "_newMetaField": "ignored-by-older-indexers"
+    }
+  }
+}

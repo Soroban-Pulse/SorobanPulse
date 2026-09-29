@@ -93,8 +93,9 @@ spec:
         host: soroban-pulse-service
         port:
           number: 8080
+    # No timeout for long-lived connections. Istio upgrades WebSocket
+    # connections automatically; `websocketUpgrade` is no longer an API field.
     timeout: 0s
-    websocketUpgrade: true
 
   # Fault injection for chaos testing (disabled by default)
   # - match:

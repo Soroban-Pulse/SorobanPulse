@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-labelledby="title desc">
+  <title id="title">Soroban Pulse</title>
+  <desc id="desc">Soroban smart contract event indexer and real-time API for the Stellar network</desc>
+  <defs>
+    <linearGradient id="pulse" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#3b82f6" stop-opacity="0"/>
+      <stop offset="0.35" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#0d9488"/>
+    </linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" fill="none" stroke="#e2e8f0" stroke-width="1"/>
+    </pattern>
+  </defs>
+  <rect width="1280" height="320" rx="16" fill="#f8fafc"/>
+  <rect width="1280" height="320" rx="16" fill="url(#grid)"/>
+  <polyline points="0,240 990,240 1020,284 1070,64 1120,296 1150,240 1280,240" fill="none" stroke="url(#pulse)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <g transform="translate(96 72)">
+    <rect width="72" height="72" rx="16" fill="#3b82f6"/>
+    <polyline points="62 36 50 36 41 63 23 9 14 36 2 36" transform="translate(4 0)" fill="none" stroke="#f8fafc" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="196" y="118" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="56" font-weight="700" fill="#0f172a">Soroban Pulse</text>
+  <text x="198" y="162" font-family="Inter, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" fill="#475569">Index Soroban contract events. Query, stream and react in real time.</text>
+</svg>

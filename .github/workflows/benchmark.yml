@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# Minimal default permissions.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   DATABASE_URL: postgres://postgres:postgres@localhost/soroban_pulse_test
@@ -27,9 +31,9 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
 
@@ -39,7 +43,7 @@ jobs:
       # real to compare against; a cold cache just means the first run of the day
       # reports absolute numbers only (no regression to compare against yet).
       - name: Restore benchmark baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target/criterion
           key: criterion-baseline-${{ github.sha }}
@@ -78,7 +82,7 @@ jobs:
       # never against another PR's (possibly regressed) results.
       - name: Save benchmark baseline
         if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: target/criterion
           key: criterion-baseline-${{ github.sha }}

@@ -1,0 +1,45 @@
+name: Migrations
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "migrations/**"
+      - "scripts/migration-roundtrip.sh"
+      - ".github/workflows/migrations.yml"
+  pull_request:
+    paths:
+      - "migrations/**"
+      - "scripts/migration-roundtrip.sh"
+      - ".github/workflows/migrations.yml"
+
+concurrency:
+  group: migrations-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  roundtrip:
+    name: Migration Round Trip
+    runs-on: ubuntu-latest
+    services:
+      # Keep the major version in step with the runner's pg_dump client.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - run: pg_dump --version
+      - run: bash scripts/migration-roundtrip.sh migrations

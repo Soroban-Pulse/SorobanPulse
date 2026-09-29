@@ -1,15 +1,9 @@
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(
-    clippy::module_name_repetitions, // e.g. AppError, AppState — idiomatic in Rust
-    clippy::missing_errors_doc,      // internal handlers; not a public library
-    clippy::missing_panics_doc,      // panics only on misconfiguration at startup
-    clippy::wildcard_imports,        // used sparingly in test modules only
-)]
 mod audit_logging;
 mod bloom_filter;
 mod compliance_report;
 mod compression_config;
 mod config;
+mod dashboard;
 mod config_validation;
 mod content_filter;
 mod cross_chain_correlation;
@@ -43,46 +37,13 @@ mod models;
 mod normalizer;
 mod notification_dedup;
 
+use soroban_pulse::{audit_logging, bloom_filter, compliance_report, compression_config, config, config_validation, content_filter, cross_chain_correlation, cursor_expiry_handler, db, advisory_lock, query_streaming, serialization_cache, streaming_response, dedup, distributed_tracing, email, encryption, error, event_hubs, graceful_shutdown, handlers, idempotency, log_analysis_tool, index_monitor, indexer, kafka, kinesis, metrics, prometheus_remote_write, eventbridge, middleware, models, normalizer, notification_dedup, warehouse, pruner, pubsub, queue_publisher, rate_limiter, reencrypt, resource_metrics, routes, rpc_client, schema_validator, sqs, stats_refresh, subscriptions, webhook, webhook_verification, notification_rate_limit, notification_formatter, pagerduty, github, discord, slack, teams, telegram, notification_channel, notification_delivery, integration_handlers, retry_policy, sms, aggregation, saved_queries, abi, oncall, xdr_validation, replica_monitor, feature_flags, event_dedup_replicas, bulk_export, sse_ring_buffer, query_cache, query_plan_cache, query_optimizer, partition_manager, query_builder, adaptive_pool, notification_admin, financial_accuracy, webhook_template, event_aggregation, anomaly_detection, push_notification, connection_pool, slo_tracker, anonymization, event_compression, health_check, ledger_hashes, networks, zero_trust, pool_management, push_preload, statistics_management, cloud_provider, cloud_replication, deployment_orchestrator};
+#[cfg(feature = "lua")]
+use soroban_pulse::lua_transform;
 #[cfg(feature = "parquet")]
-mod parquet_export;
-mod warehouse;
-
-mod pruner;
-mod pubsub;
-mod queue_publisher;
-mod rate_limiter;
-mod reencrypt;
-mod resource_metrics;
-mod routes;
-mod rpc_client;
-mod schema_validator;
-mod sqs;
-mod stats_refresh;
-mod subscriptions;
-mod webhook;
-mod webhook_verification;
-mod notification_rate_limit;
-mod notification_formatter;
-mod pagerduty;
-mod github;
-mod discord;
-mod slack;
-mod teams;
-mod telegram;
-mod notification_channel;
-mod notification_delivery;
-mod integration_handlers;
-mod retry_policy;
-mod sms;
-mod aggregation;
-mod saved_queries;
-mod abi;
-mod oncall;
-mod xdr_validation;
-mod replica_monitor;
-mod feature_flags;
+use soroban_pulse::parquet_export;
 #[cfg(feature = "graphql")]
-mod graphql;
+use soroban_pulse::graphql;
 #[cfg(feature = "graphql")]
 mod graphql_subscriptions;
 mod event_dedup_replicas;
@@ -94,7 +55,10 @@ mod query_optimizer;
 mod partition_manager;
 mod query_builder;
 mod adaptive_pool;
+mod pool_management;
+mod statistics_management;
 mod notification_admin;
+mod push_preload;
 mod financial_accuracy;
 mod webhook_template;
 mod event_aggregation;
@@ -102,39 +66,16 @@ mod anomaly_detection;
 mod push_notification;
 mod connection_pool;
 mod slo_tracker;
-
-// These modules were already part of the library target (see src/lib.rs) but
-// missing here, leaving `crate::pool_management` and friends unresolved in
-// handlers.rs when compiling the `soroban-pulse` binary. `clippy::pedantic`
-// is scoped off since these files were never linted against it before.
-#[allow(clippy::pedantic)]
 mod anonymization;
-#[allow(clippy::pedantic)]
 mod event_compression;
-#[allow(clippy::pedantic)]
 mod health_check;
-#[allow(clippy::pedantic)]
 mod ledger_hashes;
-#[allow(clippy::pedantic)]
 mod networks;
-// Issue #942: same gap as the modules above — zero_trust.rs was part of
-// the library target but missing from the binary, so `crate::zero_trust`
-// was unresolved for anything in the binary (e.g. middleware/ip_access.rs).
-#[allow(clippy::pedantic)]
-mod zero_trust;
-#[allow(clippy::pedantic)]
-mod pool_management;
-#[allow(clippy::pedantic)]
-mod push_preload;
-#[allow(clippy::pedantic)]
-mod statistics_management;
 
+#[cfg(feature = "graphql")]
+use soroban_pulse::graphql_subscriptions;
 #[cfg(feature = "archive")]
-mod archiver;
-
-mod cloud_provider;
-mod cloud_replication;
-mod deployment_orchestrator;
+use soroban_pulse::archiver;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -482,6 +423,27 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(subscriptions::run_email_delivery_worker(email_pool));
     }
 
+    // Issue #1162: Encrypt integration credentials at rest with a dedicated key,
+    // then backfill any rows that were stored in plaintext before this change.
+    soroban_pulse::integration_secrets::init_keys(
+        config.integration_encryption_key,
+        config.integration_encryption_key_old,
+    );
+    {
+        let backfill_pool = pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = soroban_pulse::integration_secrets::backfill_plaintext(&backfill_pool).await {
+                error!(error = %e, "Failed to backfill integration credential encryption");
+            }
+        });
+    }
+
+    // Issue #1057: Auto-fetch contract specs (gated by AUTO_FETCH_CONTRACT_SPECS).
+    tokio::spawn(soroban_pulse::contract_specs::run_worker(pool.clone(), config.stellar_rpc_url.clone()));
+
+    // Issue #1058: Track contract WASM versions and emit contract_upgraded events.
+    tokio::spawn(soroban_pulse::contract_versions::run_worker(pool.clone(), config.stellar_rpc_url.clone(), event_tx.clone()));
+
     // Issue #620: Spawn push notification delivery worker.
     {
         let push_pool = pool.clone();
@@ -521,7 +483,16 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Spawn background indexer with health state
+    // ── Role-gated: indexer subsystem ────────────────────────────────────────
+    // ROLE=api  → indexer is skipped; this pod is a pure HTTP API replica.
+    // ROLE=indexer | all → indexer starts; health/metrics HTTP server also binds.
+    info!(role = ?config.role, "Starting with deployment role");
+
+    // Create the SSE ring buffer unconditionally — the HTTP server always needs
+    // a valid (possibly empty) buffer for Last-Event-ID replay, even on api pods.
+    let sse_ring_buf = sse_ring_buffer::SseRingBuffer::new(config.sse_ring_buffer_capacity);
+
+    // Build and wire up the indexer only when this instance is configured to run it.
     let rpc_client = indexer::SorobanRpcClient::new(&config);
     let mut indexer = indexer::Indexer::new(
         pool.clone(),
@@ -532,10 +503,6 @@ async fn main() -> anyhow::Result<()> {
     indexer.set_health_state(health_state.clone());
     indexer.set_indexer_state(indexer_state.clone());
     indexer.set_event_tx(event_tx.clone());
-
-    // Create the SSE ring buffer — shared between the indexer (writer) and HTTP
-    // handlers (reader for replay).
-    let sse_ring_buf = sse_ring_buffer::SseRingBuffer::new(config.sse_ring_buffer_capacity);
     indexer.set_sse_ring_buffer(std::sync::Arc::clone(&sse_ring_buf));
 
     // Issue #266: Initialize and seed bloom filter
@@ -613,7 +580,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(feature = "kafka")]
     if let (Some(brokers), Some(topic)) = (&config.kafka_brokers, &config.kafka_topic) {
-        match crate::kafka::RdKafkaProducer::new(
+        match soroban_pulse::kafka::RdKafkaProducer::new(
             brokers,
             config.kafka_batch_size,
             config.kafka_linger_ms,
@@ -649,37 +616,84 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let indexer_handle = tokio::spawn(async move {
-        indexer.run().await;
-    });
+    let mut secondary_indexer_handles = Vec::new();
+    let indexer_handle = if config.role.runs_indexer() {
+        // Spawn the indexer background task.
+        let handle = tokio::spawn(async move {
+            indexer.run().await;
+        });
 
-    // Spawn index usage monitoring background task
-    index_monitor::spawn(
-        pool.clone(),
-        config.index_check_interval_hours,
-        shutdown_rx.clone(),
-        index_monitor::FragmentationThresholds {
-            warn_ratio: config.fragmentation_warn_threshold,
-            critical_ratio: config.fragmentation_critical_threshold,
-            auto_reindex: config.fragmentation_auto_reindex,
-        },
-    );
+        // Issue #1063: index additional networks (e.g. testnet alongside
+        // mainnet) concurrently from this same deployment. Each additional
+        // network gets its own indexer task, RPC client, advisory lock key
+        // (see `indexer::lock_key_for_chain`) and checkpoint row (the indexer
+        // checkpoint/state tables are already keyed off `chain_id`), but shares
+        // the connection pool, event broadcast channel and SSE ring buffer with
+        // the primary network so subscribers see all configured networks.
+        let secondary_targets: Vec<_> = config.network_targets().into_iter().skip(1).collect();
+        for target in secondary_targets {
+            info!(
+                chain_id = %target.chain_id,
+                rpc_url = %target.rpc_url,
+                "Starting additional network indexer"
+            );
+            let mut network_config = config.clone();
+            network_config.chain_id = target.chain_id.clone();
+            network_config.stellar_rpc_url = target.rpc_url.clone();
 
-    // Spawn replica sync monitoring background task (#586)
-    replica_monitor::spawn(pool.clone(), 60, shutdown_rx.clone());
+            let network_rpc_client = indexer::SorobanRpcClient::new(&network_config);
+            let mut network_indexer = indexer::Indexer::new(
+                pool.clone(),
+                network_config,
+                shutdown_rx.clone(),
+                network_rpc_client,
+            );
+            network_indexer.set_health_state(health_state.clone());
+            network_indexer.set_indexer_state(indexer_state.clone());
+            network_indexer.set_event_tx(event_tx.clone());
+            network_indexer.set_sse_ring_buffer(std::sync::Arc::clone(&sse_ring_buf));
 
-    // Spawn feature flag rollback watcher (#587)
-    feature_flags::spawn(pool.clone(), 60, shutdown_rx.clone());
+            let handle = tokio::spawn(async move {
+                network_indexer.run().await;
+            });
+            secondary_indexer_handles.push(handle);
+        }
 
-    // Spawn resource metrics collector (#630)
+        // Spawn index usage monitoring background task (indexer role only)
+        index_monitor::spawn(
+            pool.clone(),
+            config.index_check_interval_hours,
+            shutdown_rx.clone(),
+            index_monitor::FragmentationThresholds {
+                warn_ratio: config.fragmentation_warn_threshold,
+                critical_ratio: config.fragmentation_critical_threshold,
+                auto_reindex: config.fragmentation_auto_reindex,
+            },
+        );
+
+        // Spawn replica sync monitoring background task (#586)
+        replica_monitor::spawn(pool.clone(), 60, shutdown_rx.clone());
+
+        // Spawn feature flag rollback watcher (#587)
+        feature_flags::spawn(pool.clone(), 60, shutdown_rx.clone());
+
+        // Spawn materialized-view refresh background task
+        stats_refresh::spawn(
+            pool.clone(),
+            config.stats_refresh_interval_secs,
+            shutdown_rx.clone(),
+        );
+
+        Some(handle)
+    } else {
+        info!("ROLE=api: indexer and indexer-only background tasks skipped");
+        // Drop the un-spawned indexer so its resources are freed.
+        drop(indexer);
+        None
+    };
+
+    // Spawn resource metrics collector (all roles — useful on api pods too)
     resource_metrics::spawn_resource_collector(shutdown_rx.clone());
-
-    // Spawn materialized-view refresh background task
-    stats_refresh::spawn(
-        pool.clone(),
-        config.stats_refresh_interval_secs,
-        shutdown_rx.clone(),
-    );
 
     // #496: Spawn audit log purge job
     {
@@ -780,16 +794,12 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let addr = SocketAddr::from(([0, 0, 0, 0], config.port));
-    info!(origins = ?config.allowed_origins, "Allowed CORS origins");
-    info!(
-        rate_limit = config.rate_limit_per_minute,
-        "Rate limit per IP"
-    );
+    info!(role = ?config.role, addr = %addr, "Binding HTTP server");
 
     // Clone pool before it is moved into the router for the tenant map load.
     let pool_for_tenant_map = pool.clone();
 
-    let tenant_map = if config.multi_tenant {
+    let tenant_map = if config.multi_tenant && config.role.runs_full_api() {
         match routes::load_tenant_map(&pool_for_tenant_map).await {
             Ok(map) => {
                 info!(count = map.len(), "Loaded tenant map from database");
@@ -804,28 +814,47 @@ async fn main() -> anyhow::Result<()> {
         std::sync::Arc::new(std::collections::HashMap::new())
     };
 
-    let router = routes::create_router_with_tx_and_tenant_map(
-        pool,
-        read_pool,
-        config.api_keys.clone(),
-        &config.allowed_origins,
-        config.rate_limit_per_minute,
-        config.behind_proxy,
-        health_state,
-        indexer_state,
-        prometheus_handle,
-        event_tx,
-        config.sse_keepalive_interval_ms,
-        config.sse_max_connections,
-        2000,
-        config.event_data_encryption_key,
-        config.event_data_encryption_key_old,
-        config.clone(),
-        Some(schema_validator),
-        tenant_map,
-        shutdown_rx.clone(),
-        sse_ring_buf,
-    );
+    // ROLE=indexer: expose only health + metrics so Kubernetes probes work
+    // and Prometheus can scrape the pod, but skip all API routes.
+    // ROLE=all|api: build the full router.
+    let router = if config.role.runs_full_api() {
+        info!(origins = ?config.allowed_origins, "Allowed CORS origins");
+        info!(rate_limit = config.rate_limit_per_minute, "Rate limit per IP");
+        routes::create_router_with_tx_and_tenant_map(
+            pool,
+            read_pool,
+            config.api_keys.clone(),
+            &config.allowed_origins,
+            config.rate_limit_per_minute,
+            config.behind_proxy,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            event_tx,
+            config.sse_keepalive_interval_ms,
+            config.sse_max_connections,
+            2000,
+            config.event_data_encryption_key,
+            config.event_data_encryption_key_old,
+            config.clone(),
+            Some(schema_validator),
+            tenant_map,
+            shutdown_rx.clone(),
+            sse_ring_buf,
+        )
+    } else {
+        // Indexer-only role: minimal router with health + metrics routes.
+        info!("ROLE=indexer: binding minimal HTTP server (health + metrics only)");
+        routes::create_minimal_router(
+            pool,
+            health_state,
+            indexer_state,
+            prometheus_handle,
+            config.clone(),
+            shutdown_rx.clone(),
+            sse_ring_buf,
+        )
+    };
 
     info!(addr = %addr, "Soroban Pulse listening");
 
@@ -844,7 +873,14 @@ async fn main() -> anyhow::Result<()> {
             let _ = shutdown_rx_axum.changed().await;
         })
         .await?;
-    let _ = indexer_handle.await;
+
+    // Wait for the indexer task to finish (only present when role runs indexer).
+    if let Some(handle) = indexer_handle {
+        let _ = handle.await;
+    }
+    for handle in secondary_indexer_handles {
+        let _ = handle.await;
+    }
 
     #[cfg(feature = "otel")]
     global::shutdown_tracer_provider();

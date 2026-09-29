@@ -8,7 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Email unsubscribe links (CAN-SPAM / GDPR): every notification email now includes a per-recipient unsubscribe link and `List-Unsubscribe` header, a public `/unsubscribe` endpoint to opt out, and `EMAIL_PUBLIC_BASE_URL` to configure the link's base URL. Opted-out recipients are skipped on subsequent sends.
+- Design specification and implementable mockups for Event Explorer and Event Detail screens (`docs/event-explorer-design.md`)
+- Event Explorer page with filter bar, table, empty state, and pagination (`dashboard/src/pages/EventExplorerPage.tsx`)
+- Event Detail page with summary metadata, ScVal tree/table/code viewer, and raw JSON (`dashboard/src/pages/EventDetailPage.tsx`)
+- Event filter bar with search, type, contract, ledger range, and topic controls (`dashboard/src/components/EventFilterBar.tsx`)
+- Event table with truncated IDs/hashes, copy affordances, and type badges (`dashboard/src/components/EventTable.tsx`)
+- ScVal viewer with tree, table, and code view modes (`dashboard/src/components/ScValViewer.tsx`)
+- Truncated text component with middle-ellipsis and copy button (`dashboard/src/components/TruncatedText.tsx`)
+- Empty state component for no-results scenarios (`dashboard/src/components/EmptyState.tsx`)
+- Detail drawer component for mobile event inspection (`dashboard/src/components/EventDrawer.tsx`)
+- Event API types and API client methods (`dashboard/src/api/eventTypes.ts`, `dashboard/src/api/client.ts`)
+- Light/dark theme design tokens and component styles (`dashboard/src/styles.css`)
+- Routes for `/events` and `/events/:eventId` in the dashboard app (`dashboard/src/App.tsx`)
+- Component and page tests for Event Explorer and Event Detail (`dashboard/tests/`)
 - Email notification feature for event alerts with batching (one email per minute maximum)
 - Email configuration via `EMAIL_SMTP_HOST`, `EMAIL_SMTP_PORT`, `EMAIL_SMTP_USER`, `EMAIL_SMTP_PASSWORD`, `EMAIL_FROM`, `EMAIL_TO`, and `EMAIL_CONTRACT_FILTER` environment variables
 - Email notifications can be filtered by contract ID using `EMAIL_CONTRACT_FILTER`

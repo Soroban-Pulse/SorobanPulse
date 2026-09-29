@@ -6,3 +6,5 @@ tests/
 docs/
 **/__pycache__/
 **/*.rs.bk
+**/node_modules/
+web/dist/

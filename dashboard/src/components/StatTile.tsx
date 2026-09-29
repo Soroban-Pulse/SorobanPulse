@@ -6,8 +6,8 @@ interface StatTileProps {
 export function StatTile({ label, value }: StatTileProps) {
   return (
     <div className="stat-tile">
-      <span className="stat-tile-label">{label}</span>
-      <span className="stat-tile-value">{value}</span>
+      <dt className="stat-tile-label">{label}</dt>
+      <dd className="stat-tile-value">{value}</dd>
     </div>
   );
 }

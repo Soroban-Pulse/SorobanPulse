@@ -1,0 +1,114 @@
+# cliff.toml — git-cliff configuration for SorobanPulse
+# https://git-cliff.org/docs/configuration
+#
+# git-cliff is an optional, human-driven changelog tool that can be run
+# locally or in CI when you want a richer, template-based changelog on top
+# of the CHANGELOG.md that release-please manages automatically.
+#
+# Usage:
+#   git-cliff --latest             # changes since the last tag
+#   git-cliff --unreleased         # commits not yet tagged
+#   git-cliff -o CHANGELOG.md      # overwrite the changelog file
+#   git-cliff v0.1.0..             # range syntax
+
+[changelog]
+# Jinja2 template for the changelog header (printed once at the top).
+header = """
+# Changelog\n
+All notable changes to this project will be documented in this file.\n
+"""
+
+# Jinja2 template for each release body block.
+body = """
+{% if version %}\
+## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | striptags | trim | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}**: {% endif %}\
+{{ commit.message | upper_first }}\
+{% if commit.github.username %} by [@{{ commit.github.username }}](https://github.com/{{ commit.github.username }}){% endif %}\
+{% if commit.github.pr_number %} in [#{{ commit.github.pr_number }}]({{ commit.github.pr_title }}){% endif %}\
+{% endfor %}
+{% endfor %}\n
+"""
+
+# Template for the changelog footer (printed once at the bottom).
+footer = """
+{% for release in releases %}\
+{% if release.version %}\
+{% if release.previous.version %}\
+[{{ release.version | trim_start_matches(pat="v") }}]: \
+  https://github.com/Soroban-Pulse/SorobanPulse/compare/{{ release.previous.version }}...{{ release.version }}
+{% endif %}\
+{% else %}\
+[unreleased]: https://github.com/Soroban-Pulse/SorobanPulse/compare/{{ release.previous.version }}...HEAD
+{% endif %}\
+{% endfor %}
+"""
+
+# Remove leading / trailing whitespace from each template output.
+trim = true
+
+# Optionally render commits that are not included in any section
+# (e.g. merge commits, reverts) in an "Other" section.
+postprocessors = [
+  # Strip the GitHub PR reference that git often appends: "(#123)"
+  { pattern = '\(#(\d+)\)$', replace = "" },
+]
+
+[git]
+# Parse commits according to the Conventional Commits specification.
+conventional_commits = true
+
+# Only include commits whose type appears in the `commit_parsers` list below
+# (i.e. skip merge commits, reverts, etc.).
+filter_unconventional = true
+
+# Split multi-paragraph commit bodies into individual changelog entries.
+split_commits = false
+
+# Regex patterns for extracting GitHub issue / PR links from commit footers.
+commit_preprocessors = [
+  # Expand issue numbers (#123) into full GitHub links.
+  { pattern = '\(#([0-9]+)\)', replace = "([#${1}](https://github.com/Soroban-Pulse/SorobanPulse/issues/${1}))" },
+]
+
+# Map Conventional Commit types to changelog section headings.
+commit_parsers = [
+  { message = "^feat",     group = "Features"          },
+  { message = "^fix",      group = "Bug Fixes"         },
+  { message = "^perf",     group = "Performance"       },
+  { message = "^security", group = "Security"          },
+  { message = "^refactor", group = "Code Refactoring"  },
+  { message = "^docs",     group = "Documentation"     },
+  { message = "^deps",     group = "Dependencies"      },
+  { message = "^ci",       skip = true                 },
+  { message = "^chore",    skip = true                 },
+  { message = "^test",     skip = true                 },
+  { message = "^style",    skip = true                 },
+  # Catch-all: skip anything that does not match a known type.
+  { body = ".*",           skip = true                 },
+]
+
+# Do not include commits with these footers.
+filter_commits = false
+
+# Tag patterns to consider as releases; semver tags only.
+tag_pattern = "v[0-9]*"
+
+# Do not include pre-release tags (e.g. v1.0.0-rc.1) in the "latest" detection
+# when running `git-cliff --latest` — they will still appear if the range covers them.
+skip_tags = "v[0-9]+-"
+
+# Ignore tags that do not match semver (e.g. `helm-1.0.0`).
+ignore_tags = "^(?!v[0-9]+\\.[0-9]+\\.[0-9]+).*"
+
+# Sort commits inside each release section.
+sort_commits = "oldest"
+
+# Include contributors' GitHub usernames in the changelog (requires --github-token).
+# github = { repo = "Soroban-Pulse/SorobanPulse" }
