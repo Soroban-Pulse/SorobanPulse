@@ -363,6 +363,32 @@ fn check_encryption(report: &mut ConfigValidationReport, cfg: &Config) {
         }
     }
     // Nothing to warn about if encryption is off; it's optional.
+
+    // Issue #1162: integration credentials are never stored in plaintext, so
+    // the integration key is mandatory in production-like environments.
+    if cfg.integration_encryption_key.is_none() {
+        if cfg.environment.is_production_like() {
+            report.add_error(
+                "INTEGRATION_ENCRYPTION_KEY must be set in production: integration credentials \
+                 (Slack/Telegram/GitHub tokens, webhook URLs, PagerDuty keys) are encrypted at rest",
+            );
+        } else {
+            report.add_warning(
+                "INTEGRATION_ENCRYPTION_KEY is not set: creating Slack/Discord/Telegram/GitHub/PagerDuty \
+                 integrations will be rejected",
+            );
+        }
+    }
+    if cfg.integration_encryption_key.is_some()
+        && cfg.integration_encryption_key == cfg.event_data_encryption_key
+    {
+        report.add_warning(
+            "INTEGRATION_ENCRYPTION_KEY should differ from EVENT_DATA_ENCRYPTION_KEY",
+        );
+    }
+    if cfg.integration_encryption_key_old.is_some() && cfg.integration_encryption_key.is_none() {
+        report.add_error("INTEGRATION_ENCRYPTION_KEY_OLD is set but INTEGRATION_ENCRYPTION_KEY is not");
+    }
 }
 
 fn check_performance_thresholds(report: &mut ConfigValidationReport, cfg: &Config) {

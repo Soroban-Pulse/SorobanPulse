@@ -101,3 +101,60 @@ Encrypted rows return `'true'`; plaintext rows return `NULL`.
 - The authentication tag provided by AES-256-GCM detects any tampering with stored ciphertext.
 - Keys are never logged or exposed in metrics.
 - Use a secrets manager (Kubernetes Secrets, AWS Secrets Manager, HashiCorp Vault) to inject `EVENT_DATA_ENCRYPTION_KEY` at runtime rather than committing it to environment files.
+
+## Integration credentials (Issue #1162)
+
+Integration credentials are encrypted at rest with the same AES-256-GCM
+envelope, using a **separate** key. Unlike event encryption, this is always on
+and is not gated on the `encryption` feature.
+
+| Variable | Required | Description |
+|---|---|---|
+| `INTEGRATION_ENCRYPTION_KEY` | Yes in production | 64-char hex AES-256 key, distinct from `EVENT_DATA_ENCRYPTION_KEY` |
+| `INTEGRATION_ENCRYPTION_KEY_OLD` | Only during key rotation | Previous key, kept until re-encryption completes |
+
+### Encrypted columns
+
+| Table | Column | Contents |
+|---|---|---|
+| `github_integrations` | `access_token` | GitHub token |
+| `discord_integrations` | `webhook_url` | Discord webhook URL (embeds the webhook token) |
+| `slack_integrations` | `webhook_url`, `bot_token`, `signing_secret` | Slack webhook URL, bot token, signing secret |
+| `telegram_integrations` | `bot_token` | Telegram bot token |
+| `pagerduty_integrations` | `routing_key`, `api_key` | PagerDuty routing key and REST API key |
+| `notification_channels` | `config` (JSONB) | String values under sensitive keys such as `auth_token`, `api_key`, `bot_token`, `webhook_url`, `password`, `secret`, `token` |
+
+Values are stored as `enc:v1:<base64 envelope>`. The migration
+`20260929000001_encrypt_integration_credentials` adds `NOT VALID` CHECK
+constraints so the database rejects any new plaintext value in these columns.
+
+### Behaviour
+
+- **Writes fail closed:** if `INTEGRATION_ENCRYPTION_KEY` is missing, creating
+  an integration returns `503` instead of storing the credential in plaintext.
+- **API responses are masked:** `GET` endpoints return `****` plus the last
+  four characters (for example `****WXYZ`), never the plaintext or ciphertext.
+- **Backfill:** at startup, rows written before this change are encrypted in
+  place. After the first successful start, validate the constraints (the
+  statements are listed in the migration file), for example:
+
+  ```sql
+  ALTER TABLE github_integrations VALIDATE CONSTRAINT github_integrations_access_token_encrypted;
+  ```
+
+### Rotating the integration key
+
+1. Set `INTEGRATION_ENCRYPTION_KEY` to the new key and
+   `INTEGRATION_ENCRYPTION_KEY_OLD` to the previous key, then restart.
+2. Call `POST /v1/admin/reencrypt`. The response's `jobs` array includes
+   `integration_credentials`. Every credential is decrypted (current or old
+   key) and re-encrypted with the new key.
+3. When the job logs `Integration credential re-encryption completed`, remove
+   `INTEGRATION_ENCRYPTION_KEY_OLD` and restart.
+
+### Verifying
+
+```sql
+-- Should return 0 rows
+SELECT id FROM telegram_integrations WHERE bot_token NOT LIKE 'enc:v1:%';
+```
