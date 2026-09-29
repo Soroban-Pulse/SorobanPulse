@@ -49,7 +49,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-opentelemetry = { version = "0.22", optional = true }
 opentelemetry = { version = "0.21", features = ["trace", "metrics"] }
-opentelemetry-otlp = "0.14"
+opentelemetry-otlp = "0.33"
 opentelemetry-jaeger = { version = "0.20", optional = true }
 
 # Metrics
