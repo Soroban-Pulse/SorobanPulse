@@ -1,0 +1,24 @@
+{
+  "method": "getEvents",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "getEvents",
+    "params": {
+      "pagination": {
+        "cursor": "expired-cursor-value",
+        "limit": 100
+      },
+      "filters": []
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "error": {
+      "code": -32600,
+      "message": "start ledger must be between the oldest ledger and the latest ledger",
+      "data": { "ledger": 2000000 }
+    }
+  }
+}

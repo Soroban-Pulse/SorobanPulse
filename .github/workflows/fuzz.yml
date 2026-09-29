@@ -1,0 +1,162 @@
+name: Nightly Fuzz
+
+# Issue #1154 — Run each fuzz target for 5 minutes nightly.
+# Existing targets: fuzz_validate_contract_id, fuzz_validate_tx_hash, fuzz_pagination_params
+# New targets (issue #1154): fuzz_xdr_scval, fuzz_normalizer, fuzz_contract_spec
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 04:00 UTC, after the soak test
+  workflow_dispatch:
+    inputs:
+      fuzz_duration_secs:
+        description: 'Seconds to run each target'
+        required: false
+        default: '300'
+
+concurrency:
+  group: fuzz-nightly
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  CARGO_TERM_COLOR: always
+  FUZZ_SECS: ${{ github.event.inputs.fuzz_duration_secs || '300' }}
+
+jobs:
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_validate_contract_id
+          - fuzz_validate_tx_hash
+          - fuzz_pagination_params
+          - fuzz_xdr_scval
+          - fuzz_normalizer
+          - fuzz_contract_spec
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Nightly Rust toolchain (required by cargo-fuzz)
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-fuzz-${{ matrix.target }}-${{ hashFiles('fuzz/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-fuzz-
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run fuzz target for ${{ env.FUZZ_SECS }}s
+        id: fuzz_run
+        run: |
+          set -euo pipefail
+
+          TARGET="${{ matrix.target }}"
+          SECS="${{ env.FUZZ_SECS }}"
+          CORPUS_DIR="fuzz/corpus/${TARGET}"
+          SEED_DIR="tests/fixtures/fuzz_seeds/${TARGET}"
+          ARTIFACT_DIR="/tmp/fuzz-artifacts/${TARGET}"
+
+          mkdir -p "${CORPUS_DIR}" "${ARTIFACT_DIR}"
+
+          # Copy seed files into corpus dir so the fuzzer starts from a
+          # realistic baseline rather than empty input.
+          if [ -d "${SEED_DIR}" ]; then
+            cp -n "${SEED_DIR}"/* "${CORPUS_DIR}/" 2>/dev/null || true
+            echo "Seeded corpus from ${SEED_DIR}"
+          fi
+
+          cargo fuzz run "${TARGET}" "${CORPUS_DIR}" -- \
+            -max_total_time="${SECS}" \
+            -rss_limit_mb=512 \
+            -artifact_prefix="${ARTIFACT_DIR}/" \
+            2>&1 | tee "/tmp/fuzz-${TARGET}.log"
+
+          # cargo-fuzz exits non-zero only on a crash/hang/OOM.
+          echo "fuzz_exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload crash artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}-${{ github.run_id }}
+          path: /tmp/fuzz-artifacts/${{ matrix.target }}/
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload fuzz log
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: fuzz-log-${{ matrix.target }}-${{ github.run_id }}
+          path: /tmp/fuzz-${{ matrix.target }}.log
+          retention-days: 30
+
+      - name: Report crash as GitHub Issue
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const target = '${{ matrix.target }}';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = `[Fuzz] Crash found in ${target} — ${new Date().toISOString().slice(0,10)}`;
+
+            const body = [
+              `## 🔴 Fuzz Target Crash: \`${target}\``,
+              '',
+              `**Run:** ${runUrl}`,
+              `**Date:** ${new Date().toUTCString()}`,
+              `**Commit:** ${context.sha}`,
+              '',
+              '### What to do',
+              '1. Download the `fuzz-artifacts-' + target + '` artifact from the run.',
+              '2. Reproduce with:',
+              '   ```bash',
+              `   cargo +nightly fuzz run ${target} fuzz/corpus/${target}/ -- <crash-file>`,
+              '   ```',
+              '3. Fix the panic and add a regression test.',
+              '4. Re-run the fuzz target to confirm the fix.',
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'fuzzing,automated',
+            });
+
+            const existing = issues.find(i => i.title.includes(target));
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `## New crash\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['bug', 'fuzzing', 'security', 'automated'],
+              });
+            }

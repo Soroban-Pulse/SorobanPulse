@@ -1,0 +1,33 @@
+{
+  "method": "getEvents",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "getEvents",
+    "params": {
+      "startLedger": 2000000,
+      "filters": [],
+      "pagination": { "limit": 100 }
+    }
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "events": [
+        {
+          "contractId": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+          "type": "contract",
+          "txHash": "d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5",
+          "ledger": 2000000,
+          "ledgerClosedAt": "2026-04-14T00:00:00Z",
+          "value": { "xdr": "AAAABQAAAAk=" },
+          "topic": [{ "xdr": "AAAADwAAAAh0cmFuc2Zlcg==" }],
+          "id": "2000000-0"
+        }
+      ],
+      "latestLedger": 2000100,
+      "cursor": "2000000-0"
+    }
+  }
+}

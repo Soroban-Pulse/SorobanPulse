@@ -1,0 +1,17 @@
+{
+  "method": "getLatestLedger",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "getLatestLedger"
+  },
+  "response": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "id": "0000000000000000000000000000000000000000000000000000000001000100",
+      "protocolVersion": 21,
+      "sequence": 1000100
+    }
+  }
+}
