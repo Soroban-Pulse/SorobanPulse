@@ -402,6 +402,21 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(subscriptions::run_email_delivery_worker(email_pool));
     }
 
+    // Issue #1162: Encrypt integration credentials at rest with a dedicated key,
+    // then backfill any rows that were stored in plaintext before this change.
+    soroban_pulse::integration_secrets::init_keys(
+        config.integration_encryption_key,
+        config.integration_encryption_key_old,
+    );
+    {
+        let backfill_pool = pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = soroban_pulse::integration_secrets::backfill_plaintext(&backfill_pool).await {
+                error!(error = %e, "Failed to backfill integration credential encryption");
+            }
+        });
+    }
+
     // Issue #1057: Auto-fetch contract specs (gated by AUTO_FETCH_CONTRACT_SPECS).
     tokio::spawn(soroban_pulse::contract_specs::run_worker(pool.clone(), config.stellar_rpc_url.clone()));
 

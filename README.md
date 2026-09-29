@@ -6,6 +6,9 @@
   <a href="https://codespaces.new/Soroban-Pulse/SorobanPulse?quickstart=1">
     <img src="https://github.com/codespaces/badge.svg" alt="Open in GitHub Codespaces" />
   </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" />
+  </a>
 </p>
 
 A lightweight Rust backend service that indexes Soroban smart contract events on the Stellar network and exposes them via a REST API.
@@ -560,3 +563,22 @@ The service defaults to `info` level internally, but the environment variable mu
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, branch naming, commit conventions, and the PR process.
+
+## Community
+
+- [Code of Conduct](CODE_OF_CONDUCT.md) — the Contributor Covenant 2.1 and how to report violations.
+- [Governance](GOVERNANCE.md) — roles, how decisions and RFCs are made, and how to become a maintainer.
+- [Maintainers](MAINTAINERS.md) — who owns which area of the codebase (mirrored in [`.github/CODEOWNERS`](.github/CODEOWNERS)).
+
+## Security
+
+Please **do not** report security vulnerabilities through public GitHub issues.
+See [SECURITY.md](SECURITY.md) for supported versions and how to report a
+vulnerability privately via GitHub Security Advisories.
+
+## License
+
+Soroban Pulse is licensed under the [MIT License](LICENSE). Unless you
+explicitly state otherwise, any contribution you intentionally submit for
+inclusion in this project is licensed as above, without any additional terms or
+conditions.

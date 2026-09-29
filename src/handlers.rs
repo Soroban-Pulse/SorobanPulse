@@ -5185,14 +5185,20 @@ pub async fn reindex_index(
     ))
 }
 
-/// Start a background re-encryption job to migrate events from old key to new key.
+/// Start background re-encryption jobs after a key rotation.
+///
+/// - Events: migrates `event_data` from `ENCRYPTION_KEY_OLD` to `ENCRYPTION_KEY`
+///   (requires the `encryption` feature).
+/// - Integration credentials (Issue #1162): re-encrypts every stored token,
+///   webhook URL and routing key from `INTEGRATION_ENCRYPTION_KEY_OLD` to
+///   `INTEGRATION_ENCRYPTION_KEY`, encrypting any remaining plaintext rows.
 #[utoipa::path(
     post,
     path = "/v1/admin/reencrypt",
     tag = "admin",
     responses(
-        (status = 202, description = "Re-encryption job started"),
-        (status = 400, description = "Encryption not enabled or no old key configured", body = ErrorResponse),
+        (status = 202, description = "Re-encryption job(s) started"),
+        (status = 400, description = "No old key configured for events or integration credentials", body = ErrorResponse),
         (status = 409, description = "Re-encryption job already running", body = ErrorResponse),
         (status = 401, description = "Unauthorized", body = ErrorResponse),
     )
@@ -5200,50 +5206,63 @@ pub async fn reindex_index(
 pub async fn start_reencrypt(
     State(state): State<AppState>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    #[cfg(not(feature = "encryption"))]
-    {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "encryption feature not enabled" })),
-        ));
+    let batch_size = 1000;
+    let mut jobs: Vec<&str> = Vec::new();
+
+    if crate::integration_secrets::rotation_configured() {
+        if !crate::integration_secrets::start_reencrypt_job(state.pool.clone(), batch_size as i64) {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(json!({ "error": "integration credential re-encryption job already running" })),
+            ));
+        }
+        jobs.push("integration_credentials");
     }
 
     #[cfg(feature = "encryption")]
     {
-        let new_key = state.encryption_key.ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "ENCRYPTION_KEY not configured" })),
-        ))?;
+        if let (Some(new_key), Some(old_key)) = (state.encryption_key, state.encryption_key_old) {
+            // Create or get the reencrypt state from app state
+            // For now, we'll create a new one per request (in production, store in AppState)
+            let reencrypt_state = crate::reencrypt::ReencryptState::new();
 
-        let old_key = state.encryption_key_old.ok_or((
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "ENCRYPTION_KEY_OLD not configured" })),
-        ))?;
+            if reencrypt_state.is_running() {
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "re-encryption job already running" })),
+                ));
+            }
 
-        // Create or get the reencrypt state from app state
-        // For now, we'll create a new one per request (in production, store in AppState)
-        let reencrypt_state = crate::reencrypt::ReencryptState::new();
-
-        if reencrypt_state.is_running() {
-            return Err((
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "re-encryption job already running" })),
-            ));
+            crate::reencrypt::start_reencrypt_job(
+                state.pool.clone(),
+                new_key,
+                old_key,
+                batch_size,
+                reencrypt_state,
+            );
+            jobs.push("events");
         }
-
-        let pool = state.pool.clone();
-        let batch_size = 1000;
-
-        crate::reencrypt::start_reencrypt_job(pool, new_key, old_key, batch_size, reencrypt_state);
-
-        Ok((
-            StatusCode::ACCEPTED,
-            Json(json!({
-                "message": "re-encryption job started",
-                "batch_size": batch_size
-            })),
-        ))
     }
+
+    if jobs.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "nothing to re-encrypt: configure ENCRYPTION_KEY and ENCRYPTION_KEY_OLD \
+                          (events, requires the encryption feature) and/or INTEGRATION_ENCRYPTION_KEY \
+                          and INTEGRATION_ENCRYPTION_KEY_OLD (integration credentials)"
+            })),
+        ));
+    }
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "message": "re-encryption job started",
+            "jobs": jobs,
+            "batch_size": batch_size
+        })),
+    ))
 }
 
 #[utoipa::path(
@@ -6350,6 +6369,17 @@ pub async fn test_notification_channel(
     let channel_name: String = channel.try_get("name").unwrap_or_default();
     let channel_type: String = channel.try_get("channel_type").unwrap_or_default();
     let config: serde_json::Value = channel.try_get("config").unwrap_or(serde_json::json!({}));
+    // Issue #1162: sensitive config values are stored encrypted.
+    let config = match crate::integration_secrets::open_config(&config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "Failed to decrypt notification channel credentials");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to decrypt channel credentials" })),
+            ).into_response();
+        }
+    };
 
     let test_subject = format!("[TEST] Soroban Pulse notification test – channel '{channel_name}'");
     let test_body = format!(
@@ -11787,13 +11817,18 @@ pub async fn create_notification_channel(
         None => None,
     };
 
+    // Issue #1162: provider credentials (e.g. SMS auth tokens) in the channel
+    // config are encrypted before they reach the database.
+    let sealed_config = crate::integration_secrets::seal_config(&req.config)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let id: Uuid = sqlx::query_scalar(
         "INSERT INTO notification_channels (name, channel_type, config, content_filter) \
          VALUES ($1, $2, $3, $4) RETURNING id",
     )
     .bind(&req.name)
     .bind(&req.channel_type)
-    .bind(&req.config)
+    .bind(&sealed_config)
     .bind(&content_filter_json)
     .fetch_one(&state.pool)
     .await?;

@@ -125,6 +125,7 @@ pub mod eventbridge;
 pub mod parquet_export;
 pub mod warehouse;
 pub mod reencrypt;
+pub mod integration_secrets;
 pub mod stats_refresh;
 pub mod notification_rate_limit;
 pub mod github;

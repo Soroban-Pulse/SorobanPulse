@@ -221,6 +221,100 @@ pub fn current_key_version() -> Result<u32, String> {
     Ok(1)
 }
 
+/// Issue #1162: string-secret encryption for integration credentials.
+///
+/// Unlike `encrypt`/`decrypt` above, this is always compiled (not gated on the
+/// `encryption` feature): credentials must never be stored in plaintext. It
+/// reuses the same AES-256-GCM envelope
+/// (`{"encrypted": true, "data", "nonce", "key_version"}`), serialised and
+/// base64-encoded behind a `enc:v1:` prefix so it fits in the existing `TEXT`
+/// columns and can be recognised with a simple `LIKE 'enc:v1:%'`.
+pub mod secrets {
+    use aes_gcm::{
+        aead::{Aead, KeyInit},
+        Aes256Gcm, Nonce,
+    };
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use rand::RngCore;
+    use serde_json::{json, Value};
+
+    /// Prefix marking a column value as an encrypted envelope.
+    pub const PREFIX: &str = "enc:v1:";
+    const NONCE_LEN: usize = 12;
+
+    /// Returns `true` if `stored` is an encrypted envelope produced by [`encrypt_secret`].
+    pub fn is_encrypted(stored: &str) -> bool {
+        stored.starts_with(PREFIX)
+    }
+
+    /// Encrypt a plaintext secret with `key`, tagging the envelope with `key_version`.
+    pub fn encrypt_secret(key: &[u8; 32], key_version: u32, plaintext: &str) -> Result<String, String> {
+        let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
+        let mut nonce_bytes = [0u8; NONCE_LEN];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let ciphertext = cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_bytes())
+            .map_err(|e| e.to_string())?;
+
+        let envelope = json!({
+            "encrypted": true,
+            "data": STANDARD.encode(&ciphertext),
+            "nonce": STANDARD.encode(nonce_bytes),
+            "key_version": key_version,
+        });
+        let serialized = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
+        Ok(format!("{PREFIX}{}", STANDARD.encode(serialized)))
+    }
+
+    /// Decrypt a value produced by [`encrypt_secret`], trying `key` then `old_key`.
+    ///
+    /// Values without the `enc:v1:` prefix are legacy plaintext rows that have
+    /// not been backfilled yet; they are returned unchanged.
+    pub fn decrypt_secret(key: &[u8; 32], old_key: Option<&[u8; 32]>, stored: &str) -> Result<String, String> {
+        let Some(encoded) = stored.strip_prefix(PREFIX) else {
+            return Ok(stored.to_string());
+        };
+        let envelope: Value = serde_json::from_slice(&STANDARD.decode(encoded).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        if envelope.get("encrypted") != Some(&Value::Bool(true)) {
+            return Err("not an encrypted envelope".to_string());
+        }
+        let data = envelope["data"]
+            .as_str()
+            .ok_or("missing 'data' field in encrypted envelope")?;
+        let nonce = envelope["nonce"]
+            .as_str()
+            .ok_or("missing 'nonce' field in encrypted envelope")?;
+        let ciphertext = STANDARD.decode(data).map_err(|e| e.to_string())?;
+        let nonce_bytes = STANDARD.decode(nonce).map_err(|e| e.to_string())?;
+        if nonce_bytes.len() != NONCE_LEN {
+            return Err(format!("invalid nonce length: {}", nonce_bytes.len()));
+        }
+
+        let open = |k: &[u8; 32]| -> Result<Vec<u8>, String> {
+            let cipher = Aes256Gcm::new_from_slice(k).map_err(|e| e.to_string())?;
+            cipher
+                .decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_slice())
+                .map_err(|e| e.to_string())
+        };
+        let plaintext = open(key).or_else(|e| old_key.ok_or(e).and_then(|k| open(k)))?;
+        String::from_utf8(plaintext).map_err(|e| e.to_string())
+    }
+
+    /// Mask a secret for API responses: `****` followed by the last 4 characters.
+    ///
+    /// Secrets of 8 characters or fewer are fully masked so the suffix never
+    /// reveals a meaningful fraction of the value.
+    pub fn mask_secret(plaintext: &str) -> String {
+        let chars: Vec<char> = plaintext.chars().collect();
+        if chars.len() <= 8 {
+            return "****".to_string();
+        }
+        let last4: String = chars[chars.len() - 4..].iter().collect();
+        format!("****{last4}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -448,5 +542,40 @@ mod tests {
         assert!(encrypted["key_version"].is_number());
         let decrypted = super::decrypt(&key, None, &encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn secret_round_trip_and_prefix() {
+        let key = test_key(0x42);
+        let stored = super::secrets::encrypt_secret(&key, 1, "xoxb-123-secret-token").unwrap();
+        assert!(super::secrets::is_encrypted(&stored));
+        assert!(!stored.contains("xoxb-123-secret-token"));
+        let recovered = super::secrets::decrypt_secret(&key, None, &stored).unwrap();
+        assert_eq!(recovered, "xoxb-123-secret-token");
+    }
+
+    #[test]
+    fn secret_decrypts_with_old_key() {
+        let old_key = test_key(0x01);
+        let new_key = test_key(0x02);
+        let stored = super::secrets::encrypt_secret(&old_key, 1, "routing-key").unwrap();
+        assert!(super::secrets::decrypt_secret(&new_key, None, &stored).is_err());
+        assert_eq!(
+            super::secrets::decrypt_secret(&new_key, Some(&old_key), &stored).unwrap(),
+            "routing-key"
+        );
+    }
+
+    #[test]
+    fn secret_plaintext_passes_through() {
+        let key = test_key(0x42);
+        assert_eq!(super::secrets::decrypt_secret(&key, None, "legacy").unwrap(), "legacy");
+    }
+
+    #[test]
+    fn mask_secret_shows_last_four_only() {
+        assert_eq!(super::secrets::mask_secret("xoxb-123456789"), "****6789");
+        assert_eq!(super::secrets::mask_secret("short"), "****");
+        assert_eq!(super::secrets::mask_secret(""), "****");
     }
 }

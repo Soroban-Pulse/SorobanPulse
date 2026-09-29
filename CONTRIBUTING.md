@@ -4,6 +4,17 @@ New to the project? See [docs/onboarding.md](docs/onboarding.md) for a day-1
 setup checklist and fixes for the most common first-build issues before
 diving into the sections below.
 
+By participating in this project you agree to abide by our
+[Code of Conduct](CODE_OF_CONDUCT.md). How decisions are made, how RFCs work,
+and how to become a reviewer or maintainer are described in
+[GOVERNANCE.md](GOVERNANCE.md); area owners are listed in
+[MAINTAINERS.md](MAINTAINERS.md).
+
+**Found a security vulnerability?** Do not open a public issue — follow
+[SECURITY.md](SECURITY.md) to report it privately.
+
+Contributions are accepted under the project's [MIT License](LICENSE).
+
 ## Running Integration Tests
 
 Integration tests require a live PostgreSQL instance. The easiest way is `make test-db`, which starts a throwaway container, runs the full suite, then tears it down:

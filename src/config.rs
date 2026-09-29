@@ -307,6 +307,11 @@ pub struct Config {
     pub event_data_encryption_key: Option<[u8; 32]>,
     /// Previous encryption key for rotation
     pub event_data_encryption_key_old: Option<[u8; 32]>,
+    /// AES-GCM key for integration credentials (Issue #1162), separate from
+    /// the event_data key (32 bytes, hex-encoded)
+    pub integration_encryption_key: Option<[u8; 32]>,
+    /// Previous integration credential key for rotation
+    pub integration_encryption_key_old: Option<[u8; 32]>,
     /// How often the index usage monitor runs (hours)
     pub index_check_interval_hours: u64,
     /// Health check timeout in milliseconds
@@ -599,6 +604,8 @@ impl Default for Config {
             indexer_event_types: Vec::new(),
             event_data_encryption_key: None,
             event_data_encryption_key_old: None,
+            integration_encryption_key: None,
+            integration_encryption_key_old: None,
             index_check_interval_hours: 24,
             health_check_timeout_ms: 2000,
             tls_cert_file: None,
@@ -1456,6 +1463,12 @@ impl Config {
         let event_data_encryption_key_old = env_or_file("EVENT_DATA_ENCRYPTION_KEY_OLD", &file)
             .and_then(|v| parse_hex_key_checked("EVENT_DATA_ENCRYPTION_KEY_OLD", &v, &mut errors));
 
+        let integration_encryption_key = env_or_file("INTEGRATION_ENCRYPTION_KEY", &file)
+            .and_then(|v| parse_hex_key_checked("INTEGRATION_ENCRYPTION_KEY", &v, &mut errors));
+
+        let integration_encryption_key_old = env_or_file("INTEGRATION_ENCRYPTION_KEY_OLD", &file)
+            .and_then(|v| parse_hex_key_checked("INTEGRATION_ENCRYPTION_KEY_OLD", &v, &mut errors));
+
         let rpc_headers = parse_rpc_headers_checked(&mut errors);
         let indexer_event_types = parse_indexer_event_types_checked(&mut errors);
 
@@ -1552,6 +1565,8 @@ impl Config {
             indexer_event_types,
             event_data_encryption_key,
             event_data_encryption_key_old,
+            integration_encryption_key,
+            integration_encryption_key_old,
             index_check_interval_hours,
             health_check_timeout_ms,
             tls_cert_file: env::var("TLS_CERT_FILE").ok().filter(|s| !s.is_empty()),

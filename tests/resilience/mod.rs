@@ -116,6 +116,8 @@ fn make_indexer(pool: PgPool, rpc: MockRpcClient) -> Indexer<MockRpcClient> {
             log_sample_rate: 1,
             event_data_encryption_key: None,
             event_data_encryption_key_old: None,
+            integration_encryption_key: None,
+            integration_encryption_key_old: None,
         },
         shutdown_rx,
         rpc,
