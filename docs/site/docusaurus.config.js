@@ -174,6 +174,10 @@ const config = {
             position: 'left',
             items: [
               {
+                label: 'Interactive API Reference',
+                to: '/api-reference',
+              },
+              {
                 label: 'Interactive Docs (Swagger)',
                 href: '/docs',
               },
@@ -287,6 +291,7 @@ const config = {
           {
             title: 'API',
             items: [
+              { label: 'API Reference', to: '/api-reference' },
               { label: 'Swagger UI', href: '/docs' },
               { label: 'OpenAPI JSON', href: '/openapi.json' },
               { label: 'API Changelog', to: '/guides/api-changelog' },

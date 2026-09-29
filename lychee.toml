@@ -1,0 +1,70 @@
+# lychee.toml
+#
+# Configuration for lychee link checker.
+# Used by the docs.yml workflow to detect broken links in Markdown sources
+# and in the built HTML output.
+#
+# Run locally:
+#   cargo install lychee
+#   lychee --config lychee.toml docs/**/*.md
+
+# ── Timeouts and retries ──────────────────────────────────────────────────────
+
+# Maximum time (seconds) to wait for a response before treating the link as broken.
+timeout = 30
+
+# Number of times to retry a failed request before marking it as an error.
+max_retries = 3
+
+# Maximum number of concurrent requests.
+max_concurrency = 32
+
+# ── Accepted HTTP status codes ────────────────────────────────────────────────
+
+# 200–299 are always accepted.
+# 429 (Too Many Requests) is accepted so CI doesn't fail on rate-limited hosts
+# like GitHub, crates.io, or docs.rs.
+accept = [200, 204, 206, 429]
+
+# ── Link types ────────────────────────────────────────────────────────────────
+
+# Check both http:// and https:// links.  Skip mailto: links — they are valid
+# by convention but cannot be HTTP-verified.
+exclude_mail = true
+
+# ── Exclusion patterns ────────────────────────────────────────────────────────
+# Patterns here supplement the patterns in .lycheeignore.
+
+exclude = [
+  # Localhost / development URLs — never resolvable in CI.
+  "http://localhost",
+  "http://127.0.0.1",
+  "http://0.0.0.0",
+
+  # Placeholder / example values that appear in code blocks or templates.
+  "https://your-domain\\.example\\.com",
+  "https://soroban-testnet\\.stellar\\.org",
+
+  # GitHub Actions URL patterns that require auth and are not real pages.
+  "https://github\\.com/.*/(actions|runs|workflows)/",
+
+  # Anchors in rendered diagrams / SVG files — not checkable by lychee.
+  "\\.svg#",
+]
+
+# ── Cache ─────────────────────────────────────────────────────────────────────
+
+# Cache results across runs so unchanged links aren't re-checked on every PR.
+# The cache file is stored in the project root and should be committed or
+# added to .gitignore (both are reasonable choices; we .gitignore it).
+cache = true
+cache_exclude_status_codes = [429]
+
+# ── Output ───────────────────────────────────────────────────────────────────
+
+# Verbose output shows the status of every link checked.
+verbose = false
+
+# Emit a non-zero exit code only for genuine errors (broken links), not
+# for warnings (e.g. redirects or slow responses).
+no_progress = false
