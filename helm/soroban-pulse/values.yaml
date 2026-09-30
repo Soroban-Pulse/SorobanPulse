@@ -120,6 +120,54 @@ tolerations: []
 affinity: {}
 topologySpreadConstraints: []
 
+# ── Database Migration Job (pre-install / pre-upgrade hook) ──────────────────
+# Issue #1147: runs database migrations as a Helm hook before any application
+# pod is started or replaced.  If the Job fails Helm aborts the release and
+# the existing pods are left running and untouched.
+#
+# To use this together with the startup-migration guard, also set:
+#   env:
+#     RUN_MIGRATIONS_ON_STARTUP: "false"
+# …so that the application pods themselves skip the migration step.
+migrationJob:
+  # Set to false to disable the hook Job (e.g., if you run migrations out-of-band).
+  enabled: true
+
+  # Maximum number of retry attempts before Helm marks the release as failed.
+  backoffLimit: 2
+
+  # Hard deadline (seconds) for the entire Job including retries.
+  # Increase this for large / long-running migrations (e.g., table partitioning).
+  activeDeadlineSeconds: 600
+
+  # Seconds after the Job finishes before Kubernetes garbage-collects it.
+  # 86400 = keep for 24 h so logs are available for debugging.
+  # Set to 0 to delete immediately; omit the key to keep indefinitely.
+  ttlSecondsAfterFinished: 86400
+
+  # Resource requests and limits for the migration container.
+  # These can be tighter than the main app since migrations are short-lived.
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+  # Optional extra environment variables injected into the migration container.
+  extraEnv: []
+  # - name: EXAMPLE
+  #   value: "value"
+
+  # Optional pod annotations for the migration Job pod (e.g., Vault injection).
+  podAnnotations: {}
+
+  # Override node selector / tolerations for the migration pod.
+  # When empty, inherits from the top-level nodeSelector / tolerations above.
+  nodeSelector: {}
+  tolerations: []
+
 # ── Prometheus Operator: ServiceMonitor ──────────────────────────────────────
 # Requires the Prometheus Operator (kube-prometheus-stack or standalone) to be
 # installed in the cluster.  When enabled, a ServiceMonitor is created so
