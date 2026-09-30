@@ -63,6 +63,12 @@ migrate: ## Run pending database migrations
 migrate-down: ## Rollback the most recent migration
 	cargo sqlx migrate revert
 
+seed: ## Seed the database with realistic dev/demo data (EVENTS=500 to override volume)
+	cargo run --bin seed -- --events $${EVENTS:-500}
+
+seed-large: ## Seed 100 000 events for performance testing
+	cargo run --bin seed -- --events 100000
+
 check-migrations: ## Check for duplicate migration timestamps
 	@bash scripts/check-migrations.sh
 

@@ -114,6 +114,24 @@ services:
     restart: "no"
 
   # ---------------------------------------------------------------------------
+  # seed-bin — runs the Rust seed binary for realistic demo data.
+  # Controlled by SEED_EVENTS (default 500).  Runs after the SQL seed so the
+  # schema is definitely present and the basic fixture rows already exist.
+  # ---------------------------------------------------------------------------
+  seed-bin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://e2e:e2e@db:5432/soroban_pulse_e2e
+      RUST_LOG: "seed=info"
+    command: ["/app/seed", "--events", "${SEED_EVENTS:-500}"]
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
   # Dashboard — the built SPA served by nginx, proxying /api/* to the app.
   # Open http://localhost:5174 once the stack is up.
   # ---------------------------------------------------------------------------
@@ -124,7 +142,7 @@ services:
     depends_on:
       app:
         condition: service_healthy
-      seed:
+      seed-bin:
         condition: service_completed_successfully
     environment:
       API_UPSTREAM: http://app:3000

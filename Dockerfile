@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y ca-certificates libssl3 curl && rm -rf 
 
 WORKDIR /app
 COPY --from=builder --chown=soroban:soroban /app/target/release/soroban-pulse .
+COPY --from=builder --chown=soroban:soroban /app/target/release/seed .
 COPY --from=builder --chown=soroban:soroban /app/migrations ./migrations
 COPY --from=web --chown=soroban:soroban /src/web/dist ./web/dist
 
