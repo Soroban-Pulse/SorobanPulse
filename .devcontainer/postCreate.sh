@@ -86,48 +86,14 @@ fi
 # ── 4. Seed development data ──────────────────────────────────────────────────
 info "Seeding development data…"
 
-# Insert a small set of representative events so `GET /v1/events` returns
-# something useful immediately.  The INSERT is idempotent via ON CONFLICT.
-psql "$DATABASE_URL" <<'SQL'
-INSERT INTO events (
-  id, contract_id, event_type, tx_hash, ledger, "timestamp", event_data, created_at
-)
-VALUES
-  (
-    gen_random_uuid(),
-    'CDEV0000000000000000000000000000000000000000000000000000FAKE0001',
-    'contract',
-    'devtxhash000000000000000000000000000000000000000000000000000001',
-    1000001,
-    NOW() - INTERVAL '10 minutes',
-    '{"topic":["transfer"],"value":{"amount":"1000000","from":"GDEV...","to":"GDEV2..."}}',
-    NOW()
-  ),
-  (
-    gen_random_uuid(),
-    'CDEV0000000000000000000000000000000000000000000000000000FAKE0001',
-    'contract',
-    'devtxhash000000000000000000000000000000000000000000000000000002',
-    1000002,
-    NOW() - INTERVAL '5 minutes',
-    '{"topic":["mint"],"value":{"amount":"500000","to":"GDEV2..."}}',
-    NOW()
-  ),
-  (
-    gen_random_uuid(),
-    'CDEV0000000000000000000000000000000000000000000000000000FAKE0002',
-    'contract',
-    'devtxhash000000000000000000000000000000000000000000000000000003',
-    1000003,
-    NOW() - INTERVAL '1 minute',
-    '{"topic":["swap"],"value":{"token_in":"XLM","token_out":"USDC","amount_in":"100"}}',
-    NOW()
-  )
-ON CONFLICT DO NOTHING;
-SQL
-
-ROW_COUNT=$(psql -t -A "$DATABASE_URL" -c "SELECT COUNT(*) FROM events;")
-success "Database seeded — ${ROW_COUNT} event(s) in the events table"
+# Use the seed binary to insert realistic events, subscriptions, notification
+# channels, and contract labels.  The binary is idempotent (ON CONFLICT DO
+# NOTHING) and configurable: set EVENTS= to change the volume.
+if DATABASE_URL="$DATABASE_URL" make seed EVENTS="${SEED_EVENTS:-500}" 2>&1; then
+  success "Database seeded with representative development data"
+else
+  warn "make seed failed — the service will still start, just with an empty database"
+fi
 
 # ── 5. Node dependencies ──────────────────────────────────────────────────────
 info "Installing Node dependencies for frontend…"
