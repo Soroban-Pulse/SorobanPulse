@@ -109,9 +109,6 @@ impl SecurityHeadersConfig {
 /// - `Permissions-Policy: …` (all powerful features disabled)
 /// - `Content-Security-Policy` (strict for API routes; relaxed for `/docs`;
 ///   the `/ui` dashboard keeps the policy set by `crate::dashboard`)
-pub async fn security_headers_middleware(req: Request, next: Next) -> Response {
-/// - `Permissions-Policy` (all powerful features disabled)
-/// - `Content-Security-Policy` (strict for API routes; relaxed for `/docs`)
 pub async fn security_headers_middleware_with_config(
     config: SecurityHeadersConfig,
     req: Request,
@@ -149,9 +146,9 @@ pub async fn security_headers_middleware_with_config(
     };
     // The /ui dashboard sets its own policy (see crate::dashboard); keep it.
     if !(crate::dashboard::is_dashboard_path(&path) && h.contains_key("Content-Security-Policy")) {
-        h.insert("Content-Security-Policy", csp.parse().unwrap());
-    if let Ok(v) = csp.parse() {
-        h.insert("Content-Security-Policy", v);
+        if let Ok(v) = csp.parse() {
+            h.insert("Content-Security-Policy", v);
+        }
     }
 
     response
