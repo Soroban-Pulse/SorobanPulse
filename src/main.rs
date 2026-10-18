@@ -37,7 +37,7 @@ mod models;
 mod normalizer;
 mod notification_dedup;
 
-use soroban_pulse::{audit_logging, bloom_filter, compliance_report, compression_config, config, config_validation, content_filter, cross_chain_correlation, cursor_expiry_handler, db, advisory_lock, query_streaming, serialization_cache, streaming_response, dedup, distributed_tracing, email, encryption, error, event_hubs, graceful_shutdown, handlers, idempotency, log_analysis_tool, index_monitor, indexer, kafka, kinesis, metrics, prometheus_remote_write, eventbridge, middleware, models, normalizer, notification_dedup, warehouse, pruner, pubsub, queue_publisher, rate_limiter, reencrypt, resource_metrics, routes, rpc_client, schema_validator, sqs, stats_refresh, subscriptions, webhook, webhook_verification, notification_rate_limit, notification_formatter, pagerduty, github, discord, slack, teams, telegram, notification_channel, notification_delivery, integration_handlers, retry_policy, sms, aggregation, saved_queries, abi, oncall, xdr_validation, replica_monitor, feature_flags, event_dedup_replicas, bulk_export, sse_ring_buffer, query_cache, query_plan_cache, query_optimizer, partition_manager, query_builder, adaptive_pool, notification_admin, financial_accuracy, webhook_template, event_aggregation, anomaly_detection, push_notification, connection_pool, slo_tracker, anonymization, event_compression, health_check, ledger_hashes, networks, zero_trust, pool_management, push_preload, statistics_management, cloud_provider, cloud_replication, deployment_orchestrator};
+use soroban_pulse::{audit_logging, bloom_filter, compliance_report, compression_config, config, config_validation, content_filter, cross_chain_correlation, cursor_expiry_handler, db, advisory_lock, query_streaming, serialization_cache, streaming_response, dedup, distributed_tracing, email, encryption, error, event_hubs, graceful_shutdown, handlers, idempotency, log_analysis_tool, index_monitor, indexer, kafka, kinesis, metrics, prometheus_remote_write, eventbridge, middleware, models, normalizer, notification_dedup, warehouse, pruner, pubsub, queue_publisher, rate_limiter, reencrypt, resource_metrics, routes, rpc_client, schema_validator, sqs, stats_refresh, subscriptions, webhook, webhook_verification, notification_rate_limit, notification_formatter, pagerduty, github, discord, slack, teams, telegram, notification_channel, notification_delivery, integration_handlers, retry_policy, sms, aggregation, saved_queries, abi, oncall, xdr_validation, replica_monitor, feature_flags, event_dedup_replicas, bulk_export, sse_ring_buffer, query_cache, query_plan_cache, query_optimizer, partition_manager, query_builder, adaptive_pool, notification_admin, financial_accuracy, webhook_template, anomaly_detection, push_notification, connection_pool, slo_tracker, anonymization, event_compression, health_check, ledger_hashes, networks, zero_trust, pool_management, push_preload, statistics_management, cloud_provider, cloud_replication, deployment_orchestrator};
 #[cfg(feature = "lua")]
 use soroban_pulse::lua_transform;
 #[cfg(feature = "parquet")]
@@ -61,7 +61,6 @@ mod notification_admin;
 mod push_preload;
 mod financial_accuracy;
 mod webhook_template;
-mod event_aggregation;
 mod anomaly_detection;
 mod push_notification;
 mod connection_pool;

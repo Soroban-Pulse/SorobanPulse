@@ -43,7 +43,6 @@ pub mod event_hubs;
 pub mod event_replay;
 pub mod event_router;
 pub mod event_simulator;
-pub mod event_aggregation;
 pub mod time_series;
 pub mod anomaly_detection;
 pub mod gdpr;
