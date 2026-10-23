@@ -288,6 +288,7 @@
 - [Discord integration](../discord-integration.md)
 - [Microsoft Teams integration](../teams-integration.md)
 - [PagerDuty Integration](../pagerduty-integration.md)
+- [Platform Integration Guide](../guides/integration-guide.md)
 
 ### Event Streaming
 
@@ -346,6 +347,14 @@
 - [Schema Audit — SorobanPulse](../schema-audit.md)
 - [Typed Error Migration](../typed-error-migration.md)
 - [Unified Query Builder Pattern](../query-builder-pattern.md)
+
+### Design Specs / RFCs
+
+- [Design Specs / RFCs](../rfcs/README.md)
+  - [Webhook delivery improvements: spec](../rfcs/webhook-delivery-improvements/spec.md)
+  - [Webhook delivery improvements: executive summary](../rfcs/webhook-delivery-improvements/executive-summary.md)
+  - [Webhook delivery improvements: quick start](../rfcs/webhook-delivery-improvements/quick-start.md)
+  - [Webhook delivery improvements: testing and validation](../rfcs/webhook-delivery-improvements/testing-and-validation.md)
 
 ### Pull Request Notes
 

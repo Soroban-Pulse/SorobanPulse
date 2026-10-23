@@ -726,6 +726,7 @@ Before requesting review, verify that the change is scoped to the issue, tests c
   Run `make test` and `make lint` locally first.
 - Fill in every section of the [PR template](.github/pull_request_template.md).
 - Use Conventional Commits for all commit messages in the PR.
+- Put PR summaries and implementation reports in the PR description, not in new files at the repository root. Only `README`, `CONTRIBUTING`, `CHANGELOG`, `LICENSE`, `SECURITY`, `CODE_OF_CONDUCT` and other standard project files belong there; user guides go in `docs/guides/`, design specs in `docs/rfcs/`.
 - Respond to review feedback within 7 days; PRs left without a response may be closed and the issue released.
 
 ### Path-Filtered CI

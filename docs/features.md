@@ -379,3 +379,43 @@ Yes — it is purely a test gate with no runtime code. The release profile
 (`strip = true`) ensures the test code is stripped from the final binary.
 That said, there is no reason to include it in production; leaving it out
 keeps the build faster.
+
+## Gated in code but not declared
+
+The following names appear in `#[cfg(feature = "...")]` attributes but are
+**not** declared in `Cargo.toml`. They cannot be enabled today
+(`cargo build --features graphql` fails with "does not have that feature"),
+so the gated code is never compiled. They are flagged for review: each needs
+to be declared with its dependencies, or the gated code removed.
+
+| Feature | Gated code | Dependencies it would need | Maturity |
+|---|---|---|---|
+| `graphql` | `src/graphql.rs`, `src/graphql_subscriptions.rs`. See [graphql_api.md](graphql_api.md). | `async-graphql` (already a non-optional dependency) | experimental |
+| `otel` | OTLP tracing layer in `src/main.rs`, `src/distributed_tracing.rs`. Env: `OTEL_EXPORTER_OTLP_ENDPOINT`. | `opentelemetry`, `opentelemetry-otlp` (non-optional), `tracing-opentelemetry` | experimental |
+| `zipkin` | Only referenced by the `otel`/`zipkin` conflict check in `build.rs` | a Zipkin exporter crate | experimental |
+| `encryption` | AES-256-GCM `event_data` encryption in `src/encryption.rs`, `src/handlers.rs`. See [encryption.md](encryption.md). | `aes-gcm` (non-optional) | experimental |
+| `kinesis` | AWS Kinesis publisher (`src/kinesis.rs`). Env: `KINESIS_STREAM_NAME`, `AWS_REGION`. | an AWS Kinesis client | experimental |
+| `archive` | S3 archival job (`src/archiver.rs`). Env: `ARCHIVE_AFTER_DAYS`. See [data-retention-tiers.md](data-retention-tiers.md). | `aws-sdk-s3`, `flate2` | experimental |
+| `parquet` | Parquet export (`src/parquet_export.rs`). | `parquet`, `arrow` | experimental |
+| `lua` | Lua event transforms (`src/lua_transform.rs`). Env: `EVENT_TRANSFORM_SCRIPT`, `EVENT_TRANSFORM_TIMEOUT_MS`. See [lua-transformation.md](lua-transformation.md). | `mlua` | experimental |
+| `redis-queue` | Redis Streams publisher in `src/queue_publisher.rs`. Env: `REDIS_URL`, `REDIS_STREAM_KEY`, `REDIS_BUFFER_MAX_SIZE`. | `redis` | experimental |
+
+## Docker image and Helm chart
+
+The published Docker image is built from the [`Dockerfile`](../Dockerfile)
+with **default features only** (`classical-crypto`, `dashboard`). The
+[Helm chart](../helm/soroban-pulse) deploys that same image and does not
+enable any extra features. To run an integration such as Kafka or Pub/Sub in
+Kubernetes, build a custom image (below) and point `image.repository` /
+`image.tag` in the chart values at it.
+
+### Custom Docker build
+
+Docker, through the `CARGO_FEATURES` build arg (added on top of the defaults):
+
+```bash
+docker build --build-arg CARGO_FEATURES="kafka pubsub" -t soroban-pulse:custom .
+```
+
+The `kafka` feature also needs `cmake` and a C++ compiler in the builder
+stage to build librdkafka.
