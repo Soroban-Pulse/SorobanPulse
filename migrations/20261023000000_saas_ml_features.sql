@@ -1,9 +1,28 @@
 -- Migration for SaaS Platform & Multi-Tenant Hosting (Issue #841)
 -- and AI/ML Integration & Intelligence Features (Issue #842)
+--
+-- NOTE: Originally committed as 20250826_saas_ml_features.sql with an 8-digit
+-- date prefix that sorted before the baseline create_events migration.  Renamed
+-- to this 14-digit timestamp (after 20261022000001_rls_events_partitioned) so
+-- it runs in the correct order.  Any deployment that already applied the old
+-- file should skip this migration (the tables will already exist thanks to the
+-- IF NOT EXISTS guards) and manually remove the old entry from the
+-- _sqlx_migrations table:
+--
+--   DELETE FROM _sqlx_migrations
+--   WHERE version = 20250826
+--     AND description = 'saas ml features';
 
--- Create enum types for SaaS platform
-CREATE TYPE subscription_tier AS ENUM ('free', 'starter', 'professional', 'enterprise', 'custom');
-CREATE TYPE tenant_status AS ENUM ('active', 'suspended', 'pending', 'cancelled', 'trial');
+-- Create enum types for SaaS platform (idempotent)
+DO $$ BEGIN
+    CREATE TYPE subscription_tier AS ENUM ('free', 'starter', 'professional', 'enterprise', 'custom');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE tenant_status AS ENUM ('active', 'suspended', 'pending', 'cancelled', 'trial');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- SaaS tenants table
 CREATE TABLE IF NOT EXISTS saas_tenants (
@@ -33,10 +52,10 @@ CREATE TABLE IF NOT EXISTS saas_tenants (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_saas_tenants_tenant_id ON saas_tenants(tenant_id);
-CREATE INDEX idx_saas_tenants_status ON saas_tenants(status);
-CREATE INDEX idx_saas_tenants_tier ON saas_tenants(subscription_tier);
-CREATE INDEX idx_saas_tenants_trial_ends ON saas_tenants(trial_ends_at) WHERE trial_ends_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_saas_tenants_tenant_id ON saas_tenants(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_saas_tenants_status ON saas_tenants(status);
+CREATE INDEX IF NOT EXISTS idx_saas_tenants_tier ON saas_tenants(subscription_tier);
+CREATE INDEX IF NOT EXISTS idx_saas_tenants_trial_ends ON saas_tenants(trial_ends_at) WHERE trial_ends_at IS NOT NULL;
 
 -- API request logs for usage tracking
 CREATE TABLE IF NOT EXISTS api_request_logs (
@@ -51,8 +70,8 @@ CREATE TABLE IF NOT EXISTS api_request_logs (
     ip_address INET
 );
 
-CREATE INDEX idx_api_request_logs_tenant ON api_request_logs(tenant_id, timestamp DESC);
-CREATE INDEX idx_api_request_logs_timestamp ON api_request_logs(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_api_request_logs_tenant ON api_request_logs(tenant_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_api_request_logs_timestamp ON api_request_logs(timestamp DESC);
 
 -- Webhook deliveries for tracking
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
@@ -68,7 +87,7 @@ CREATE TABLE IF NOT EXISTS webhook_deliveries (
     delivered_at TIMESTAMP WITH TIME ZONE
 );
 
-CREATE INDEX idx_webhook_deliveries_tenant ON webhook_deliveries(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_tenant ON webhook_deliveries(tenant_id, created_at DESC);
 
 -- ML models table
 CREATE TABLE IF NOT EXISTS ml_models (
@@ -89,9 +108,9 @@ CREATE TABLE IF NOT EXISTS ml_models (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_ml_models_type ON ml_models(model_type);
-CREATE INDEX idx_ml_models_active ON ml_models(is_active);
-CREATE INDEX idx_ml_models_name ON ml_models(name);
+CREATE INDEX IF NOT EXISTS idx_ml_models_type ON ml_models(model_type);
+CREATE INDEX IF NOT EXISTS idx_ml_models_active ON ml_models(is_active);
+CREATE INDEX IF NOT EXISTS idx_ml_models_name ON ml_models(name);
 
 -- Detected patterns table
 CREATE TABLE IF NOT EXISTS detected_patterns (
@@ -107,9 +126,9 @@ CREATE TABLE IF NOT EXISTS detected_patterns (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_detected_patterns_type ON detected_patterns(pattern_type);
-CREATE INDEX idx_detected_patterns_confidence ON detected_patterns(confidence DESC);
-CREATE INDEX idx_detected_patterns_last_seen ON detected_patterns(last_seen DESC);
+CREATE INDEX IF NOT EXISTS idx_detected_patterns_type ON detected_patterns(pattern_type);
+CREATE INDEX IF NOT EXISTS idx_detected_patterns_confidence ON detected_patterns(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_detected_patterns_last_seen ON detected_patterns(last_seen DESC);
 
 -- ML predictions table
 CREATE TABLE IF NOT EXISTS ml_predictions (
@@ -127,9 +146,9 @@ CREATE TABLE IF NOT EXISTS ml_predictions (
     error DOUBLE PRECISION
 );
 
-CREATE INDEX idx_ml_predictions_model ON ml_predictions(model_id, prediction_time DESC);
-CREATE INDEX idx_ml_predictions_type ON ml_predictions(prediction_type);
-CREATE INDEX idx_ml_predictions_valid ON ml_predictions(valid_until) WHERE valid_until > NOW();
+CREATE INDEX IF NOT EXISTS idx_ml_predictions_model ON ml_predictions(model_id, prediction_time DESC);
+CREATE INDEX IF NOT EXISTS idx_ml_predictions_type ON ml_predictions(prediction_type);
+CREATE INDEX IF NOT EXISTS idx_ml_predictions_valid ON ml_predictions(valid_until) WHERE valid_until > NOW();
 
 -- Intelligent filters table
 CREATE TABLE IF NOT EXISTS intelligent_filters (
@@ -152,8 +171,8 @@ CREATE TABLE IF NOT EXISTS intelligent_filters (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_intelligent_filters_active ON intelligent_filters(is_active);
-CREATE INDEX idx_intelligent_filters_confidence ON intelligent_filters(confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_intelligent_filters_active ON intelligent_filters(is_active);
+CREATE INDEX IF NOT EXISTS idx_intelligent_filters_confidence ON intelligent_filters(confidence DESC);
 
 -- Add tenant_id to events table if not exists
 DO $$
@@ -189,8 +208,8 @@ CREATE TABLE IF NOT EXISTS metric_history (
     tenant_id VARCHAR(255)
 );
 
-CREATE INDEX idx_metric_history_subscription ON metric_history(subscription_id, metric_name, timestamp DESC);
-CREATE INDEX idx_metric_history_tenant ON metric_history(tenant_id, timestamp DESC) WHERE tenant_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_metric_history_subscription ON metric_history(subscription_id, metric_name, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_metric_history_tenant ON metric_history(tenant_id, timestamp DESC) WHERE tenant_id IS NOT NULL;
 
 -- Function to update updated_at timestamp
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -202,15 +221,15 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Triggers for updated_at
-CREATE TRIGGER update_saas_tenants_updated_at 
+CREATE OR REPLACE TRIGGER update_saas_tenants_updated_at 
     BEFORE UPDATE ON saas_tenants 
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_ml_models_updated_at 
+CREATE OR REPLACE TRIGGER update_ml_models_updated_at 
     BEFORE UPDATE ON ml_models 
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
-CREATE TRIGGER update_intelligent_filters_updated_at 
+CREATE OR REPLACE TRIGGER update_intelligent_filters_updated_at 
     BEFORE UPDATE ON intelligent_filters 
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 

@@ -1,4 +1,5 @@
--- Down migration for 20250826_saas_ml_features.sql
+-- Down migration for 20261023000000_saas_ml_features.sql
+-- (Renamed from 20250826_saas_ml_features.sql — see that file for history.)
 DROP INDEX IF EXISTS idx_saas_tenants_tenant_id;
 DROP INDEX IF EXISTS idx_saas_tenants_status;
 DROP INDEX IF EXISTS idx_saas_tenants_tier;

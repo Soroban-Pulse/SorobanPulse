@@ -847,7 +847,6 @@ Behaviour:
 
 Configure this variable in every environment where the integration handlers are
 exposed, and keep it in sync with the domains you actually control.
-=======
 
 ---
 

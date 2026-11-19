@@ -401,7 +401,6 @@ wording).  Examples:
 | `https://sorobanpulse.dev/errors/unavailable` | `503` |
 
 > Older clients that read the legacy `error` field should migrate to `detail`.
-=======
 
 ### HTTP status codes
 
