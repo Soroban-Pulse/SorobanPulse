@@ -32,7 +32,6 @@ from typing import Any
 received: list[dict[str, Any]] = []
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
-=======
 
 
 class SinkHandler(BaseHTTPRequestHandler):
