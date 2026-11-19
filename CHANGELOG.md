@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Corrected 13 CI jobs that referenced `github.event.pull_request.changed_files` (an integer) as a path list, causing them to silently skip on every PR. These jobs — including `fmt`, `deny`, `clippy`, `test`, and others — now use a `rust` output from the `changes` job (dorny/paths-filter) for correct path-based skipping. (#1405)
+- Fixed CI `web` path filter: `dashboard/**` → `web/**` (plus `dashboard/**`, `design/**`, `packages/**`) so changes to the shipped `web/` UI trigger the frontend job. The `web` CI job now runs in `web/` with `npm ci && npm run lint && npm test && npm run build`. (#1406)
+- Renumbered six duplicate migration versions that caused `sqlx::migrate!` to fail at startup (#1407):
+  - `20260701000001_webhook_dlq` → `20260701000005_webhook_dlq`
+  - `20260701000002_derived_metric_snapshots` → `20260701000006_derived_metric_snapshots`
+  - `20260701000003_incidents` → `20260701000007_incidents`
+  - `20261017000001_sac_asset_columns` → `20261017000004_sac_asset_columns`
+  - `20261017000001_sep41_event_columns` → `20261017000005_sep41_event_columns`
+- Added missing `.down.sql` files for `webhook_dlq`, `derived_metric_snapshots`, and `incidents` migrations, restoring the round-trip CI job. (#1408)
+
+### Upgrade Notes (migration version changes)
+If your database has already applied any of the old duplicate-versioned migrations, you must reconcile the `_sqlx_migrations` table before running `sqlx migrate run` on this release. Update the version column for the affected rows from their old prefix to the new one listed above, or delete those rows and re-apply the migrations if the data can be safely recreated.
+
 ### Added
 - Design specification and implementable mockups for Event Explorer and Event Detail screens (`docs/event-explorer-design.md`)
 - Event Explorer page with filter bar, table, empty state, and pagination (`dashboard/src/pages/EventExplorerPage.tsx`)

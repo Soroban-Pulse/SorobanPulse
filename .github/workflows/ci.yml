@@ -31,31 +31,53 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      rust: ${{ steps.filter.outputs.rust }}
       sdk: ${{ steps.filter.outputs.sdk }}
       web: ${{ steps.filter.outputs.web }}
       extension: ${{ steps.filter.outputs.extension }}
+      migrations: ${{ steps.filter.outputs.migrations }}
+      terraform: ${{ steps.filter.outputs.terraform }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
           filters: |
+            rust:
+              - "src/**"
+              - "tests/**"
+              - "benches/**"
+              - "fuzz/**"
+              - "migrations/**"
+              - "Cargo.toml"
+              - "Cargo.lock"
+              - "build.rs"
+              - "deny.toml"
+              - ".sqlx/**"
             sdk:
               - "sdk/**"
               - "openapi.json"
               - "openapitools.json"
               - "Makefile"
             web:
+              - "web/**"
               - "dashboard/**"
+              - "design/**"
+              - "packages/**"
             extension:
               - "vscode-extension/**"
+            migrations:
+              - "migrations/**"
+              - "scripts/check-migrations.sh"
+              - "scripts/migration-roundtrip.sh"
+            terraform:
+              - "terraform/**"
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "benches/**", "fuzz/**", "migrations/**"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -66,9 +88,8 @@ jobs:
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "deny.toml"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Single invocation so advisories, bans, licenses and sources are all
@@ -82,9 +103,8 @@ jobs:
   check-migrations:
     name: Check Migrations
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["migrations/**", "scripts/check-migrations.sh"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.migrations == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash scripts/check-migrations.sh
@@ -92,9 +112,8 @@ jobs:
   migration-roundtrip:
     name: Migration Round-Trip (up + down)
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["migrations/**", "scripts/migration-roundtrip.sh"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.migrations == 'true'
     services:
       postgres:
         image: postgres:16
@@ -148,21 +167,24 @@ jobs:
           fi
 
   web:
-    name: Dashboard Build
+    name: Web UI Build
     runs-on: ubuntu-latest
     needs: changes
     if: needs.changes.outputs.web == 'true'
     defaults:
       run:
-        working-directory: dashboard
+        working-directory: web
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - run: npm install
-      - run: npm run build
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
       - run: npm test
+      - run: npm run build
 
   extension:
     name: VS Code Extension Build
@@ -185,9 +207,8 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "benches/**"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -202,9 +223,8 @@ jobs:
   build-tests:
     name: Build Tests (cargo-nextest)
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**", ".sqlx/**"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     services:
       postgres:
         image: postgres:15
@@ -245,9 +265,8 @@ jobs:
   sqlx-prepare-check:
     name: sqlx prepare --check
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**", ".sqlx/**"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     services:
       postgres:
         image: postgres:15
@@ -290,9 +309,8 @@ jobs:
     # (quantum-crypto, istio, linkerd, full-observability, kafka, sqs, pubsub).
     # `--each-feature` checks every feature on its own plus --no-default-features.
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "Cargo.*"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     services:
       postgres:
         image: postgres:16
@@ -349,10 +367,8 @@ jobs:
   test:
     name: Test (rust stable, pg ${{ matrix.postgres }})
     runs-on: ubuntu-latest
-    needs: build-tests
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**"]'), github.event.pull_request.changed_files)
+    needs: [build-tests, changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
       checks: write
@@ -444,9 +460,8 @@ jobs:
     name: Coverage Report
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     services:
       postgres:
         image: postgres:15
@@ -574,10 +589,8 @@ jobs:
     # create throwaway non-superuser application roles.
     name: Multi-Tenant RLS Isolation (pg ${{ matrix.postgres }})
     runs-on: ubuntu-latest
-    needs: build-tests
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**"]'), github.event.pull_request.changed_files)
+    needs: [build-tests, changes]
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     permissions:
       contents: read
       checks: write
@@ -618,9 +631,8 @@ jobs:
     name: Bench (non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "benches/**", "Cargo.*"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.rust == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -874,9 +886,8 @@ jobs:
   terraform-validate:
     name: Terraform Validate
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["terraform/**"]'), github.event.pull_request.changed_files)
+    needs: changes
+    if: github.event_name != 'pull_request' || needs.changes.outputs.terraform == 'true'
     defaults:
       run:
         working-directory: terraform
