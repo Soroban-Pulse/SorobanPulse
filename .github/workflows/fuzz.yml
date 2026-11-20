@@ -24,6 +24,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # The library uses sqlx::query! macros; without a live DATABASE_URL they
+  # must compile from the checked-in .sqlx cache, otherwise every target fails
+  # to build and is misreported as a crash (#1377, #1378, #1379).
+  SQLX_OFFLINE: 'true'
   FUZZ_SECS: ${{ github.event.inputs.fuzz_duration_secs || '300' }}
 
 jobs:
@@ -62,6 +66,9 @@ jobs:
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
+
+      - name: Build fuzz target
+        run: cargo fuzz build "${{ matrix.target }}"
 
       - name: Run fuzz target for ${{ env.FUZZ_SECS }}s
         id: fuzz_run
@@ -110,7 +117,8 @@ jobs:
           retention-days: 30
 
       - name: Report crash as GitHub Issue
-        if: failure()
+        # Only a failure of the fuzz run itself is a crash; build errors are not.
+        if: failure() && steps.fuzz_run.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |

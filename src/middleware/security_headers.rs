@@ -144,8 +144,10 @@ pub async fn security_headers_middleware_with_config(
     } else {
         &config.csp_default
     };
-    // The /ui dashboard sets its own policy (see crate::dashboard); keep it.
-    if !(crate::dashboard::is_dashboard_path(&path) && h.contains_key("Content-Security-Policy")) {
+    // The /ui dashboard and /redoc (#1357) set their own policy; keep it.
+    if !((crate::dashboard::is_dashboard_path(&path) || path == "/redoc")
+        && h.contains_key("Content-Security-Policy"))
+    {
         if let Ok(v) = csp.parse() {
             h.insert("Content-Security-Policy", v);
         }

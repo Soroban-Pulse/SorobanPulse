@@ -909,11 +909,66 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     state.prometheus_handle.render()
 }
 
-/// Serve the raw OpenAPI JSON spec.
-pub async fn openapi_json() -> impl IntoResponse {
+/// SorobanPulse wordmark as a data URI, used as `info.x-logo` for Redoc (#1357).
+pub const SOROBAN_PULSE_LOGO_DATA_URI: &str = "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='48' viewBox='0 0 220 48'%3E%3Ccircle cx='24' cy='24' r='22' fill='%237c3aed'/%3E%3Cpath d='M12 24 Q24 10 36 24 Q24 38 12 24Z' fill='%23a78bfa'/%3E%3Ccircle cx='24' cy='24' r='5' fill='%230f1117'/%3E%3Ctext x='56' y='32' font-family='system-ui,sans-serif' font-size='22' font-weight='700' fill='%237c3aed'%3ESorobanPulse%3C/text%3E%3C/svg%3E";
+
+/// Build the OpenAPI spec as JSON with SorobanPulse vendor extensions
+/// (`info.x-logo` for Redoc, issue #1357).
+pub fn openapi_value() -> serde_json::Value {
     use crate::routes::ApiDoc;
     use utoipa::OpenApi;
-    Json(ApiDoc::openapi())
+    let mut spec = serde_json::to_value(ApiDoc::openapi()).unwrap_or_else(|_| json!({}));
+    if let Some(info) = spec.get_mut("info").and_then(|i| i.as_object_mut()) {
+        info.insert(
+            "x-logo".to_string(),
+            json!({
+                "url": SOROBAN_PULSE_LOGO_DATA_URI,
+                "altText": "SorobanPulse",
+                "backgroundColor": "#0f1117",
+                "href": "/docs"
+            }),
+        );
+    }
+    spec
+}
+
+/// Serve the raw OpenAPI JSON spec.
+pub async fn openapi_json() -> impl IntoResponse {
+    Json(openapi_value())
+}
+
+/// CSP for the Redoc page at `/redoc` (#1357). Redoc renders with inline
+/// styles and spins up a blob: web worker for search; it needs no inline script.
+pub const REDOC_CSP: &str = "default-src 'self'; \
+    script-src 'self' https://unpkg.com; \
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; \
+    font-src 'self' data: https://fonts.gstatic.com; \
+    img-src 'self' data: https:; \
+    worker-src 'self' blob:; \
+    connect-src 'self'; \
+    frame-ancestors 'none'; \
+    base-uri 'self'; \
+    form-action 'none'";
+
+/// Serve a SorobanPulse-themed Redoc viewer as an alternative to Swagger UI (#1357).
+pub async fn redoc_ui() -> impl IntoResponse {
+    let html = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SorobanPulse — API Reference</title>
+</head>
+<body style="margin:0">
+  <redoc spec-url="/openapi.json"
+    theme='{"colors":{"primary":{"main":"#7c3aed"},"success":{"main":"#10b981"},"warning":{"main":"#f59e0b"},"error":{"main":"#ef4444"}},"typography":{"fontFamily":"system-ui, sans-serif","headings":{"fontWeight":"700"},"links":{"color":"#7c3aed"}},"sidebar":{"backgroundColor":"#1a1d2e","textColor":"#e2e8f0","activeTextColor":"#a78bfa"},"rightPanel":{"backgroundColor":"#0f1117"},"logo":{"gutter":"16px"}}'></redoc>
+  <script src="https://unpkg.com/redoc@2.1.5/bundles/redoc.standalone.js"></script>
+</body>
+</html>"##;
+    (
+        [(axum::http::header::CONTENT_SECURITY_POLICY, REDOC_CSP)],
+        axum::response::Html(html),
+    )
 }
 
 /// Serve the branded SorobanPulse Swagger UI page.
@@ -4016,6 +4071,29 @@ mod tests {
     }
 
     // --- Validation edge-case unit tests (discovered via fuzzing review) ---
+
+    /// Regression for #1378: arbitrary UTF-8 (multi-byte chars whose byte
+    /// length is 56, NUL bytes, lone 'C') must be rejected without panicking.
+    #[test]
+    fn validate_contract_id_fuzz_regression_no_panic() {
+        let multibyte = format!("C{}", "\u{e9}".repeat(27) + "A"); // 56 bytes, non-ASCII
+        assert_eq!(multibyte.len(), 56);
+        for s in ["C", "\0", "C\0", multibyte.as_str(), &"\u{1F600}".repeat(14)] {
+            assert!(validate_contract_id(s).is_err());
+            assert_eq!(validate_contract_id(s).is_ok(), validate_contract_id(s).is_ok());
+        }
+        let valid = format!("C{}", "A".repeat(55));
+        assert!(validate_contract_id(&valid).is_ok());
+    }
+
+    /// `/openapi.json` carries `info.x-logo` for Redoc (#1357).
+    #[test]
+    fn openapi_value_has_x_logo() {
+        let spec = openapi_value();
+        let logo = &spec["info"]["x-logo"];
+        assert_eq!(logo["altText"], "SorobanPulse");
+        assert!(logo["url"].as_str().unwrap().starts_with("data:image/svg+xml"));
+    }
 
     #[test]
     fn validate_contract_id_empty_returns_err() {

@@ -964,6 +964,23 @@ impl From<&SorobanEvent> for Event {
 mod tests {
     use super::*;
 
+    /// Regression for #1379 (fuzz_pagination_params): extreme page/limit values
+    /// deserialized from JSON must never panic or leave the valid ranges.
+    #[test]
+    fn pagination_fuzz_regression_extremes() {
+        for input in [
+            r#"{"page":-9223372036854775808,"limit":-9223372036854775808}"#,
+            r#"{"page":9223372036854775807,"limit":9223372036854775807}"#,
+            r#"{"page":0,"limit":0}"#,
+            r#"{"fields":" , ,id"}"#,
+        ] {
+            let p: PaginationParams = serde_json::from_str(input).unwrap();
+            assert!((1..=100).contains(&p.limit()));
+            assert!(p.offset() >= 0);
+            let _ = p.columns();
+        }
+    }
+
     fn params(page: Option<i64>, limit: Option<i64>) -> PaginationParams {
         PaginationParams {
             page,

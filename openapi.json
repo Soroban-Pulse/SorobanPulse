@@ -6,7 +6,13 @@
     "license": {
       "name": ""
     },
-    "version": "1.0.0"
+    "version": "1.0.0",
+    "x-logo": {
+      "url": "data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='220' height='48' viewBox='0 0 220 48'%3E%3Ccircle cx='24' cy='24' r='22' fill='%237c3aed'/%3E%3Cpath d='M12 24 Q24 10 36 24 Q24 38 12 24Z' fill='%23a78bfa'/%3E%3Ccircle cx='24' cy='24' r='5' fill='%230f1117'/%3E%3Ctext x='56' y='32' font-family='system-ui,sans-serif' font-size='22' font-weight='700' fill='%237c3aed'%3ESorobanPulse%3C/text%3E%3C/svg%3E",
+      "altText": "SorobanPulse",
+      "backgroundColor": "#0f1117",
+      "href": "/docs"
+    }
   },
   "paths": {
     "/health": {
