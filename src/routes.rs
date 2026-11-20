@@ -885,6 +885,7 @@ pub fn create_router_with_tx_and_tenant_map(
             .route("/status", get(handlers::status))
             .route("/openapi.json", get(handlers::openapi_json))
             .route("/docs", get(handlers::swagger_ui))
+            .route("/redoc", get(handlers::redoc_ui))
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated);
@@ -909,6 +910,7 @@ pub fn create_router_with_tx_and_tenant_map(
             .route("/status", get(handlers::status))
             .route("/openapi.json", get(handlers::openapi_json))
             .route("/docs", get(handlers::swagger_ui))
+            .route("/redoc", get(handlers::redoc_ui))
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated);
@@ -933,6 +935,7 @@ pub fn create_router_with_tx_and_tenant_map(
             .route("/status", get(handlers::status))
             .route("/openapi.json", get(handlers::openapi_json))
             .route("/docs", get(handlers::swagger_ui))
+            .route("/redoc", get(handlers::redoc_ui))
             .merge(graphql_routes())
             .nest("/v1", v1)
             .merge(deprecated);

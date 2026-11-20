@@ -36,15 +36,19 @@ fn is_swagger_ui_path(path: &str) -> bool {
 /// (which get a strict `default-src 'none'` policy).
 pub async fn security_headers_middleware(req: Request, next: Next) -> Response<Body> {
     let is_swagger = is_swagger_ui_path(req.uri().path());
+    let is_redoc = req.uri().path() == "/redoc";
 
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 
     let csp = if is_swagger { SWAGGER_CSP } else { API_CSP };
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(csp),
-    );
+    // `/redoc` sets its own CSP in the handler (#1357); keep it.
+    if !(is_redoc && headers.contains_key(header::CONTENT_SECURITY_POLICY)) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(csp),
+        );
+    }
 
     headers.insert(
         header::STRICT_TRANSPORT_SECURITY,

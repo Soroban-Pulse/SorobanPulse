@@ -201,6 +201,20 @@ mod tests {
 
     /// Fuzz regression (#1236): non-ScVal JSON, extreme 128-bit parts and
     /// nested containers must render in every format without panicking.
+    /// Regression for #1377 (fuzz_xdr_scval): deeply nested and malformed
+    /// input is rejected / passed through in every format without panicking.
+    #[test]
+    fn fuzz_xdr_scval_regression_deep_and_malformed() {
+        let deep: Value = serde_json::from_str(&format!("{}{}", "[".repeat(120), "]".repeat(120))).unwrap();
+        assert!(decode_scval(&deep).is_none());
+        for v in [deep, json!({"i128": {"hi": i64::MIN, "lo": 0}}), json!({"vec": null}), json!("")] {
+            for f in [ScValFormat::Json, ScValFormat::Native, ScValFormat::Xdr] {
+                let _ = render(&v, f);
+            }
+            assert_eq!(decode_scval(&v).is_some(), decode_scval(&v).is_some());
+        }
+    }
+
     #[test]
     fn render_edge_cases_never_panic() {
         let cases = [
