@@ -2,6 +2,18 @@
 
 **Issue #842**
 
+> [!WARNING]
+> **Status: Experimental — not wired into the running service.**
+>
+> The ML algorithms described below exist as library code (`ml_integration`), but they are
+> **not** connected to the running service: no ML API routes are registered, no background
+> model-training pipeline exists, and the `ML_*` environment variables are not read by the
+> server. Treat every endpoint, configuration key and workflow on this page as a design
+> sketch rather than a supported feature. Do not rely on it in production.
+>
+> See the [Feature Maturity](feature-maturity.md) page for the current status of this and
+> other subsystems, and the tracking issue for progress.
+
 This document describes the AI/ML integration capabilities for intelligent features in SorobanPulse.
 
 ## Overview
@@ -598,7 +610,8 @@ Ensure at least 100 samples exist.
 
 ## See Also
 
-- [Anomaly Detection Documentation](ANOMALY_DETECTION.md)
-- [Event Processing](EVENT_PROCESSING.md)
-- [API Documentation](API.md)
-- [Performance Tuning](PERFORMANCE.md)
+- [Feature Maturity](feature-maturity.md)
+- [Anomaly Detection Documentation](anomaly-detection.md)
+- [Event Processing](event-processing.md)
+- [API Documentation](api.md)
+- [Performance Tuning](performance.md)

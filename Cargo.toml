@@ -205,6 +205,9 @@ dashboard = ["tower-http/fs"]
 
 # Cryptography features
 classical-crypto = []
+# Issue #1484: Post-quantum crypto is Planned/Experimental — no code currently
+# references the pqcrypto crates, so enabling this feature has no effect.
+# See docs/feature-maturity.md for the authoritative maturity status.
 quantum-crypto = [
     "pqcrypto-dilithium",
     "pqcrypto-kyber",

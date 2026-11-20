@@ -9,16 +9,35 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" />
   </a>
+  <!-- Status badges: enable once the CI and docs workflows are valid again (see "Project status"). -->
+  <!-- <a href="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/ci.yml">
+    <img src="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/ci.yml/badge.svg" alt="CI status" />
+  </a>
+  <a href="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/docs.yml">
+    <img src="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/docs.yml/badge.svg" alt="Docs status" />
+  </a> -->
 </p>
 
 A lightweight Rust backend service that indexes Soroban smart contract events on the Stellar network and exposes them via a REST API.
 
+## Project status
+
+> **⚠️ `main` is not currently in a buildable state.** A fresh clone fails to build (manifest parse error, missing dependencies) and the CI workflow is invalid, so no status badge is shown yet. We are tracking the work to restore a green build in the **[Restore green build & CI epic](https://github.com/Soroban-Pulse/SorobanPulse/issues?q=is%3Aissue+label%3Aci+green-build)**.
+
+Until that epic is closed:
+
+- Treat the quick start below as **aspirational** — see [docs/onboarding.md](docs/onboarding.md) for known first-build fixes.
+- CI and Docs status badges will be re-enabled once the workflows are valid.
+- Feature completeness varies by subsystem: see **[Feature maturity](docs/feature-maturity.md)** for what is Stable, Beta, Experimental or Planned.
+
 ## Tech Stack
+
+The list below mirrors the dependencies declared in [`Cargo.toml`](Cargo.toml):
 
 - **Rust** + **Axum** 0.8 / **tower-http** (web framework, WebSockets via `axum::extract::ws`)
 - **Tokio** (async runtime)
 - **PostgreSQL** + **SQLx** (database + migrations)
-- **utoipa** (OpenAPI generation), **async-graphql** (GraphQL)
+- **utoipa** (OpenAPI generation), **async-graphql** (GraphQL — experimental, see [feature maturity](docs/feature-maturity.md))
 - **metrics** + **metrics-exporter-prometheus** (Prometheus metrics)
 - **Stellar Soroban RPC** + **stellar-xdr** 26 (event source and XDR decoding)
 - Optional integrations behind cargo features: `kafka`, `pubsub`, `kinesis`, `archive` (S3), `parquet`, `redis-queue`, `lua`, `otel`
@@ -99,6 +118,7 @@ See [docs/schema.md](docs/schema.md) for a detailed description of the database 
 - [Web dashboard](docs/dashboard.md) — the built-in UI served at `/ui` (`SERVE_DASHBOARD=true`), its caching and Content-Security-Policy.
 - [Embeddable feed widget](packages/feed-widget/README.md) — the `<soroban-pulse-feed>` web component for showing contract activity on your own site, including CORS and API-key guidance.
 - [Design system](docs/design/design-system.md) — design tokens, component specs and usage guidelines. Brand assets are in [docs/assets/brand](docs/assets/brand/README.md).
+- [Feature maturity](docs/feature-maturity.md) — every subsystem rated Stable / Beta / Experimental / Planned, with links to tracking issues. **Read this before relying on a feature.**
 - [Cargo feature matrix](docs/features.md) — every cargo feature, what it enables, its dependencies, and how to build custom images.
 - [Platform integration guide](docs/guides/integration-guide.md) — GitHub, Discord, Slack and Telegram notification setup.
 - [Design specs / RFCs](docs/rfcs/README.md) and [historical implementation reports](docs/archive/README.md).
@@ -155,13 +175,23 @@ Every other setting is listed in the [configuration reference](docs/configuratio
 >
 > Send the admin key the same way as a regular key (`Authorization: Bearer <ADMIN_API_KEY>` or `X-Api-Key: <ADMIN_API_KEY>`). Set `ADMIN_API_KEY_SECONDARY` to rotate the admin key without downtime. When `ADMIN_API_KEY` is unset, admin endpoints fall back to the regular `API_KEY` gate for backward compatibility.
 
-### 3. Run with Docker Compose (easiest)
+### 3. Quick start (one command)
+
+```bash
+make dev
+```
+
+`make dev` starts PostgreSQL via `docker compose up -d`, runs the service with `cargo run`, waits for `/healthz/ready` to report healthy, and then opens the built-in dashboard at <http://localhost:3000/ui> (`SERVE_DASHBOARD=true`). Press `Ctrl-C` to stop the service; run `make docker-down` to stop the database.
+
+> This target is validated end-to-end by the CI smoke job. If it fails on your machine, see [docs/onboarding.md](docs/onboarding.md).
+
+### 4. Run with Docker Compose
 
 ```bash
 make docker-up
 ```
 
-### 4. Run locally
+### 5. Run locally
 
 ```bash
 # Start PostgreSQL, then:
@@ -170,7 +200,7 @@ make run
 
 Migrations run automatically on startup.
 
-### 5. Common tasks
+### 6. Common tasks
 
 ```bash
 make help   # list all available targets with descriptions

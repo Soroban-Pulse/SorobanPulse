@@ -21,7 +21,7 @@
 - [API Versioning](api-versioning.md)
   - [Migrating unversioned routes to /v1/](migration-unversioned-to-v1.md)
 - [API SLA](api-sla.md)
-- [GraphQL API](graphql_api.md)
+- [GraphQL API](reference/graphql-api.md)
 - [OpenAPI Spec](codegen.md)
 - [Postman Collection](postman.md)
 - [SDK Integration Guide](sdk-integration-guide.md)
@@ -32,7 +32,7 @@
 
 - [Notification Channels](notification-channels.md)
 - [Notification Features](notification-features.md)
-- [Webhook Signing](webhook_signing.md)
+- [Webhook Signing](reference/webhook-signing.md)
 - [Webhook Verification](webhook-verification.md)
 - [Webhook Endpoint Rate Limits](webhook-endpoint-rate-limits.md)
 - [Email Notifications](email-notifications.md)
@@ -48,7 +48,7 @@
 
 - [Event Feeds](event-feeds.md)
 - [SSE Reconnection](sse-reconnection.md)
-- [SSE Reverse Proxy Configuration](sse_reverse_proxy_configuration.md)
+- [SSE Reverse Proxy Configuration](guides/sse-reverse-proxy-configuration.md)
 - [Subscription Best Practices](subscription-best-practices.md)
 - [Contract Event Schemas](contract-event-schemas.md)
 - [Contract Event Simulation](contract-event-simulation.md)
@@ -61,9 +61,9 @@
 
 - [AWS SQS Integration](sqs-integration.md)
 - [Azure Event Hubs Integration](event-hubs-integration.md)
-- [Cross-Chain Correlation](cross_chain_correlation.md)
+- [Cross-Chain Correlation](integrations/cross-chain-correlation.md)
 - [Lua Event Transformation](lua-transformation.md)
-- [Streaming Responses](STREAMING_RESPONSES.md)
+- [Streaming Responses](guides/streaming-responses.md)
 
 ---
 
@@ -72,8 +72,8 @@
 - [Database Schema](schema.md)
 - [Data Retention Policy](data-retention.md)
 - [Encryption](encryption.md)
-- [Query Plan Caching](QUERY_PLAN_CACHING.md)
-- [Serialization Optimization](SERIALIZATION_OPTIMIZATION.md)
+- [Query Plan Caching](reference/query-plan-caching.md)
+- [Serialization Optimization](reference/serialization-optimization.md)
 
 ---
 
@@ -81,25 +81,23 @@
 
 - [Logging](logging.md)
 - [Log Aggregation](log-aggregation.md)
-- [Audit Logging](audit_logging.md)
-- [Rate Limiting](rate_limiting.md)
+- [Audit Logging](operations/audit-logging.md)
+- [Rate Limiting](operations/rate-limiting.md)
 - [Performance Tuning](performance-tuning.md)
 - [Performance Regression Testing](performance-regression-testing.md)
 - [Capacity Planning](capacity-planning.md)
 - [Replica Monitoring](replica-monitoring.md)
 - [Statistics Auto Analysis](statistics-auto-analysis.md)
 - [Kubernetes Probes](kubernetes-probes.md)
-- [OWASP Security Headers](owasp_security_headers.md)
+- [OWASP Security Headers](operations/owasp-security-headers.md)
 
 ---
 
 # Testing & Quality
 
-- [API Contract Testing](api-contract-testing.md)
 - [API Compatibility Testing](api-compatibility-testing.md)
 - [Contract Testing](contract-testing.md)
 - [Property-Based Testing](property-based-testing.md)
-- [Property Testing](property-testing.md)
 - [Mutation Testing](mutation-testing.md)
 - [Backup Verification](backup-verification.md)
 
@@ -135,3 +133,9 @@
 # Troubleshooting
 
 - [Troubleshooting Guide](troubleshooting.md)
+
+---
+
+# Project
+
+- [Feature Maturity](feature-maturity.md)
