@@ -357,9 +357,34 @@ pub async fn track_tenant_usage(
     .await
     .unwrap_or(0);
     
-    // Calculate storage (simplified - in production, use actual storage metrics)
-    let storage_used_gb: f64 = 0.0; // TODO: Implement actual storage calculation
-    
+    // Issue #1464: Calculate storage from cached events and exports
+    // Estimate: average event size ~1KB, cached_events metric tracks approximate MB
+    let cached_events_mb: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CAST(metadata->>'cached_mb' AS INTEGER)), 0) \
+         FROM events WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3"
+    )
+    .bind(tenant_id)
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let storage_used_gb: f64 = cached_events_mb as f64 / 1024.0;
+
+    // Issue #1464: Calculate bandwidth from API responses and exports
+    // Estimate: response size tracking in audit logs (KB per request)
+    let response_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(CAST(metadata->>'response_bytes' AS INTEGER)), 0) \
+         FROM audit_logs WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3"
+    )
+    .bind(tenant_id)
+    .bind(period_start)
+    .bind(period_end)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    let bandwidth_gb: f64 = response_bytes as f64 / 1_000_000_000.0;
+
     // Count active subscriptions
     let active_subscriptions: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM subscriptions WHERE tenant_id = $1 AND status = 'active'"
@@ -368,7 +393,7 @@ pub async fn track_tenant_usage(
     .fetch_one(pool)
     .await
     .unwrap_or(0);
-    
+
     Ok(TenantUsage {
         tenant_id: tenant_id.to_string(),
         period_start,
@@ -378,7 +403,7 @@ pub async fn track_tenant_usage(
         webhooks_sent,
         storage_used_gb,
         active_subscriptions,
-        bandwidth_gb: 0.0, // TODO: Implement bandwidth tracking
+        bandwidth_gb,
     })
 }
 
