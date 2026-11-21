@@ -1,7 +1,7 @@
 # The Rust version below must be kept in sync with `rust-toolchain.toml` (channel)
 # and `Cargo.toml`'s `rust-version` (MSRV). Renovate/Dependabot should bump all
 # three together so local, CI and Docker builds use the same compiler.
-FROM rust:1.87.0-slim AS chef
+FROM rust:1.100.0-slim AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
