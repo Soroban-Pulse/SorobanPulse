@@ -81,27 +81,44 @@ See [docs/schema.md](docs/schema.md) for a detailed description of the database 
 
 ## Documentation
 
+The published documentation site is built from [`docs/SUMMARY.md`](docs/SUMMARY.md), which is the authoritative table of contents. Every user and operator page is linked from it; planning and design material lives under [`docs/adr/`](docs/adr/README.md) and [`docs/design/`](docs/design/README.md), and superseded pages are kept in [`docs/archive/`](docs/archive/README.md).
+
+### Getting started
+
 - [Tutorial: token transfer alert bot](docs/tutorials/token-alert-bot.md) — index a testnet token and post large transfers to Discord.
-- [Configuration reference](docs/configuration.md) — every environment variable with its type, default and feature flag.
 - [Developer onboarding guide](docs/onboarding.md) — start here if you're new: a day-1 checklist and fixes for the most common first-build issues.
-- [Stellar & Soroban glossary](docs/glossary.md) — plain-language definitions of ledger, TOID, ScVal, XDR, Strkey, SAC, SEP-41, TTL/archival, RPC retention, and Soroban events 101.
-- [Module map](docs/module-map.md) — every `src/` module grouped by domain with one-line descriptions and "where do I start?" guidance.
 - [Development environment setup](docs/development-setup.md) — OS-specific setup, IDE/editor configuration, pre-commit hooks, debugging tools, and performance profiling.
-- [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
-- [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
+- [Stellar & Soroban glossary](docs/glossary.md) — plain-language definitions of ledger, TOID, ScVal, XDR, Strkey, SAC, SEP-41, TTL/archival, RPC retention, and Soroban events 101.
+
+### User guide
+
+- [Configuration reference](docs/configuration.md) — every environment variable with its type, default and feature flag.
 - [SDK integration guide](docs/sdk-integration-guide.md) — using the TypeScript, Python, and Go SDKs: auth, subscriptions, streaming, and error handling.
-- [SDK development guide](docs/sdk-development.md) — building and extending the SDKs themselves: architecture, per-language tutorials, and webhook verification.
 - [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, performance benchmarks, monitoring, common patterns, and anti-patterns.
-- [Troubleshooting decision tree](docs/troubleshooting-guide.md) — symptom-first navigation into the detailed [troubleshooting guide](docs/troubleshooting.md) and runbooks.
 - [Contract event schemas](docs/contract-event-schemas.md) documents Stellar contract event patterns, XDR encoding, event data types, examples, and validation rules.
-- [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.
-- [Data retention policy](docs/data-retention.md) explains default retention periods, archival, GDPR procedures, deletion workflows, and audit trail retention.
+- [Platform integration guide](docs/guides/integration-guide.md) — GitHub, Discord, Slack and Telegram notification setup.
 - [Web dashboard](docs/dashboard.md) — the built-in UI served at `/ui` (`SERVE_DASHBOARD=true`), its caching and Content-Security-Policy.
 - [Embeddable feed widget](packages/feed-widget/README.md) — the `<soroban-pulse-feed>` web component for showing contract activity on your own site, including CORS and API-key guidance.
-- [Design system](docs/design/design-system.md) — design tokens, component specs and usage guidelines. Brand assets are in [docs/assets/brand](docs/assets/brand/README.md).
+- [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
+
+### Operator guide
+
+- [Deployment guide](docs/deployment.md) — TLS termination options and production security guidance.
+- [Troubleshooting decision tree](docs/troubleshooting-guide.md) — symptom-first navigation into the detailed [troubleshooting guide](docs/troubleshooting.md) and runbooks.
+- [Data retention policy](docs/data-retention.md) explains default retention periods, archival, GDPR procedures, deletion workflows, and audit trail retention.
+- [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.
+
+### Reference
+
+- [Module map](docs/module-map.md) — every `src/` module grouped by domain with one-line descriptions and "where do I start?" guidance.
 - [Cargo feature matrix](docs/features.md) — every cargo feature, what it enables, its dependencies, and how to build custom images.
-- [Platform integration guide](docs/guides/integration-guide.md) — GitHub, Discord, Slack and Telegram notification setup.
-- [Design specs / RFCs](docs/rfcs/README.md) and [historical implementation reports](docs/archive/README.md).
+- [SDK development guide](docs/sdk-development.md) — building and extending the SDKs themselves: architecture, per-language tutorials, and webhook verification.
+
+### Design and history
+
+- [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
+- [Design documents](docs/design/README.md) — design system, component specs and other forward-looking design material. Brand assets are in [docs/assets/brand](docs/assets/brand/README.md).
+- [Archived documentation](docs/archive/README.md) — historical implementation reports and superseded pages kept for reference.
 
 ## Setup
 

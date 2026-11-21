@@ -63,6 +63,12 @@ jobs:
       - name: Check every doc is in the navigation
         run: npm run check-nav
 
+      # Fail if any docs/*.md outside adr/, archive/ and design/ is not
+      # linked from docs/SUMMARY.md, so new orphan pages can't slip in.
+      - name: Check for orphan docs not linked from SUMMARY.md
+        run: bash scripts/check-docs-summary.sh
+        working-directory: ${{ github.workspace }}
+
       # Copy the canonical openapi.json into the static folder so the
       # API Reference page and Scalar embed can load it at /openapi.json.
       - name: Copy OpenAPI spec to static assets

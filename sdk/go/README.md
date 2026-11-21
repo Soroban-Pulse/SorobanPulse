@@ -14,8 +14,20 @@ A type-safe Go client library for consuming the Soroban Pulse API. Indexes Sorob
 ## Installation
 
 ```bash
-go get github.com/soroban-pulse/client-go
+go get github.com/Soroban-Pulse/SorobanPulse/sdk/go@latest
 ```
+
+The module lives in the main Soroban Pulse monorepo under `sdk/go`. Releases are
+tagged in the monorepo using the Go submodule convention
+`sdk/go/vX.Y.Z` (for example `sdk/go/v0.1.0`), so `go get` and the Go module
+proxy can resolve versions directly from this repository. Pin a specific
+release with:
+
+```bash
+go get github.com/Soroban-Pulse/SorobanPulse/sdk/go@v0.1.0
+```
+
+The SDK requires Go 1.22 or newer.
 
 ## Quick Start
 
@@ -27,7 +39,7 @@ import (
 	"fmt"
 	"log"
 	
-	sp "github.com/soroban-pulse/client-go"
+	sp "github.com/Soroban-Pulse/SorobanPulse/sdk/go"
 )
 
 func main() {
@@ -288,7 +300,8 @@ if err != nil {
 
 Soroban Pulse signs each webhook delivery with an `X-Signature-256:
 sha256=<hex HMAC-SHA256(secret, raw body)>` header (see
-`docs/webhook_signing.md`). Verify it against the raw body before parsing:
+`docs/webhook_signing.md`). Verify it against the **raw** request body before
+parsing — re-serializing the JSON will change the bytes and break the HMAC:
 
 ```go
 func webhookHandler(w http.ResponseWriter, r *http.Request) {
@@ -308,7 +321,28 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 
 `VerifyWebhook` compares digests in constant time and returns
 `ErrMissingSignature`, `ErrInvalidSignatureFormat` or `ErrSignatureMismatch`.
-It is tested against the shared vectors in `sdk/testdata/webhook_vectors.json`.
+
+### Timestamp tolerance
+
+When the delivery includes an `X-Signature-Timestamp` header, the signed
+payload is `<timestamp>.<raw body>` and the timestamp must be within the
+tolerance window (default 300 seconds) to prevent replay attacks. Use
+`VerifyWebhookWithOptions` to configure it:
+
+```go
+err := sp.VerifyWebhookWithOptions(body, r.Header, newSecret, sp.WebhookVerifyOptions{
+	ToleranceSec: 300, // 0 disables the timestamp check
+	Secrets:      []string{newSecret, oldSecret},
+})
+```
+
+### Shared test vectors
+
+The verification helpers in every SDK (Go, TypeScript, Python) are tested
+against the same cross-language fixture,
+`sdk/testdata/webhook_vectors.json`. Each vector contains the raw body,
+headers, secret and expected result, so all SDKs are guaranteed to agree on
+signature and timestamp handling.
 
 ## Connection Pooling
 

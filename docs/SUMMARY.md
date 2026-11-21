@@ -64,6 +64,8 @@
 - [Cross-Chain Correlation](cross_chain_correlation.md)
 - [Lua Event Transformation](lua-transformation.md)
 - [Streaming Responses](STREAMING_RESPONSES.md)
+- [ML Integration](ML_INTEGRATION.md)
+- [SaaS Platform](SAAS_PLATFORM.md)
 
 ---
 
@@ -74,6 +76,8 @@
 - [Encryption](encryption.md)
 - [Query Plan Caching](QUERY_PLAN_CACHING.md)
 - [Serialization Optimization](SERIALIZATION_OPTIMIZATION.md)
+- [Aggregation Merge Plan](aggregation-merge-plan.md)
+- [Connection Pool Consolidation](connection-pool-consolidation.md)
 
 ---
 
@@ -119,6 +123,14 @@
 
 ---
 
+# Design & Planning
+
+- [Cargo Workspace Plan](cargo-workspace-plan.md)
+- [Aggregation Merge Plan](aggregation-merge-plan.md)
+- [Connection Pool Consolidation](connection-pool-consolidation.md)
+
+---
+
 # Runbooks
 
 - [Operator Runbook](runbooks/operator-runbook.md)
@@ -135,3 +147,9 @@
 # Troubleshooting
 
 - [Troubleshooting Guide](troubleshooting.md)
+
+---
+
+# Archive
+
+- [Archived Documentation](archive/README.md)

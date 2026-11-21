@@ -169,6 +169,62 @@ For more details, see [RETRY_AND_BACKOFF.md](./RETRY_AND_BACKOFF.md)
 
 ---
 
+## Webhook Signature Verification
+
+The SDK provides `verify_webhook` to validate incoming webhook signatures. It
+performs a constant-time comparison (`hmac.compare_digest`) and enforces a
+timestamp tolerance when the signature header includes a timestamp.
+
+```python
+from openapi_client.webhooks import verify_webhook
+
+is_valid = verify_webhook(
+    raw_body,          # bytes or str: the exact raw request body
+    headers,           # mapping of header name -> value
+    secret,            # shared signing secret
+    tolerance_sec=300, # optional, default 300 seconds
+)
+```
+
+The helper reads the signature from the `X-Webhook-Signature` header (format
+`t=<unix_ts>,v1=<hex_hmac_sha256>`) and the timestamp from the same header.
+It returns `True` only when the HMAC matches and the timestamp is within
+`tolerance_sec` of the current time.
+
+### FastAPI example
+
+Always verify against the **raw** request body. Do not use the parsed JSON,
+since re-serialization can change whitespace and key ordering.
+
+```python
+import os
+from fastapi import FastAPI, Request, HTTPException
+
+from openapi_client.webhooks import verify_webhook
+
+app = FastAPI()
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
+
+
+@app.post("/webhooks/events")
+async def receive_webhook(request: Request):
+    raw_body = await request.body()
+    if not verify_webhook(raw_body, request.headers, WEBHOOK_SECRET, tolerance_sec=300):
+        raise HTTPException(status_code=401, detail="invalid signature")
+    payload = await request.json()
+    # ... handle payload ...
+    return {"ok": True}
+```
+
+### Shared test vectors
+
+Cross-language agreement is verified against the shared fixture
+[`sdk/testdata/webhook_vectors.json`](../testdata/webhook_vectors.json). The
+same vectors are used by the Go and TypeScript SDKs, so a signature accepted by
+one SDK is accepted by all of them.
+
+---
+
 ## Documentation for API Endpoints
 
 All URIs are relative to *http://localhost*

@@ -1,25 +1,25 @@
 class Spulse < Formula
   desc "Command-line tool for querying and analyzing Soroban Pulse events"
-  homepage "https://github.com/soroban-pulse/soroban-pulse"
+  homepage "https://github.com/Soroban-Pulse/SorobanPulse"
   version "0.1.0"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/soroban-pulse/soroban-pulse/releases/download/v#{version}/spulse-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER_SHA256_AARCH64"
+      url "https://github.com/Soroban-Pulse/SorobanPulse/releases/download/v#{version}/spulse-#{version}-aarch64-apple-darwin.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/soroban-pulse/soroban-pulse/releases/download/v#{version}/spulse-#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "PLACEHOLDER_SHA256_X86_64"
+      url "https://github.com/Soroban-Pulse/SorobanPulse/releases/download/v#{version}/spulse-#{version}-x86_64-apple-darwin.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/soroban-pulse/soroban-pulse/releases/download/v#{version}/spulse-#{version}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "PLACEHOLDER_SHA256_LINUX_ARM"
+      url "https://github.com/Soroban-Pulse/SorobanPulse/releases/download/v#{version}/spulse-#{version}-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     else
-      url "https://github.com/soroban-pulse/soroban-pulse/releases/download/v#{version}/spulse-#{version}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "PLACEHOLDER_SHA256_LINUX_X86"
+      url "https://github.com/Soroban-Pulse/SorobanPulse/releases/download/v#{version}/spulse-#{version}-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "0000000000000000000000000000000000000000000000000000000000000000"
     end
   end
 

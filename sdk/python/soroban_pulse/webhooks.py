@@ -10,6 +10,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import time
+from typing import Mapping, Optional, Union
+
+SIGNATURE_HEADER = "X-SorobanPulse-Signature"
+DEFAULT_TOLERANCE_SECONDS = 300
 
 
 class WebhookVerificationError(Exception):
@@ -54,3 +58,45 @@ def verify_webhook_signature(
         raise WebhookVerificationError("signature mismatch")
 
     return True
+
+
+def _get_header(headers: Mapping[str, str], name: str) -> Optional[str]:
+    """Case-insensitive header lookup."""
+    if name in headers:
+        return headers[name]
+    lowered = name.lower()
+    for key, value in headers.items():
+        if key.lower() == lowered:
+            return value
+    return None
+
+
+def verify_webhook(
+    raw_body: Union[bytes, str],
+    headers: Mapping[str, str],
+    secret: str,
+    tolerance_sec: int = DEFAULT_TOLERANCE_SECONDS,
+) -> bool:
+    """Verify a webhook request using its raw body and headers.
+
+    Mirrors the Go SDK helper: looks up the signature header
+    (case-insensitively), enforces the timestamp tolerance window, computes
+    HMAC-SHA256 over `{timestamp}.{raw_body}` and compares in constant time.
+
+    `raw_body` must be the exact bytes received (do not re-serialize parsed
+    JSON). Raises `WebhookVerificationError` on any failure; returns True on
+    success.
+    """
+    header = _get_header(headers, SIGNATURE_HEADER)
+    if not header:
+        raise WebhookVerificationError("missing signature header")
+
+    if isinstance(raw_body, str):
+        raw_body = raw_body.encode("utf-8")
+
+    return verify_webhook_signature(
+        raw_body,
+        header,
+        secret,
+        tolerance_seconds=tolerance_sec,
+    )

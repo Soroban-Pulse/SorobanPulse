@@ -337,16 +337,17 @@
 
 ### Engineering Plans
 
-- [Aggregation Merge Plan](../aggregation-merge-plan.md)
-- [Cargo Workspace Plan](../cargo-workspace-plan.md)
-- [Connection Pool Consolidation](../connection-pool-consolidation.md)
-- [Feature Gate Plan](../feature-gate-plan.md)
-- [Handler Split Plan](../handler-split-plan.md)
-- [Module Pruning Audit](../module-pruning-audit.md)
-- [Router Consolidation](../router-consolidation.md)
-- [Schema Audit — SorobanPulse](../schema-audit.md)
-- [Typed Error Migration](../typed-error-migration.md)
-- [Unified Query Builder Pattern](../query-builder-pattern.md)
+- [Engineering Plans](../design/README.md)
+  - [Aggregation Merge Plan](../design/aggregation-merge-plan.md)
+  - [Cargo Workspace Plan](../design/cargo-workspace-plan.md)
+  - [Connection Pool Consolidation](../design/connection-pool-consolidation.md)
+  - [Feature Gate Plan](../design/feature-gate-plan.md)
+  - [Handler Split Plan](../design/handler-split-plan.md)
+  - [Module Pruning Audit](../design/module-pruning-audit.md)
+  - [Router Consolidation](../design/router-consolidation.md)
+  - [Schema Audit — SorobanPulse](../design/schema-audit.md)
+  - [Typed Error Migration](../design/typed-error-migration.md)
+  - [Unified Query Builder Pattern](../design/query-builder-pattern.md)
 
 ### Design Specs / RFCs
 
@@ -358,11 +359,12 @@
 
 ### Pull Request Notes
 
-- [Chideraisiguzor 1137 1140](../pr/chideraisiguzor-1137-1140.md)
-- [Misrasamuelisiguzor Oss 1121 1124](../pr/misrasamuelisiguzor-oss-1121-1124.md)
-- [Samuelisi 1133 1136](../pr/samuelisi-1133-1136.md)
-- [Spotkorner Dot 1125 1128](../pr/spotkorner-dot-1125-1128.md)
-- [Techisigu 1129 1132](../pr/techisigu-1129-1132.md)
+- [Pull Request Notes](../archive/pr/README.md)
+  - [Chideraisiguzor 1137 1140](../archive/pr/chideraisiguzor-1137-1140.md)
+  - [Misrasamuelisiguzor Oss 1121 1124](../archive/pr/misrasamuelisiguzor-oss-1121-1124.md)
+  - [Samuelisi 1133 1136](../archive/pr/samuelisi-1133-1136.md)
+  - [Spotkorner Dot 1125 1128](../archive/pr/spotkorner-dot-1125-1128.md)
+  - [Techisigu 1129 1132](../archive/pr/techisigu-1129-1132.md)
 
 ## Reference
 

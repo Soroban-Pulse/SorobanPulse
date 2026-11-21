@@ -13,6 +13,7 @@ import {
   SystemApi,
   Configuration,
 } from "./index";
+import { verifyWebhook } from "./webhook";
 
 // ============================================================================
 // Example 1: Basic Event Queries
@@ -441,6 +442,57 @@ async function exportEventsAsNDJSON() {
 }
 
 // ============================================================================
+// Example 14: Webhook Signature Verification
+// ============================================================================
+
+/**
+ * Verify an incoming webhook using the raw request body.
+ *
+ * IMPORTANT: Always pass the *raw* request body (the exact bytes received),
+ * never a re-serialized JSON object. Re-serializing changes the bytes and
+ * the signature will no longer match.
+ *
+ * Express example:
+ *
+ *   app.post(
+ *     "/webhooks/soroban-pulse",
+ *     express.raw({ type: "application/json" }), // keep the raw Buffer
+ *     (req, res) => {
+ *       const result = verifyWebhook(
+ *         req.body, // raw Buffer
+ *         req.headers,
+ *         process.env.SOROBAN_PULSE_WEBHOOK_SECRET!,
+ *         { toleranceSec: 300 },
+ *       );
+ *       if (!result.valid) {
+ *         return res.status(400).json({ error: result.reason });
+ *       }
+ *       const event = JSON.parse(req.body.toString("utf8"));
+ *       // ... handle the event ...
+ *       res.status(200).json({ ok: true });
+ *     },
+ *   );
+ */
+function verifyIncomingWebhook(
+  rawBody: Buffer | string,
+  headers: Record<string, string | string[] | undefined>,
+  secret: string,
+) {
+  const result = verifyWebhook(rawBody, headers, secret, {
+    // Reject signatures older/newer than 5 minutes to prevent replays.
+    toleranceSec: 300,
+  });
+
+  if (!result.valid) {
+    console.warn(`Webhook rejected: ${result.reason}`);
+    return null;
+  }
+
+  // Only parse the body after the signature has been verified.
+  return JSON.parse(rawBody.toString("utf8"));
+}
+
+// ============================================================================
 // Run Examples
 // ============================================================================
 
@@ -479,5 +531,6 @@ export {
   checkServiceHealth,
   errorHandlingWithMetrics,
   exportEventsAsNDJSON,
+  verifyIncomingWebhook,
   runAllExamples,
 };
