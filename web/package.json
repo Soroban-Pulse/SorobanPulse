@@ -39,7 +39,7 @@
     "jsdom": "^25.0.1",
     "orval": "^7.3.0",
     "prettier": "^3.4.2",
-    "storybook": "^8.4.7",
+    "storybook": "^10.6.7",
     "typescript": "~5.6.2",
     "typescript-eslint": "^8.18.1",
     "vite": "^6.0.5",
