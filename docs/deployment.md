@@ -1,6 +1,67 @@
 # Deployment Guide
 
+## Choosing a Deployment Platform
+
+Soroban Pulse supports two first-class deployment paths. Pick one per
+environment; both run the same `production` container image and the same
+database migrations.
+
+| | **Kubernetes (Helm)** | **AWS ECS (Terraform)** |
+| --- | --- | --- |
+| Manifests | `helm/soroban-pulse/`, `k8s/` | `terraform/` (modules `vpc`, `alb`, `ecs`, `rds`, `backup`, `monitoring`) |
+| Environments | values files / namespaces | `terraform/environments/{dev,staging,production}` |
+| Provisioning | `helm install` / `helm upgrade` | `terraform apply` (CI: `terraform-apply.yml`) |
+| Scaling | `replicaCount`, HPA | ECS service desired count / autoscaling |
+| Database | self-managed Postgres or managed (RDS, Cloud SQL) | RDS provisioned by the `rds` module |
+| TLS | ingress controller, cert-manager, or ALB | ALB listener with an ACM certificate |
+| Extras | full chart surface (probes, PDB, ServiceMonitor) | `cdn.tf`, `multi-region.tf`, `backup` and `monitoring` modules |
+
+### When to choose Kubernetes (Helm)
+
+- You already run a Kubernetes cluster and want the service to live alongside
+  other workloads.
+- You need fine-grained control over probes, resource limits, HPA, PodDisruptionBudgets
+  or Prometheus `ServiceMonitor` objects.
+- You deploy to multiple clouds or on-premises, or you use GitOps (Argo CD,
+  Flux) — see [Installing from the Helm repository](#installing-from-the-helm-repository)
+  and [Resource Sizing](#resource-sizing).
+
+### When to choose AWS ECS (Terraform)
+
+- You want a fully managed AWS stack (VPC, ALB, ECS, RDS, backups, monitoring)
+  provisioned from a single Terraform root per environment.
+- You do not want to operate a Kubernetes control plane.
+- You need the AWS-specific extras: CloudFront CDN (`cdn.tf`), multi-region
+  failover (`multi-region.tf`), automated RDS snapshots via the `backup` module
+  and CloudWatch alarms via the `monitoring` module.
+
+### Trade-offs
+
+- **Operational surface** — ECS/Terraform shifts work to AWS managed services
+  but ties you to AWS; Helm/Kubernetes is portable but you own the cluster.
+- **Change safety** — Terraform changes are reviewed as plans and applied by CI
+  with approvals (see below); Helm changes are reviewed as values/template diffs
+  and applied by your release tooling.
+- **Blast radius** — a bad `terraform apply` can recreate networking or database
+  resources, so production applies are approval-gated and should always be
+  reviewed from the saved plan.
+- **Feature parity** — application behaviour is identical; only the surrounding
+  infrastructure differs.
+
+### Terraform workflow and approvals
+
+Terraform is validated on every pull request by `.github/workflows/terraform-ci.yml`
+(`terraform fmt`/`validate`, `tflint`, and `trivy config`/`checkov` security
+scanning with SARIF results uploaded to GitHub code scanning). Applying is done
+by `.github/workflows/terraform-apply.yml`, which requires a **manual approval**
+through a protected GitHub environment for `staging` and `production` — a
+production apply cannot start until a reviewer approves it.
+
+See [docs/terraform.md](terraform.md) for the module layout, environment
+variables, state backend configuration and the full apply/rollback procedure.
+
 ## Container Image Targets
+=======
 
 The `Dockerfile` builds two targets:
 

@@ -22,8 +22,9 @@ notes.
 3. [DigitalOcean App Platform](#3-digitalocean-app-platform)
 4. [Heroku](#4-heroku)
 5. [Railway](#5-railway)
-6. [Environment variable reference](#environment-variable-reference)
-7. [Cost summary](#cost-summary)
+6. [Cloudflare edge worker](#6-cloudflare-edge-worker)
+7. [Environment variable reference](#environment-variable-reference)
+8. [Cost summary](#cost-summary)
 
 ---
 
@@ -696,6 +697,72 @@ INDEXER_LOCK_RETRY_SECS = 30
 
 ---
 
+## 6. Cloudflare edge worker
+
+`edge/cloudflare-worker.js` is an optional ES module worker that sits in front of
+a SorobanPulse deployment to absorb read traffic and add a small amount of edge
+caching.  It is **not** required — the API is fully functional without it.
+
+### What it does
+
+- Proxies every request to the origin API configured via `ORIGIN_URL`.
+- Caches only **public, unauthenticated `GET`** requests for a small allowlist of
+  routes (currently `/v1/meta`).  Everything else is proxied straight through.
+- Never caches a request that carries `Authorization` or `X-API-Key` headers, and
+  never caches responses marked `Cache-Control: private`/`no-store` or carrying
+  `Set-Cookie`.  This guarantees authenticated responses are never shared between
+  tenants.
+- Passes streaming endpoints through untouched: requests with
+  `Accept: text/event-stream` (SSE) and WebSocket upgrade requests
+  (`Upgrade: websocket`) are proxied without buffering or caching.
+
+### Configuration
+
+The origin is read from the `vars` block of `wrangler.toml` — no placeholder
+hostnames are baked into the worker:
+
+```toml
+name = "soroban-pulse-edge"
+main = "edge/cloudflare-worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+ORIGIN_URL = "https://api.yourproject.com"
+```
+
+Deploy with:
+
+```bash
+npx wrangler deploy
+```
+
+If `ORIGIN_URL` is missing or invalid the worker responds with `500` rather than
+silently proxying to a placeholder.
+
+### Caching rules
+
+| Request | Behaviour |
+|---|---|
+| `GET /v1/meta` (no auth headers) | Cached at the edge (`s-maxage` from the origin, default 60 s) |
+| `GET` on any other route | Proxied, not cached |
+| Any request with `Authorization` / `X-API-Key` | Proxied, never cached |
+| `Accept: text/event-stream` (SSE) | Proxied, streamed, never cached |
+| `Upgrade: websocket` | Proxied, never cached |
+
+### Tests
+
+The worker is covered by `miniflare`-based tests (run through
+`vitest-pool-workers`).  They assert that public GETs are cached, that
+authenticated requests are never served from cache across tenants, and that SSE
+and WebSocket requests pass through without buffering.
+
+```bash
+npm install
+npm test -- edge
+```
+
+---
+
 ## Environment variable reference
 
 These variables apply to all deployments.  See `.env.example` for the full list
@@ -729,6 +796,7 @@ and defaults.
 | DigitalOcean / Managed PG | 10 | 15 | `db-s-1vcpu-1gb` allows 25 connections |
 | Heroku Postgres | 5 | 30 | `essential-0` allows 25 connections; Heroku 55 s timeout |
 | Railway Postgres | 10 | 15 | No hard timeout on connections |
+| Cloudflare edge worker | n/a | 15 | Worker proxies to origin; set `ORIGIN_URL` in `wrangler.toml` |
 
 ---
 
@@ -741,6 +809,7 @@ and defaults.
 | DigitalOcean App Platform | ~$39 | Simple PaaS, small teams |
 | Heroku | ~$17 | Rapid prototyping, small deployments |
 | Railway | ~$10–15 | Developer projects, hobby use |
+| Cloudflare edge worker | Free tier / ~$5 Workers Paid | Optional edge cache in front of any of the above |
 
 > All estimates are approximate for a single-region, 2-replica deployment
 > without dedicated caching.  Use the platform's own pricing calculator for

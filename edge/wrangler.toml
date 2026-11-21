@@ -1,23 +1,52 @@
 name = "soroban-pulse-edge"
+main = "cloudflare-worker.js"
+compatibility_date = "2024-01-01"
 type = "javascript"
+
+# REQUIRED CONFIGURATION: replace the placeholders below before deploying.
 account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
-workers_dev = true
-route = "api.soroban-pulse.example.com/*"
 zone_id = "YOUR_CLOUDFLARE_ZONE_ID"
+
+# REQUIRED CONFIGURATION: set this to the hostname of your real SorobanPulse API.
+route = "api.soroban-pulse.example.com/*"
+
+workers_dev = true
+
+[vars]
+# REQUIRED CONFIGURATION: origin of the real SorobanPulse API (no trailing slash).
+ORIGIN_URL = "https://api.soroban-pulse.example.com"
 
 [env.production]
 name = "soroban-pulse-edge-prod"
+
+# REQUIRED CONFIGURATION: production route and zone.
 route = "api.soroban-pulse.example.com/*"
+zone_id = "YOUR_CLOUDFLARE_ZONE_ID"
+
+[env.production.vars]
+# REQUIRED CONFIGURATION: production origin of the real SorobanPulse API.
+ORIGIN_URL = "https://api.soroban-pulse.example.com"
 
 [env.staging]
 name = "soroban-pulse-edge-staging"
-route = "staging-api.soroban-pulse.example.com/*"
 
+# REQUIRED CONFIGURATION: staging route and zone.
+route = "staging-api.soroban-pulse.example.com/*"
+zone_id = "YOUR_CLOUDFLARE_ZONE_ID"
+
+[env.staging.vars]
+# REQUIRED CONFIGURATION: staging origin of the real SorobanPulse API.
+ORIGIN_URL = "https://staging-api.soroban-pulse.example.com"
+
+# REQUIRED CONFIGURATION: create the KV namespace and replace the placeholder id.
 [[kv_namespaces]]
 binding = "CACHE"
 id = "YOUR_KV_NAMESPACE_ID"
 
-[build]
-command = ""
-[build.upload]
-format = "service-worker"
+[[env.production.kv_namespaces]]
+binding = "CACHE"
+id = "YOUR_KV_NAMESPACE_ID"
+
+[[env.staging.kv_namespaces]]
+binding = "CACHE"
+id = "YOUR_KV_NAMESPACE_ID"

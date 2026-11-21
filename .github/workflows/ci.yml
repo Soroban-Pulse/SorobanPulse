@@ -7,7 +7,9 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
-  # Nightly run covers the beta toolchain and full Postgres matrix that PRs skip.
+  # Heavy jobs (mutants, bench, fuzz, beta, soak) run in dedicated scheduled
+  # workflows: mutation-testing.yml, benchmark.yml, fuzz.yml, soak-testnet.yml.
+  # Nightly run covers the full Postgres matrix that PRs skip.
   schedule:
     - cron: "0 3 * * *"
 
@@ -265,11 +267,9 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-setup
         with:
-          key: stable-nextest
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          cache-key: stable-nextest
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .sqlx
@@ -392,7 +392,7 @@ jobs:
         run: cargo build --no-default-features --features "classical-crypto,kafka,sqs"
 
   test:
-    name: Test (rust stable, pg ${{ matrix.postgres }})
+    name: Test (rust stable, pg ${{ matrix.postgres }}, shard ${{ matrix.shard }}/${{ matrix.total }})
     runs-on: ubuntu-latest
     needs: build-tests
     if: |
@@ -406,6 +406,9 @@ jobs:
       matrix:
         # PRs run a single Postgres version; main and nightly run the full matrix.
         postgres: ${{ fromJSON(github.event_name == 'pull_request' && '["16"]' || '["15", "16"]') }}
+        # Partition the test suite across shards to cut wall-clock time.
+        shard: [1, 2, 3, 4]
+        total: [4]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -425,65 +428,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: nextest-archive
-      - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci
+      - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci --partition count:${{ matrix.shard }}/${{ matrix.total }}
         env:
           # Property-based tests for the subscription filter engine run 50k cases.
-          PROPTEST_CASES: 50000
-      - name: Publish test report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          report_paths: target/nextest/ci/junit.xml
-          check_name: Test report (rust stable, pg ${{ matrix.postgres }})
-          annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-
-  test-beta:
-    name: Test (rust beta, pg ${{ matrix.postgres }})
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    continue-on-error: true
-    permissions:
-      contents: read
-      checks: write
-    strategy:
-      fail-fast: false
-      matrix:
-        postgres: ["15", "16"]
-    services:
-      postgres:
-        image: postgres:${{ matrix.postgres }}
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: soroban_pulse_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@beta
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: beta-pg${{ matrix.postgres }}
-      - uses: actions/cache@v4
-        with:
-          path: .sqlx
-          key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
-          restore-keys: ${{ runner.os }}-sqlx-
-      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --profile ci
-        env:
           PROPTEST_CASES: 50000
       - name: Publish test report
         if: always()
         uses: mikepenz/action-junit-report@v5
         with:
           report_paths: target/nextest/ci/junit.xml
-          check_name: Test report (rust beta, pg ${{ matrix.postgres }})
+          check_name: Test report (rust stable, pg ${{ matrix.postgres }}, shard ${{ matrix.shard }})
+          annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
 
   coverage:
     name: Coverage Report
@@ -658,74 +613,6 @@ jobs:
           report_paths: target/nextest/ci/junit.xml
           check_name: Multi-Tenant RLS Isolation report (pg ${{ matrix.postgres }})
           annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-
-  bench:
-    name: Bench (non-blocking)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "benches/**", "Cargo.*"]'), github.event.pull_request.changed_files)
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - run: cargo bench
-
-  mutants:
-    name: Mutation Testing (non-blocking)
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    strategy:
-      matrix:
-        include:
-          - module: src/models.rs
-            description: "Data models"
-          - module: src/indexer.rs
-            description: "Event indexer"
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - run: cargo install cargo-mutants
-      - name: Run mutation tests for ${{ matrix.description }}
-        run: cargo mutants -m ${{ matrix.module }} --shuffle -j 4 || true
-      - name: Upload mutation report
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: mutation-report-${{ matrix.module }}
-          path: target/mutants/
-          retention-days: 7
-          if-no-files-found: ignore
-
-  fuzz:
-    name: Fuzz (60s per target)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - run: cargo install cargo-fuzz
-      - run: cargo fuzz run fuzz_validate_contract_id -- -max_total_time=60
-        working-directory: fuzz
-      - run: cargo fuzz run fuzz_validate_tx_hash -- -max_total_time=60
-        working-directory: fuzz
-      - run: cargo fuzz run fuzz_pagination_params -- -max_total_time=60
-        working-directory: fuzz
-      - name: Upload fuzz corpus artifacts
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: fuzz-corpus
-          path: fuzz/corpus/
-          retention-days: 30
 
   check-env-docs:
     name: Check Env Docs
@@ -968,14 +855,10 @@ jobs:
       - sqlx-prepare-check
       - features
       - test
-      - test-beta
       - coverage
       - contract-tests
       - suite-tests
       - multi-tenant-rls
-      - bench
-      - mutants
-      - fuzz
       - build
       - docker
       - network-policy
