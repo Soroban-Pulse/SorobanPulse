@@ -1,6 +1,6 @@
 # Builds the dashboard and serves it with nginx, proxying /api/* to the
 # SorobanPulse API. The upstream is configurable with API_UPSTREAM.
-FROM node:20-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
