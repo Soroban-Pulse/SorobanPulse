@@ -24,7 +24,13 @@
 
 # SLOW_REQUEST_THRESHOLD_MS = "500"
 
-# ALLOWED_ORIGINS = "*"
+# Comma-separated list of origins allowed to make cross-origin requests.
+# Defaults to empty (same-origin only) in production. In development
+# (ENVIRONMENT=development) the default is "*". A wildcard "*" entry is
+# refused when REQUIRE_AUTH=true unless ALLOW_WILDCARD_CORS=true is set.
+# ALLOWED_ORIGINS = "https://app.example.com,https://admin.example.com"
+# Explicitly permit wildcard CORS even when REQUIRE_AUTH=true.
+# ALLOW_WILDCARD_CORS = "false"
 # RATE_LIMIT_PER_MINUTE = "60"
 # SSE_KEEPALIVE_INTERVAL_MS = "15000"
 # SSE_MAX_CONNECTIONS = "1000"

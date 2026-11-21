@@ -361,8 +361,43 @@ pub async fn get_receipts_by_event(
 // This is distinct from `crate::notification_channel`, which covers
 // webhook-style outbound channels (Discord, Telegram, ...). This section
 // covers the three channels named in issue #994: email, SMS, and push.
+//
+// # Outbound HTTP (Issue #1427)
+//
+// Channels that perform HTTP requests to a user-configurable endpoint MUST
+// send them through the shared [`crate::net::OutboundClient`], which applies
+// the outbound SSRF guard (URL validation, DNS-rebinding defence, IP pinning,
+// redirect policy, timeouts and response size limits). Channels MUST NOT
+// construct a `reqwest::Client` directly — `clippy.toml` disallows
+// `reqwest::Client::new` / `reqwest::Client::builder` outside `src/net`.
+// Use [`outbound_client_for_channel`] to obtain a client scoped to a
+// channel's expected-domain allowlist.
 
+use crate::net::OutboundClient;
 use crate::retry_policy::RetryPolicy;
+
+/// Build the shared outbound HTTP client for a delivery channel.
+///
+/// `allowed_hosts` is the channel's expected-domain allowlist (e.g.
+/// `["api.twilio.com"]` for SMS, `["fcm.googleapis.com"]` for push). An empty
+/// slice means "no host restriction beyond the SSRF guard", which should only
+/// be used for channels whose endpoint is fully operator-controlled.
+///
+/// All HTTP performed by a [`DeliveryChannel`] implementation must go through
+/// the returned client so that the outbound SSRF guard applies uniformly.
+pub fn outbound_client_for_channel(
+    channel_name: &str,
+    allowed_hosts: &[&str],
+) -> Result<OutboundClient, NotificationError> {
+    OutboundClient::builder()
+        .with_allowed_hosts(allowed_hosts.iter().copied())
+        .build()
+        .map_err(|e| {
+            NotificationError::Configuration(format!(
+                "failed to build outbound client for channel {channel_name}: {e}"
+            ))
+        })
+}
 
 /// Consolidated error type for notification delivery across all channels.
 ///
@@ -422,6 +457,10 @@ pub trait DeliveryChannel: Send + Sync {
     /// [`NotificationError::InvalidTarget`] (not retryable — target is bad),
     /// or [`NotificationError::Configuration`] (not retryable — channel is
     /// misconfigured) rather than returning an opaque error.
+    ///
+    /// Any HTTP request issued here MUST go through the shared
+    /// [`crate::net::OutboundClient`] (see [`outbound_client_for_channel`]);
+    /// implementations must not construct a `reqwest::Client` themselves.
     async fn deliver(
         &self,
         target: &str,
@@ -502,6 +541,22 @@ mod tests {
     fn delivery_status_serializes_to_expected_strings() {
         assert_eq!(DeliveryStatus::Success.as_str(), "success");
         assert_eq!(DeliveryStatus::Failure.as_str(), "failure");
+    }
+
+    // Issue #1427: the framework's HTTP path must be the shared outbound
+    // client, which rejects private-IP targets.
+    #[tokio::test]
+    async fn outbound_client_for_channel_rejects_private_ip_target() {
+        let client = outbound_client_for_channel("sms", &["api.twilio.com"]).unwrap();
+        let err = client
+            .get("http://169.254.169.254/latest/meta-data/")
+            .await
+            .expect_err("private/link-local IP target must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("private") || msg.contains("blocked") || msg.contains("not allowed"),
+            "unexpected rejection reason: {msg}"
+        );
     }
 
     #[sqlx::test]

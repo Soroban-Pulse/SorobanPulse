@@ -1658,7 +1658,25 @@ pub async fn refresh_statistics(
     State(state): State<AppState>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, Json<Value>)> {
-    let table_name = params.get("table_name").map(|s| s.as_str());
+    // Issue #1425: validate `table_name` before it reaches the statistics
+    // layer. The value is bound as a query parameter there, but rejecting
+    // anything that is not a plain identifier (or a known table) up front
+    // keeps the admin surface strict and returns a 400 instead of a 500.
+    let table_name = match params.get("table_name") {
+        Some(raw) => match crate::statistics_management::validate_table_name(raw) {
+            Ok(()) => Some(raw.as_str()),
+            Err(e) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": e.to_string(),
+                        "code": "VALIDATION_ERROR"
+                    })),
+                ));
+            }
+        },
+        None => None,
+    };
 
     match crate::statistics_management::refresh_table_statistics(&state.db, table_name).await {
         Ok(results) => {

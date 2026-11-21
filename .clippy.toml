@@ -17,3 +17,17 @@ too-many-lines-threshold = 120
 # panicking helpers remain fine inside #[test] / #[cfg(test)] code.
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
+
+# Issue #1427: All outbound HTTP must go through the shared `OutboundClient`
+# wrapper in `src/net/` (which validates the URL, pins the resolved IP,
+# validates redirects, and applies timeouts/size limits). Direct construction
+# of a `reqwest::Client` outside `src/net` is therefore disallowed so that
+# integration modules cannot bypass the SSRF guard.
+#
+# The `src/net/` module is the sole permitted construction site; it is
+# excluded from this lint via `#[allow(clippy::disallowed_methods)]` on the
+# wrapper implementation (see `src/net/outbound.rs`).
+disallowed-methods = [
+    { path = "reqwest::Client::new", reason = "Use crate::net::OutboundClient instead (SSRF guard, issue #1427)" },
+    { path = "reqwest::Client::builder", reason = "Use crate::net::OutboundClient instead (SSRF guard, issue #1427)" },
+]

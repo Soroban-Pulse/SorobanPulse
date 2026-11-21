@@ -5,6 +5,7 @@
 //! batch submission, retry logic, and health metrics.
 
 use crate::metrics;
+use crate::net::OutboundClient;
 use async_trait::async_trait;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -77,12 +78,12 @@ impl RemoteWriteMetric {
 /// Real implementation of remote write publisher
 pub struct PrometheusRemoteWritePublisher {
     config: PrometheusRemoteWriteConfig,
-    client: reqwest::Client,
+    client: OutboundClient,
 }
 
 impl PrometheusRemoteWritePublisher {
     pub fn new(config: PrometheusRemoteWriteConfig) -> Self {
-        let client = reqwest::Client::new();
+        let client = OutboundClient::new();
         info!(
             endpoints = ?config.endpoints,
             "Initialized Prometheus remote write publisher"
@@ -167,18 +168,20 @@ impl PrometheusRemoteWritePublisher {
         let mut last_error = None;
 
         for attempt in 0..=self.config.max_retries {
-            match tokio::time::timeout(
-                timeout,
-                self.client
-                    .post(endpoint)
-                    .header("Content-Type", "application/x-protobuf")
-                    .header("X-Prometheus-Remote-Write-Version", "0.1.0")
-                    .body(body.clone())
-                    .send(),
-            )
-            .await
+            match self
+                .client
+                .post(
+                    endpoint,
+                    body.clone(),
+                    &[
+                        ("Content-Type", "application/x-protobuf"),
+                        ("X-Prometheus-Remote-Write-Version", "0.1.0"),
+                    ],
+                    timeout,
+                )
+                .await
             {
-                Ok(Ok(response)) => {
+                Ok(response) => {
                     if response.status().is_success() {
                         metrics::record_prometheus_remote_write_success();
                         return Ok(());
@@ -186,11 +189,8 @@ impl PrometheusRemoteWritePublisher {
                         last_error = Some(format!("HTTP {}", response.status()));
                     }
                 }
-                Ok(Err(e)) => {
+                Err(e) => {
                     last_error = Some(e.to_string());
-                }
-                Err(_) => {
-                    last_error = Some("Request timeout".to_string());
                 }
             }
 
@@ -237,8 +237,8 @@ impl RemoteWritePublisher for PrometheusRemoteWritePublisher {
         let mut healthy_count = 0;
 
         for endpoint in &self.config.endpoints {
-            match tokio::time::timeout(timeout, self.client.get(endpoint).send()).await {
-                Ok(Ok(response)) if response.status().is_success() => {
+            match self.client.get(endpoint, timeout).await {
+                Ok(response) if response.status().is_success() => {
                     healthy_count += 1;
                 }
                 _ => {}
@@ -343,5 +343,29 @@ mod tests {
         let stored = publisher.last_metrics.lock().unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].name, "test");
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_endpoint_rejected() {
+        let config = PrometheusRemoteWriteConfig {
+            endpoints: vec!["http://127.0.0.1:9090/api/v1/write".to_string()],
+            max_retries: 0,
+            ..Default::default()
+        };
+        let publisher = PrometheusRemoteWritePublisher::new(config);
+        let metrics = vec![RemoteWriteMetric::new("test".to_string(), 1.0)];
+        let result = publisher.push_metrics(metrics).await;
+        assert!(result.is_err(), "private-IP endpoint must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_health_check_rejected() {
+        let config = PrometheusRemoteWriteConfig {
+            endpoints: vec!["http://10.0.0.1:9090/api/v1/write".to_string()],
+            ..Default::default()
+        };
+        let publisher = PrometheusRemoteWritePublisher::new(config);
+        let result = publisher.health_check().await;
+        assert!(result.is_err(), "private-IP endpoint must be rejected");
     }
 }

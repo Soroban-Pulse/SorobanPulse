@@ -1,4 +1,3 @@
-use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -9,7 +8,7 @@ use crate::{
     config::Environment,
     metrics,
     models::{Event, EventType},
-    net::outbound,
+    net::outbound::{self, OutboundClient},
 };
 
 /// Validate a Discord webhook URL against the shared SSRF guard.
@@ -49,7 +48,7 @@ pub struct DiscordConfig {
 
 /// Discord API client for webhook-based notifications
 pub struct DiscordClient {
-    client: Client,
+    client: OutboundClient,
     webhook_url: String,
     bot_name: Option<String>,
     avatar_url: Option<String>,
@@ -74,11 +73,12 @@ fn prefix_with_role_mentions(content: &str, role_ids: &[&str]) -> String {
 
 impl DiscordClient {
     pub fn new(config: DiscordConfig) -> Result<Self, crate::error::InitError> {
-        // Use the shared outbound client: redirects disabled, 10-second timeout.
-        // The webhook_url is validated by `validate_discord_webhook_url` at
-        // creation time; we use `build_outbound_client` here so that the same
-        // hardened client is used for every subsequent request.
-        let client = crate::net::outbound::build_outbound_client(&["discord.com"])?;
+        // Use the shared outbound client wrapper: URL validation, IP pinning,
+        // redirects disabled, timeouts and size limits are all applied by
+        // `OutboundClient`. The webhook_url is validated by
+        // `validate_discord_webhook_url` at creation time; the same hardened
+        // client is used for every subsequent request.
+        let client = OutboundClient::new(&["discord.com"])?;
 
         Ok(Self {
             client,
@@ -164,7 +164,7 @@ impl DiscordClient {
         // Discord posts into a thread via a `?thread_id=` query parameter on
         // the webhook execute URL, not a JSON body field (the body field is
         // silently ignored by Discord's API).
-        let mut request = self.client.post(&self.webhook_url);
+        let mut request = self.client.post(&self.webhook_url)?;
         if let Some(thread) = &thread_id {
             request = request.query(&[("thread_id", thread.as_str())]);
         }
@@ -205,7 +205,7 @@ impl DiscordClient {
 
         let response = self
             .client
-            .post(&self.webhook_url)
+            .post(&self.webhook_url)?
             .json(&payload)
             .send()
             .await?;
@@ -252,7 +252,7 @@ impl DiscordClient {
 
         let response = self
             .client
-            .post(format!("https://discord.com/api/v10/channels/{}/messages", channel_id))
+            .post(&format!("https://discord.com/api/v10/channels/{}/messages", channel_id))?
             .header("Authorization", format!("Bot {}", bot_token))
             .json(&payload)
             .send()

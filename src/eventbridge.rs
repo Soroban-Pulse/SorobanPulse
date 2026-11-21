@@ -7,6 +7,7 @@
 //! - Cross-account EventBridge support
 
 use crate::models::SorobanEvent;
+use crate::net::OutboundClient;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -114,7 +115,7 @@ pub struct PutEventsResultEntry {
 /// AWS EventBridge publisher implementation
 pub struct AwsEventBridgePublisher {
     config: EventBridgeConfig,
-    client: reqwest::Client,
+    client: OutboundClient,
 }
 
 impl AwsEventBridgePublisher {
@@ -124,10 +125,11 @@ impl AwsEventBridgePublisher {
             region = %config.region,
             "Initialized AWS EventBridge publisher"
         );
-        Self {
-            config,
-            client: reqwest::Client::new(),
-        }
+        let client = OutboundClient::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+            .build()
+            .expect("failed to build outbound client for EventBridge");
+        Self { config, client }
     }
 
     pub async fn from_env() -> Result<Self, String> {
@@ -160,6 +162,8 @@ impl AwsEventBridgePublisher {
         let response = self
             .client
             .post(&url)
+            .await
+            .map_err(|e| format!("Failed to call EventBridge API: {e}"))?
             .header("X-Amz-Target", format!("AWSEvents.{action}"))
             .header("Content-Type", "application/x-amz-json-1.1")
             .body(body.to_string())
@@ -403,6 +407,20 @@ mod tests {
 
         assert_eq!(enabled, RuleState::ENABLED);
         assert_eq!(disabled, RuleState::DISABLED);
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_target_rejected() {
+        let publisher = AwsEventBridgePublisher::new(EventBridgeConfig {
+            region: "127.0.0.1".to_string(),
+            ..Default::default()
+        });
+
+        let result = publisher.call_eventbridge_api("PutEvents", "{}").await;
+        assert!(
+            result.is_err(),
+            "private-IP EventBridge target must be rejected"
+        );
     }
 
     #[tokio::test]

@@ -1,4 +1,3 @@
-use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -6,6 +5,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::net::outbound::OutboundClient;
 use crate::{metrics, models::Event};
 
 /// Telegram Bot configuration
@@ -17,7 +17,7 @@ pub struct TelegramConfig {
 
 /// Telegram Bot API client for notifications
 pub struct TelegramClient {
-    client: Client,
+    client: OutboundClient,
     bot_token: String,
     chat_id: String,
     user_subscriptions: HashMap<String, Vec<String>>, // user_id -> chat_ids
@@ -25,10 +25,10 @@ pub struct TelegramClient {
 
 impl TelegramClient {
     pub fn new(config: TelegramConfig) -> Result<Self, crate::error::InitError> {
-        let client = crate::net::outbound::build_http_client(
-            Client::builder().timeout(Duration::from_secs(10)),
-            "telegram",
-        )?;
+        let client = OutboundClient::builder("telegram")
+            .timeout(Duration::from_secs(10))
+            .allowed_domains(["api.telegram.org"])
+            .build()?;
 
         Ok(Self {
             client,
@@ -73,9 +73,7 @@ impl TelegramClient {
 
         let response = self
             .client
-            .post(&url)
-            .json(&payload)
-            .send()
+            .post_json(&url, &payload)
             .await?;
 
         if response.status().is_success() {
@@ -127,9 +125,7 @@ impl TelegramClient {
 
         let response = self
             .client
-            .post(&url)
-            .json(&payload)
-            .send()
+            .post_json(&url, &payload)
             .await?;
 
         if response.status().is_success() {
@@ -194,9 +190,7 @@ impl TelegramClient {
 
         let response = self
             .client
-            .post(&url)
-            .json(&payload)
-            .send()
+            .post_json(&url, &payload)
             .await?;
 
         if response.status().is_success() {
@@ -236,9 +230,7 @@ impl TelegramClient {
 
         let response = self
             .client
-            .post(&url)
-            .json(&payload)
-            .send()
+            .post_json(&url, &payload)
             .await?;
 
         let body: Value = response.json().await?;
@@ -337,5 +329,25 @@ mod tests {
 
         client.unsubscribe_user("user1", "chat1");
         assert!(!client.user_subscriptions.contains_key("user1"));
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_target_rejected() {
+        let config = TelegramConfig {
+            bot_token: "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11".to_string(),
+            chat_id: "-1001234567890".to_string(),
+        };
+
+        let client = TelegramClient::new(config).unwrap();
+
+        let result = client
+            .client
+            .post_json(
+                "https://127.0.0.1/bot123456/sendMessage",
+                &json!({ "chat_id": "-1001234567890", "text": "test" }),
+            )
+            .await;
+
+        assert!(result.is_err(), "private IP target must be rejected");
     }
 }

@@ -6,22 +6,119 @@ use tokio::time::sleep;
 use tracing::{error, info, warn, Span};
 use uuid::Uuid;
 
-/// Validate that `url` is reachable and returns a 2xx response.
+/// Generic error returned to callers when a webhook URL fails validation.
+///
+/// Deliberately opaque: it must not echo transport details, resolved
+/// addresses, or HTTP status codes, since those would let an attacker probe
+/// internal services (SSRF, #1426).
+pub const WEBHOOK_URL_VALIDATION_FAILED: &str = "URL failed validation";
+
+/// Validate that `url` is a safe, reachable webhook target.
+///
 /// Used when creating or updating webhook notification channels (#503).
+///
+/// The URL is first checked by the shared outbound SSRF guard
+/// (`net::outbound::validate_outbound_url`), which rejects non-HTTP(S)
+/// schemes, loopback/RFC1918/link-local/metadata addresses (including
+/// decimal/octal/hex IP encodings and DNS names resolving to private IPs)
+/// and pins the resolved IP to defend against DNS rebinding. Only after that
+/// check passes is a request issued, through the hardened outbound client
+/// (redirects disabled, timeouts applied).
+///
+/// Self-hosted deployments that intentionally target private addresses can
+/// opt in via the `WEBHOOK_ALLOW_PRIVATE_TARGETS` environment variable (or the
+/// `webhook_allow_private_targets` config flag), optionally narrowed to a
+/// comma-separated host allowlist in `WEBHOOK_PRIVATE_TARGET_ALLOWLIST`.
+///
+/// All failures are reported as [`WEBHOOK_URL_VALIDATION_FAILED`] so that the
+/// caller cannot distinguish "blocked" from "unreachable" or learn status
+/// codes.
 pub async fn validate_webhook_url(url: &str) -> Result<(), String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {}", e))?;
+    // SSRF guard: reject unsafe destinations before any network request.
+    if crate::net::outbound::validate_outbound_url(url).await.is_err() {
+        warn!(url = %url, "Webhook URL rejected by outbound SSRF guard");
+        return Err(WEBHOOK_URL_VALIDATION_FAILED.to_string());
+    }
+
+    // Private-target opt-in for self-hosted deployments. Even when enabled,
+    // the allowlist (if configured) must match the URL's host.
+    if !private_targets_permitted(url) {
+        warn!(url = %url, "Webhook URL targets a private address and is not allowlisted");
+        return Err(WEBHOOK_URL_VALIDATION_FAILED.to_string());
+    }
+
+    let client = match crate::net::outbound::outbound_client(Duration::from_secs(10)) {
+        Ok(client) => client,
+        Err(_) => return Err(WEBHOOK_URL_VALIDATION_FAILED.to_string()),
+    };
 
     match client.head(url).send().await {
         Ok(resp) if resp.status().is_success() => Ok(()),
-        Ok(resp) => Err(format!(
-            "webhook URL returned non-2xx status: {}",
-            resp.status()
-        )),
-        Err(e) => Err(format!("webhook URL is unreachable: {}", e)),
+        // Do not leak the status code or transport error to the caller.
+        Ok(_) | Err(_) => Err(WEBHOOK_URL_VALIDATION_FAILED.to_string()),
     }
+}
+
+/// Returns `true` when the URL's host is permitted despite resolving to a
+/// private address.
+///
+/// Private targets are only permitted when the deployment explicitly opts in
+/// via `WEBHOOK_ALLOW_PRIVATE_TARGETS` (truthy). When
+/// `WEBHOOK_PRIVATE_TARGET_ALLOWLIST` is set, the URL host must appear in the
+/// comma-separated list. Public hosts are always permitted.
+fn private_targets_permitted(url: &str) -> bool {
+    let host = match reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+    {
+        Some(host) => host,
+        None => return false,
+    };
+
+    // If the host is not a private/loopback/link-local literal, it is a public
+    // destination and the SSRF guard has already vetted it.
+    if !host_is_private_literal(&host) {
+        return true;
+    }
+
+    let opt_in = std::env::var("WEBHOOK_ALLOW_PRIVATE_TARGETS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !opt_in {
+        return false;
+    }
+
+    match std::env::var("WEBHOOK_PRIVATE_TARGET_ALLOWLIST") {
+        Ok(list) if !list.trim().is_empty() => list
+            .split(',')
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .any(|entry| !entry.is_empty() && entry == host),
+        _ => true,
+    }
+}
+
+/// Best-effort check for private/loopback/link-local host literals.
+fn host_is_private_literal(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.octets()[0] == 169 && v4.octets()[1] == 254
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+            }
+        };
+    }
+    matches!(host, "localhost" | "localhost.localdomain")
 }
 
 use crate::{metrics, models::SorobanEvent, webhook_template::WebhookTemplate};
@@ -87,15 +184,19 @@ pub fn evaluate_priority<'a>(
 
 /// Deliver a single event to the webhook URL with the default retry policy.
 /// On final failure, insert into DLQ.
+///
+/// The supplied `client` is ignored in favour of the hardened outbound client
+/// so that every delivery goes through the SSRF guard (#1426, #1427). The
+/// parameter is retained for API compatibility.
 pub async fn deliver(
-    client: Client,
+    _client: Client,
     url: String,
     secret: Option<String>,
     event: SorobanEvent,
     pool: Option<&sqlx::PgPool>,
 ) {
     deliver_with_retry_policy(
-        client,
+        _client,
         url,
         secret,
         event,
@@ -116,7 +217,7 @@ pub async fn deliver(
 ///
 /// See docs/adr/0003-webhook-retry-strategy.md for the design rationale.
 pub async fn deliver_with_retry_policy(
-    client: Client,
+    _client: Client,
     url: String,
     secret: Option<String>,
     event: SorobanEvent,
@@ -124,6 +225,26 @@ pub async fn deliver_with_retry_policy(
     retry_policy: &crate::retry_policy::RetryPolicy,
     priority: String,
 ) {
+    // Route every delivery through the shared SSRF-safe outbound client
+    // (#1426, #1427). The caller-supplied client is intentionally ignored so
+    // that no integration can bypass the guard.
+    let client = match crate::net::outbound::outbound_client(Duration::from_secs(30)) {
+        Ok(client) => client,
+        Err(e) => {
+            error!(error = %e, url = %url, "Failed to build outbound client for webhook delivery");
+            return;
+        }
+    };
+
+    // Reject unsafe destinations before any request is attempted.
+    if crate::net::outbound::validate_outbound_url(&url).await.is_err()
+        || !private_targets_permitted(&url)
+    {
+        error!(url = %url, "Webhook delivery blocked by outbound SSRF guard");
+        metrics::record_webhook_failure();
+        return;
+    }
+
     // Create a root span for the entire delivery lifecycle
     #[cfg(feature = "full-observability")]
     let root_span = tracing::info_span!(
@@ -525,7 +646,7 @@ async fn enqueue_endpoint_retry(
 /// Deliver with failover: if the primary URL fails, attempt the failover URL (#499).
 /// Returns true if delivered (primary or failover), false if both failed.
 pub async fn deliver_with_failover(
-    client: Client,
+    _client: Client,
     primary_url: String,
     primary_secret: Option<String>,
     failover_url: Option<String>,
@@ -534,6 +655,34 @@ pub async fn deliver_with_failover(
     pool: Option<&sqlx::PgPool>,
     retry_policy: &crate::retry_policy::RetryPolicy,
 ) -> bool {
+    // Use the hardened outbound client for both primary and failover hops
+    // (#1426, #1427).
+    let client = match crate::net::outbound::outbound_client(Duration::from_secs(30)) {
+        Ok(client) => client,
+        Err(e) => {
+            error!(error = %e, "Failed to build outbound client for webhook failover delivery");
+            return false;
+        }
+    };
+
+    // Reject unsafe primary/failover destinations before any request.
+    if crate::net::outbound::validate_outbound_url(&primary_url).await.is_err()
+        || !private_targets_permitted(&primary_url)
+    {
+        error!(url = %primary_url, "Primary webhook blocked by outbound SSRF guard");
+        metrics::record_webhook_failure();
+        return false;
+    }
+    if let Some(ref f_url) = failover_url {
+        if crate::net::outbound::validate_outbound_url(f_url).await.is_err()
+            || !private_targets_permitted(f_url)
+        {
+            error!(url = %f_url, "Failover webhook blocked by outbound SSRF guard");
+            metrics::record_webhook_failure();
+            return false;
+        }
+    }
+
     let body = match serde_json::to_vec(&event) {
         Ok(b) => b,
         Err(e) => {
@@ -852,5 +1001,75 @@ mod tests {
             "medium",
         );
         assert_eq!(p, "medium");
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_loopback_without_request() {
+        let err = validate_webhook_url("http://127.0.0.1:5432/hook")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_metadata_ip() {
+        let err = validate_webhook_url("http://169.254.169.254/latest/meta-data/")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_rfc1918() {
+        let err = validate_webhook_url("http://10.0.0.5/hook").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_ipv6_loopback() {
+        let err = validate_webhook_url("http://[::1]:8080/hook")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_decimal_ip_encoding() {
+        // 2130706433 == 127.0.0.1
+        let err = validate_webhook_url("http://2130706433/hook").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_octal_ip_encoding() {
+        // 0177.0.0.1 == 127.0.0.1
+        let err = validate_webhook_url("http://0177.0.0.1/hook").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_localhost_name() {
+        let err = validate_webhook_url("http://localhost:6379/hook")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_non_http_scheme() {
+        let err = validate_webhook_url("file:///etc/passwd").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[test]
+    fn test_private_targets_permitted_public_host() {
+        assert!(private_targets_permitted("https://hooks.example.com/hook"));
+    }
+
+    #[test]
+    fn test_private_targets_permitted_private_host_without_opt_in() {
+        // Ensure the opt-in env var is not set for this test.
+        std::env::remove_var("WEBHOOK_ALLOW_PRIVATE_TARGETS");
+        assert!(!private_targets_permitted("http://10.1.2.3/hook"));
     }
 }

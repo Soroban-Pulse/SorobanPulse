@@ -1,4 +1,3 @@
-use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -8,7 +7,11 @@ use uuid::Uuid;
 use crate::{
     metrics,
     models::{Event, EventType},
+    net::outbound::{validate_outbound_url, OutboundClient},
 };
+
+/// Domains that Slack webhooks and API calls are allowed to target.
+const SLACK_ALLOWED_DOMAINS: &[&str] = &["hooks.slack.com", "slack.com"];
 
 /// Slack OAuth configuration
 #[derive(Debug, Clone)]
@@ -28,7 +31,7 @@ pub struct SlackConfig {
 
 /// Slack API client for webhook and bot-based notifications
 pub struct SlackClient {
-    client: Client,
+    client: OutboundClient,
     webhook_url: Option<String>,
     bot_token: Option<String>,
     channel: String,
@@ -36,10 +39,10 @@ pub struct SlackClient {
 
 impl SlackClient {
     pub fn new(config: SlackConfig) -> Result<Self, crate::error::InitError> {
-        let client = crate::net::outbound::build_http_client(
-            Client::builder().timeout(Duration::from_secs(10)),
-            "slack",
-        )?;
+        let client = OutboundClient::builder("slack")
+            .timeout(Duration::from_secs(10))
+            .allowed_domains(SLACK_ALLOWED_DOMAINS.iter().map(|d| d.to_string()).collect())
+            .build()?;
 
         Ok(Self {
             client,
@@ -120,6 +123,10 @@ impl SlackClient {
         let url = self.webhook_url.as_ref()
             .ok_or("No webhook URL configured")?;
 
+        // Validate the user-configurable webhook URL against the SSRF guard
+        // and the Slack allowlist before sending.
+        validate_outbound_url(url, Some(SLACK_ALLOWED_DOMAINS)).await?;
+
         let response = self
             .client
             .post(url)
@@ -184,9 +191,12 @@ impl SlackClient {
             "mrkdwn": true
         });
 
+        let api_url = "https://slack.com/api/chat.postMessage";
+        validate_outbound_url(api_url, Some(SLACK_ALLOWED_DOMAINS)).await?;
+
         let response = self
             .client
-            .post("https://slack.com/api/chat.postMessage")
+            .post(api_url)
             .header("Authorization", format!("Bearer {}", bot_token))
             .json(&payload)
             .send()
@@ -272,8 +282,9 @@ impl SlackClient {
         config: &SlackOAuthConfig,
         code: &str,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let client = Client::builder()
+        let client = OutboundClient::builder("slack")
             .timeout(Duration::from_secs(10))
+            .allowed_domains(SLACK_ALLOWED_DOMAINS.iter().map(|d| d.to_string()).collect())
             .build()?;
 
         let payload = [
@@ -283,8 +294,11 @@ impl SlackClient {
             ("redirect_uri", config.redirect_uri.as_str()),
         ];
 
+        let oauth_url = "https://slack.com/api/oauth.v2.access";
+        validate_outbound_url(oauth_url, Some(SLACK_ALLOWED_DOMAINS)).await?;
+
         let response = client
-            .post("https://slack.com/api/oauth.v2.access")
+            .post(oauth_url)
             .form(&payload)
             .send()
             .await?;
@@ -335,5 +349,35 @@ mod tests {
 
         assert_eq!(config.client_id, "test-client-id");
         assert_eq!(config.client_secret, "test-client-secret");
+    }
+
+    #[tokio::test]
+    async fn test_slack_webhook_private_ip_rejected() {
+        let config = SlackConfig {
+            webhook_url: Some("http://127.0.0.1/services/test".to_string()),
+            bot_token: None,
+            channel: "#notifications".to_string(),
+        };
+
+        let client = SlackClient::new(config).unwrap();
+        let event = Event {
+            event_type: EventType::Contract,
+            contract_id: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM".to_string(),
+            tx_hash: "deadbeef".to_string(),
+            ledger: 1,
+            timestamp: 0,
+            event_data: json!({}),
+        };
+
+        let result = client.send_event_notification(&event, None).await;
+        assert!(result.is_err(), "private-IP webhook target must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_slack_webhook_private_ip_rejected_by_guard() {
+        let result =
+            validate_outbound_url("http://192.168.1.10/services/test", Some(SLACK_ALLOWED_DOMAINS))
+                .await;
+        assert!(result.is_err(), "private-IP webhook target must be rejected");
     }
 }

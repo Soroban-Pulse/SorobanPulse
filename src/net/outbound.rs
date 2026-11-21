@@ -25,14 +25,60 @@
 //! For temporary CI overrides during testing, set
 //! `SSRF_ALLOW_PRIVATE_IPS=1` **only** in the `development` environment.
 //! Production and staging builds treat this variable as absent.
+//!
+//! # `OutboundClient`
+//!
+//! [`OutboundClient`] is the **only** supported way for integration code to
+//! issue outbound HTTP requests.  It:
+//!
+//! - validates the URL with [`validate_outbound_url`] before sending;
+//! - resolves DNS once and pins the connection to the validated IP
+//!   (DNS-rebinding defence);
+//! - disables redirects (a redirect to a private address is therefore never
+//!   followed);
+//! - applies a request timeout and a response size limit;
+//! - returns generic errors that do not echo transport details.
+//!
+//! `reqwest::Client` construction is kept private to this module.  A
+//! `clippy.toml` `disallowed-methods` entry blocks `reqwest::Client::new` /
+//! `reqwest::Client::builder` outside `src/net`.
 
 // ⚠️  WARNING: Do not test — implement only (issue #1159).
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
 
 use url::Url;
 
 use crate::{config::Environment, error::AppError};
+
+// ---------------------------------------------------------------------------
+// Per-integration domain allowlists
+// ---------------------------------------------------------------------------
+
+/// Domain suffixes permitted for Slack incoming webhooks.
+pub const SLACK_ALLOWED_DOMAINS: &[&str] = &["hooks.slack.com", "slack.com"];
+/// Domain suffixes permitted for Microsoft Teams webhooks.
+pub const TEAMS_ALLOWED_DOMAINS: &[&str] = &[
+    "webhook.office.com",
+    "outlook.office.com",
+    "office.com",
+];
+/// Domain suffixes permitted for the Telegram Bot API.
+pub const TELEGRAM_ALLOWED_DOMAINS: &[&str] = &["api.telegram.org"];
+/// Domain suffixes permitted for PagerDuty Events API v2.
+pub const PAGERDUTY_ALLOWED_DOMAINS: &[&str] = &["events.pagerduty.com"];
+/// Domain suffixes permitted for AWS EventBridge.
+pub const EVENTBRIDGE_ALLOWED_DOMAINS: &[&str] = &["events.amazonaws.com"];
+/// Domain suffixes permitted for Discord webhooks.
+pub const DISCORD_ALLOWED_DOMAINS: &[&str] = &["discord.com", "discordapp.com"];
+
+/// Maximum number of bytes read from an outbound response body.
+pub const MAX_OUTBOUND_RESPONSE_BYTES: usize = 1024 * 1024; // 1 MiB
+
+/// Timeout applied to a single outbound request.
+pub const OUTBOUND_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -207,13 +253,16 @@ pub fn validate_outbound_url_static(
 /// domain enforcement happens in [`validate_outbound_url`].  The parameter
 /// is accepted here as a documentation hint so callers are aware they should
 /// have called the validator first.
+///
+/// Prefer [`OutboundClient`], which combines validation, IP pinning and this
+/// client in one place.
 pub fn build_outbound_client(
     _allowed_domains: &[&str],
 ) -> Result<reqwest::Client, crate::error::InitError> {
     build_http_client(
         reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(10)),
+            .timeout(OUTBOUND_REQUEST_TIMEOUT),
         "outbound",
     )
 }
@@ -228,6 +277,179 @@ pub fn build_http_client(
     builder
         .build()
         .map_err(|source| crate::error::InitError::HttpClient { component, source })
+}
+
+// ---------------------------------------------------------------------------
+// OutboundClient
+// ---------------------------------------------------------------------------
+
+/// Generic error message returned to callers on any outbound failure.
+///
+/// Transport details (status codes, connection errors, resolved IPs) are
+/// deliberately **not** echoed back to the user: they would let an attacker
+/// probe internal services via the error channel.
+pub const GENERIC_OUTBOUND_ERROR: &str = "URL failed validation";
+
+/// A validated, SSRF-hardened outbound HTTP client.
+///
+/// Construct one per integration (or once and reuse it) with
+/// [`OutboundClient::new`].  Every request:
+///
+/// 1. re-validates the URL against [`validate_outbound_url`] (scheme, static
+///    hostname, and DNS resolution);
+/// 2. resolves the hostname once and pins the connection to the validated
+///    [`SocketAddr`] via `reqwest`'s `resolve` override, so a second DNS
+///    lookup (rebinding) cannot redirect the connection to a private IP;
+/// 3. never follows redirects;
+/// 4. is bounded by [`OUTBOUND_REQUEST_TIMEOUT`] and
+///    [`MAX_OUTBOUND_RESPONSE_BYTES`].
+#[derive(Clone)]
+pub struct OutboundClient {
+    inner: reqwest::Client,
+    env: Environment,
+    allowed_domains: Arc<Vec<String>>,
+}
+
+impl OutboundClient {
+    /// Create a new outbound client for the given environment and
+    /// provider-specific domain allowlist.
+    ///
+    /// `allowed_domains` are domain suffixes (e.g. `hooks.slack.com`) that
+    /// bypass the private-IP check — use only for well-known provider
+    /// endpoints.
+    pub fn new(
+        env: Environment,
+        allowed_domains: &[&str],
+    ) -> Result<Self, crate::error::InitError> {
+        let inner = build_outbound_client(allowed_domains)?;
+        Ok(Self {
+            inner,
+            env,
+            allowed_domains: Arc::new(allowed_domains.iter().map(|s| s.to_string()).collect()),
+        })
+    }
+
+    /// The environment this client validates against.
+    pub fn env(&self) -> &Environment {
+        &self.env
+    }
+
+    /// Validate `raw` and return a request builder pinned to the validated IP.
+    ///
+    /// The returned builder has the URL already set; callers add method, body
+    /// and headers, then call `.send()`.
+    pub async fn request(
+        &self,
+        method: reqwest::Method,
+        raw: &str,
+    ) -> Result<reqwest::RequestBuilder, AppError> {
+        let allowed: Vec<&str> = self.allowed_domains.iter().map(|s| s.as_str()).collect();
+        validate_outbound_url(raw, &self.env, &allowed).await?;
+
+        let url = Url::parse(raw)
+            .map_err(|_| AppError::Validation(GENERIC_OUTBOUND_ERROR.into()))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| AppError::Validation(GENERIC_OUTBOUND_ERROR.into()))?
+            .to_string();
+        let port = url.port_or_known_default().unwrap_or(443);
+
+        // Resolve once and pin.  If the host is already a literal IP, pin it
+        // directly; otherwise resolve and pick the first validated address.
+        let pinned = self.resolve_pinned(&host, port).await?;
+
+        let mut builder = self.inner.request(method, url.as_str());
+        if let Some(addr) = pinned {
+            builder = builder.resolve(&host, addr);
+        }
+        Ok(builder)
+    }
+
+    /// Convenience: send a `HEAD` request and discard the body.
+    ///
+    /// Returns `Ok(())` only for a 2xx response; all failures collapse to the
+    /// generic [`GENERIC_OUTBOUND_ERROR`] message.
+    pub async fn head_ok(&self, raw: &str) -> Result<(), String> {
+        let req = self
+            .request(reqwest::Method::HEAD, raw)
+            .await
+            .map_err(|_| GENERIC_OUTBOUND_ERROR.to_string())?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|_| GENERIC_OUTBOUND_ERROR.to_string())?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(GENERIC_OUTBOUND_ERROR.to_string())
+        }
+    }
+
+    /// Send a request built by [`OutboundClient::request`] and read the body
+    /// with a size cap.
+    ///
+    /// Returns the status and (truncated) body bytes.  All transport failures
+    /// collapse to the generic error message.
+    pub async fn send_capped(
+        &self,
+        req: reqwest::RequestBuilder,
+    ) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
+        let resp = req
+            .send()
+            .await
+            .map_err(|_| GENERIC_OUTBOUND_ERROR.to_string())?;
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|_| GENERIC_OUTBOUND_ERROR.to_string())?;
+        let mut body = bytes.to_vec();
+        if body.len() > MAX_OUTBOUND_RESPONSE_BYTES {
+            body.truncate(MAX_OUTBOUND_RESPONSE_BYTES);
+        }
+        Ok((status, body))
+    }
+
+    /// Resolve `host:port` once and return the first validated [`SocketAddr`].
+    ///
+    /// Returns `Ok(None)` when the host is covered by the provider allowlist
+    /// (in which case no pinning is applied and the platform resolver is
+    /// used).  Returns an error if any resolved address is private.
+    async fn resolve_pinned(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<SocketAddr>, AppError> {
+        let allowed: Vec<&str> = self.allowed_domains.iter().map(|s| s.as_str()).collect();
+        if is_allowed_domain(host, &allowed) {
+            return Ok(None);
+        }
+
+        // Literal IP: pin directly.
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if is_private_ip(&ip) {
+                return Err(AppError::Validation(GENERIC_OUTBOUND_ERROR.into()));
+            }
+            return Ok(Some(SocketAddr::new(ip, port)));
+        }
+
+        let resolved = tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| AppError::Validation(GENERIC_OUTBOUND_ERROR.into()))?;
+
+        let mut first: Option<SocketAddr> = None;
+        for addr in resolved {
+            if is_private_ip(&addr.ip()) {
+                return Err(AppError::Validation(GENERIC_OUTBOUND_ERROR.into()));
+            }
+            if first.is_none() {
+                first = Some(addr);
+            }
+        }
+        first
+            .map(Some)
+            .ok_or_else(|| AppError::Validation(GENERIC_OUTBOUND_ERROR.into()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -483,5 +705,94 @@ mod tests {
             &[],
         );
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // OutboundClient / async validator tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn async_validator_rejects_ipv4_private() {
+        for url in [
+            "https://127.0.0.1/hook",
+            "https://10.1.2.3/hook",
+            "https://172.16.0.1/hook",
+            "https://192.168.0.1/hook",
+            "https://169.254.169.254/latest/meta-data/",
+        ] {
+            let res = validate_outbound_url(url, &Environment::Development, &[]).await;
+            assert!(res.is_err(), "expected rejection for {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn async_validator_rejects_ipv6_private() {
+        for url in [
+            "https://[::1]/hook",
+            "https://[fe80::1]/hook",
+            "https://[fc00::1]/hook",
+        ] {
+            let res = validate_outbound_url(url, &Environment::Development, &[]).await;
+            assert!(res.is_err(), "expected rejection for {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn async_validator_rejects_decimal_and_octal_encodings() {
+        for url in [
+            "https://2130706433/hook",       // decimal 127.0.0.1
+            "https://0177.0.0.1/hook",       // octal 127.0.0.1
+            "https://0x7f.0x00.0x00.0x01/hook", // hex 127.0.0.1
+        ] {
+            let res = validate_outbound_url(url, &Environment::Development, &[]).await;
+            assert!(res.is_err(), "expected rejection for {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn async_validator_rejects_dns_name_resolving_to_private() {
+        // `localhost` resolves to a loopback address; the static check catches
+        // it before DNS, but the resolved-IP path is exercised via the
+        // `.localhost` suffix and the explicit loopback hostname.
+        let res = validate_outbound_url("https://localhost/hook", &Environment::Development, &[])
+            .await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn outbound_client_rejects_private_target_without_network() {
+        let client = OutboundClient::new(Environment::Development, &[]).unwrap();
+        // Loopback / metadata targets must be rejected before any request is
+        // issued; `request` performs validation first.
+        for url in [
+            "https://127.0.0.1/hook",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://[::1]/hook",
+        ] {
+            let res = client.request(reqwest::Method::POST, url).await;
+            assert!(res.is_err(), "expected rejection for {url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn outbound_client_head_ok_returns_generic_error() {
+        let client = OutboundClient::new(Environment::Development, &[]).unwrap();
+        let err = client.head_ok("https://127.0.0.1/hook").await.unwrap_err();
+        assert_eq!(err, GENERIC_OUTBOUND_ERROR);
+    }
+
+    #[test]
+    fn per_integration_allowlists_are_domain_aware() {
+        assert!(is_allowed_domain("hooks.slack.com", SLACK_ALLOWED_DOMAINS));
+        assert!(is_allowed_domain("api.telegram.org", TELEGRAM_ALLOWED_DOMAINS));
+        assert!(is_allowed_domain(
+            "events.pagerduty.com",
+            PAGERDUTY_ALLOWED_DOMAINS
+        ));
+        assert!(is_allowed_domain(
+            "events.amazonaws.com",
+            EVENTBRIDGE_ALLOWED_DOMAINS
+        ));
+        assert!(!is_allowed_domain("evil.slack.com.attacker.io", SLACK_ALLOWED_DOMAINS));
     }
 }

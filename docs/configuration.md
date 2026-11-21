@@ -23,7 +23,8 @@ This file is **auto-generated** from `src/config.rs`. Do not edit it by hand —
 | `BEHIND_PROXY` | `false` | Set to true when running behind a reverse proxy so the real client IP is extracted from X-Forwarded-For. |
 | `RPC_CONNECT_TIMEOUT_SECS` | `5` | TCP connection timeout in seconds for RPC requests. |
 | `RPC_REQUEST_TIMEOUT_SECS` | `30` | Total request timeout in seconds for RPC calls. |
-| `ALLOWED_ORIGINS` | `*` | Comma-separated CORS allowed origins. Wildcard (*) is rejected in production-like environments. |
+| `ALLOWED_ORIGINS` | `(empty)` | Comma-separated CORS allowed origins. Empty means same-origin only. `*` is only honoured in development, or when ALLOW_WILDCARD_CORS=true, and is always rejected in production-like environments. |
+| `ALLOW_WILDCARD_CORS` | `false` | Explicitly opt in to wildcard CORS (`ALLOWED_ORIGINS=*`) even when REQUIRE_AUTH=true. A startup warning is logged whenever wildcard CORS is active. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Maximum HTTP requests per IP per minute. Set to 0 to disable rate limiting. |
 | `INDEXER_LAG_WARN_THRESHOLD` | `100` | Number of ledgers behind the tip before a warning is emitted. |
 | `INDEXER_STALL_TIMEOUT_SECS` | `60` | Seconds without a successful indexer poll before the health check reports unhealthy. |
@@ -179,7 +180,8 @@ Variables marked with a feature flag only take effect when the binary is built w
 | `CONFIG_FILE` | string | — | no | — | Path to an optional TOML file supplying any variable in this reference. Environment variables take precedence over file values. |
 | `PORT` | integer | `3000` | no | — | HTTP server port to listen on. |
 | `BEHIND_PROXY` | bool | `false` | no | — | Trust `X-Forwarded-For` / `X-Real-IP` for client IPs. Enable only behind a trusted reverse proxy. |
-| `ALLOWED_ORIGINS` | list | `*` | no | — | Comma-separated CORS origins. `*` allows all origins and is rejected in staging/production. |
+| `ALLOWED_ORIGINS` | list | — | no | — | Comma-separated CORS origins. Empty (the default) allows same-origin requests only. `*` allows all origins, is only honoured in `development` or when `ALLOW_WILDCARD_CORS=true`, and is rejected in staging/production. |
+| `ALLOW_WILDCARD_CORS` | bool | `false` | no | — | Explicitly allow `ALLOWED_ORIGINS=*` even when `REQUIRE_AUTH=true`. A startup warning is logged whenever wildcard CORS is active. |
 | `MAX_BODY_SIZE_BYTES` | integer | `1048576` | no | — | Maximum accepted HTTP request body size in bytes. |
 | `TLS_CERT_FILE` | string | — | no | — | Path to a PEM certificate. When set together with `TLS_KEY_FILE`, the server terminates TLS itself. |
 | `TLS_KEY_FILE` | string | — | no | — | Path to the PEM private key matching `TLS_CERT_FILE`. |

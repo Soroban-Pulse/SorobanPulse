@@ -1,13 +1,16 @@
-use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tracing::{error, info};
 use uuid::Uuid;
 
+use crate::net::outbound::OutboundClient;
 use crate::notification_channel::NotificationChannel;
 use crate::notification_delivery::NotificationError;
 use crate::{metrics, models::SorobanEvent, retry_policy::RetryPolicy};
+
+/// Twilio's API host. Outbound requests are restricted to this domain.
+const TWILIO_API_HOST: &str = "api.twilio.com";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TwilioConfig {
@@ -25,7 +28,7 @@ struct TwilioResponse {
 }
 
 pub struct SmsNotifier {
-    client: Client,
+    client: OutboundClient,
     config: TwilioConfig,
     contract_filter: Vec<String>,
     retry_policy: RetryPolicy,
@@ -39,10 +42,10 @@ impl SmsNotifier {
         retry_policy: RetryPolicy,
         pool: sqlx::PgPool,
     ) -> Result<Self, crate::error::InitError> {
-        let client = crate::net::outbound::build_http_client(
-            Client::builder().timeout(Duration::from_secs(30)),
-            "SMS",
-        )?;
+        let client = OutboundClient::builder("SMS")
+            .timeout(Duration::from_secs(30))
+            .allowed_domains([TWILIO_API_HOST])
+            .build()?;
 
         Ok(Self {
             client,
@@ -153,15 +156,15 @@ impl SmsNotifier {
 
     async fn send_twilio_sms(
         &self,
-        client: &Client,
+        client: &OutboundClient,
         config: &TwilioConfig,
         to: &str,
         message: &str,
         attempt: u32,
     ) -> Result<String, String> {
         let url = format!(
-            "https://api.twilio.com/2010-04-01/Accounts/{}/Messages.json",
-            config.account_sid
+            "https://{}/2010-04-01/Accounts/{}/Messages.json",
+            TWILIO_API_HOST, config.account_sid
         );
 
         let form_data = [
@@ -329,5 +332,26 @@ mod tests {
         assert!(n.accepts(&event("CWATCHED", "contract")));
         assert!(!n.accepts(&event("COTHER", "contract")));
         assert!(!n.accepts(&event("CWATCHED", "system")));
+    }
+
+    /// Issue #1427: the shared outbound guard must reject private-IP targets
+    /// before any request is sent.
+    #[tokio::test]
+    async fn private_ip_target_is_rejected() {
+        let n = notifier(vec![]);
+        for target in [
+            "http://127.0.0.1/2010-04-01/Accounts/x/Messages.json",
+            "http://10.0.0.5/2010-04-01/Accounts/x/Messages.json",
+            "http://169.254.169.254/latest/meta-data/",
+        ] {
+            let result = n
+                .client
+                .post(target)
+                .basic_auth("test", Some("test"))
+                .form(&[("To", "+1"), ("Body", "hi")])
+                .send()
+                .await;
+            assert!(result.is_err(), "expected {target} to be rejected");
+        }
     }
 }

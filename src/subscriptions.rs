@@ -275,6 +275,18 @@ pub fn build_delivery_client() -> Result<reqwest::Client, crate::error::InitErro
     )
 }
 
+/// Build the hardened outbound client used by the delivery worker.
+///
+/// Unlike [`build_delivery_client`], this returns the shared
+/// [`crate::net::OutboundClient`] wrapper, which re-validates every URL at send
+/// time (DNS-rebinding defence), pins the resolved IP, and refuses redirects.
+pub fn build_outbound_delivery_client() -> Result<crate::net::OutboundClient, crate::error::InitError> {
+    crate::net::OutboundClient::builder()
+        .timeout(Duration::from_secs(10))
+        .build("subscription delivery")
+}
+=======
+
 /// Validate a callback URL against SSRF rules.
 ///
 /// Rules (in order):
@@ -757,13 +769,7 @@ async fn deliver_pending(pool: &PgPool, http: &reqwest::Client) -> Result<usize,
 
     for (queue_id, event_id, callback_url, event_data, ledger) in single_items {
         let payload = json!({ "event_id": event_id, "ledger": ledger, "event_data": event_data });
-        match http
-            .post(&callback_url)
-            .json(&payload)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-        {
+        match send_callback(http, &callback_url, &payload, Duration::from_secs(10)).await {
             Ok(resp) if resp.status().is_success() => {
                 sqlx::query("UPDATE delivery_queue SET status = 'delivered' WHERE id = $1")
                     .bind(queue_id)
@@ -801,13 +807,7 @@ async fn deliver_pending(pool: &PgPool, http: &reqwest::Client) -> Result<usize,
         let payload = json!({ "events": events, "batch_size": batch_size });
 
         let timeout = Duration::from_millis(batch_timeout_ms as u64);
-        match http
-            .post(&callback_url)
-            .json(&payload)
-            .timeout(timeout)
-            .send()
-            .await
-        {
+        match send_callback(http, &callback_url, &payload, timeout).await {
             Ok(resp) if resp.status().is_success() => {
                 let queue_ids: Vec<Uuid> = batch_items_to_send.iter().map(|(qid, _, _, _, _, _, _)| *qid).collect();
                 sqlx::query(
@@ -837,6 +837,20 @@ async fn deliver_pending(pool: &PgPool, http: &reqwest::Client) -> Result<usize,
     }
 
     Ok(total_delivered)
+}
+
+/// Send a JSON payload to a subscription callback URL through the shared
+/// outbound SSRF guard.
+///
+/// The URL is re-validated at send time (defeating DNS rebinding), the resolved
+/// IP is pinned, and redirects are refused by the underlying client.
+async fn send_callback(
+    http: &reqwest::Client,
+    callback_url: &str,
+    payload: &Value,
+    timeout: Duration,
+) -> Result<reqwest::Response, reqwest::Error> {
+    crate::net::outbound::send_validated_json(http, callback_url, payload, timeout).await
 }
 
 /// Exponential backoff: 2^attempts seconds, capped at 1 hour.
@@ -1459,6 +1473,41 @@ pub mod tests {
         // The only way to verify policy without making a real request is to confirm
         // the builder compiles and returns a client successfully.
         let _client = build_delivery_client().unwrap();
+    }
+
+    #[test]
+    fn build_outbound_delivery_client_succeeds() {
+        let _client = build_outbound_delivery_client().unwrap();
+    }
+
+    #[tokio::test]
+    async fn delivery_rejects_private_ip_callback_target() {
+        // A private-IP callback target must be rejected by the shared outbound
+        // guard before any request is attempted.
+        let client = build_delivery_client().unwrap();
+        let payload = json!({ "event_id": Uuid::new_v4(), "ledger": 1, "event_data": {} });
+        let result = send_callback(
+            &client,
+            "http://10.0.0.1/hook",
+            &payload,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(result.is_err(), "private-IP callback target must be rejected");
+    }
+
+    #[tokio::test]
+    async fn delivery_rejects_loopback_callback_target() {
+        let client = build_delivery_client().unwrap();
+        let payload = json!({ "event_id": Uuid::new_v4(), "ledger": 1, "event_data": {} });
+        let result = send_callback(
+            &client,
+            "http://127.0.0.1/hook",
+            &payload,
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(result.is_err(), "loopback callback target must be rejected");
     }
 
     // --- Unit tests for retry backoff logic ---

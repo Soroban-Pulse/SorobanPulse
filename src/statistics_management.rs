@@ -138,21 +138,53 @@ pub struct TableStatisticsDetail {
 // Existing functions (backward compatible)
 // ---------------------------------------------------------------------------
 
+/// Validate a table name against `^[a-z_][a-z0-9_]{0,62}$`.
+///
+/// Returns `ApiError::BadRequest` when the name does not match, so that
+/// untrusted input can never be interpolated into SQL.
+pub fn validate_table_name(table_name: &str) -> Result<(), ApiError> {
+    let bytes = table_name.as_bytes();
+    let valid_len = !bytes.is_empty() && bytes.len() <= 63;
+    let valid_first = valid_len
+        && (bytes[0].is_ascii_lowercase() || bytes[0] == b'_');
+    let valid_rest = valid_first
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_');
+
+    if valid_rest {
+        Ok(())
+    } else {
+        Err(ApiError::BadRequest(format!(
+            "Invalid table name: must match ^[a-z_][a-z0-9_]{{0,62}}$"
+        )))
+    }
+}
+
+/// Quote a validated identifier for use in DDL (defence in depth on top of
+/// [`validate_table_name`]).
+fn quote_ident(ident: &str) -> Result<String, ApiError> {
+    validate_table_name(ident)?;
+    Ok(format!("\"{}\"", ident))
+}
+
 /// Refresh statistics for all tables or a specific table.
 pub async fn refresh_table_statistics(
     pool: &PgPool,
     table_name: Option<&str>,
 ) -> Result<Vec<(String, String, i32)>, ApiError> {
-    let query = if let Some(table) = table_name {
-        format!("SELECT * FROM refresh_table_statistics('{}')", table)
+    let results: Vec<(String, String, i32)> = if let Some(table) = table_name {
+        validate_table_name(table)?;
+        sqlx::query_as("SELECT * FROM refresh_table_statistics($1)")
+            .bind(table)
+            .fetch_all(pool)
+            .await
     } else {
-        "SELECT * FROM refresh_table_statistics()".to_string()
-    };
-
-    let results: Vec<(String, String, i32)> = sqlx::query_as(&query)
-        .fetch_all(pool)
-        .await
-        .map_err(|e| ApiError::BadRequest(format!("Failed to refresh statistics: {}", e)))?;
+        sqlx::query_as("SELECT * FROM refresh_table_statistics()")
+            .fetch_all(pool)
+            .await
+    }
+    .map_err(|e| ApiError::BadRequest(format!("Failed to refresh statistics: {}", e)))?;
 
     info!("Statistics refresh completed for {} tables", results.len());
     Ok(results)
@@ -259,15 +291,21 @@ pub async fn run_extended_statistics(
         ("stx_events_ledger_ts",       "events", "(ledger, timestamp)"),
     ];
 
+    // Validate the caller-supplied table name before any DDL is built.
+    validate_table_name(table_name)?;
+
     for (stat_name, tbl, cols) in stats_defs {
         if *tbl != table_name && table_name != "events" {
             continue;
         }
-        // DROP + CREATE to refresh — idempotent.
-        let drop_sql = format!("DROP STATISTICS IF EXISTS {}", stat_name);
+        // DROP + CREATE to refresh — idempotent. Identifiers are quoted and
+        // validated; `cols` is a static, compile-time constant.
+        let drop_sql = format!("DROP STATISTICS IF EXISTS {}", quote_ident(stat_name)?);
         let create_sql = format!(
             "CREATE STATISTICS IF NOT EXISTS {} (ndistinct, mcv) ON {} FROM {}",
-            stat_name, cols, tbl
+            quote_ident(stat_name)?,
+            cols,
+            quote_ident(tbl)?
         );
         if let Err(e) = sqlx::query(&drop_sql).execute(pool).await {
             warn!(stat_name, error = %e, "Could not drop extended statistics (may not exist)");
@@ -280,7 +318,7 @@ pub async fn run_extended_statistics(
     }
 
     // Trigger ANALYZE so the new statistics are populated immediately.
-    let analyze_sql = format!("ANALYZE {}", table_name);
+    let analyze_sql = format!("ANALYZE {}", quote_ident(table_name)?);
     sqlx::query(&analyze_sql)
         .execute(pool)
         .await
@@ -479,11 +517,14 @@ pub async fn update_n_distinct_estimate(
 ) -> Result<(), ApiError> {
     // ALTER TABLE ... ALTER COLUMN ... SET (n_distinct = ...) controls n_distinct
     // override. Positive = absolute count; negative = fraction of rows.
+    // Identifiers are validated and quoted; the numeric value is bound.
     let sql = format!(
-        "ALTER TABLE {} ALTER COLUMN {} SET (n_distinct = {})",
-        table_name, column_name, n_distinct
+        "ALTER TABLE {} ALTER COLUMN {} SET (n_distinct = $1)",
+        quote_ident(table_name)?,
+        quote_ident(column_name)?
     );
     sqlx::query(&sql)
+        .bind(n_distinct)
         .execute(pool)
         .await
         .map_err(|e| {
@@ -551,8 +592,11 @@ pub async fn enable_parallel_query(pool: &PgPool) -> Result<(), ApiError> {
         .map_err(|e| ApiError::BadRequest(format!("Could not acquire connection: {}", e)))?;
 
     for (key, val) in &settings {
-        let sql = format!("SET {} = '{}'", key, val);
+        // `key` and `val` are static constants, but bind the value anyway so
+        // no quoted literal is ever built via `format!`.
+        let sql = format!("SET {} = $1", key);
         sqlx::query(&sql)
+            .bind(*val)
             .execute(&mut *conn)
             .await
             .map_err(|e| {
@@ -754,6 +798,42 @@ mod tests {
             (100.0 - pct) as u32
         };
         assert_eq!(score, 100);
+    }
+
+    #[test]
+    fn validate_table_name_accepts_known_tables() {
+        assert!(validate_table_name("events").is_ok());
+        assert!(validate_table_name("_internal_stats").is_ok());
+        assert!(validate_table_name("t1").is_ok());
+        assert!(validate_table_name(&"a".repeat(63)).is_ok());
+    }
+
+    #[test]
+    fn validate_table_name_rejects_injection_payloads() {
+        let payloads = [
+            "x'); DROP TABLE events; --",
+            "events'",
+            "Events",
+            "1events",
+            "",
+            "events; DELETE FROM events",
+            "events--",
+            "events\"",
+            &"a".repeat(64),
+        ];
+        for payload in payloads {
+            assert!(
+                validate_table_name(payload).is_err(),
+                "expected rejection of {:?}",
+                payload
+            );
+        }
+    }
+
+    #[test]
+    fn quote_ident_wraps_valid_identifier() {
+        assert_eq!(quote_ident("events").unwrap(), "\"events\"");
+        assert!(quote_ident("x'); DROP TABLE events; --").is_err());
     }
 
     #[test]

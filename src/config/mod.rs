@@ -322,9 +322,19 @@ pub struct Config {
     pub rpc_request_timeout_secs: u64,
 
     /// @env ALLOWED_ORIGINS
-    /// @default *
-    /// @description Comma-separated CORS allowed origins. Wildcard (*) is rejected in production-like environments.
+    /// @default (empty — same-origin only; `*` only when ENVIRONMENT=development)
+    /// @description Comma-separated CORS allowed origins. When unset, no cross-origin
+    /// requests are allowed (same-origin only). The wildcard `*` is only honoured in
+    /// development, and is refused when REQUIRE_AUTH=true unless
+    /// ALLOW_WILDCARD_CORS=true is explicitly set (Issue #1428).
     pub allowed_origins: Vec<String>,
+
+    /// @env ALLOW_WILDCARD_CORS
+    /// @default false
+    /// @description Explicitly opt in to wildcard (`*`) CORS while REQUIRE_AUTH=true.
+    /// Without this, a wildcard ALLOWED_ORIGINS is refused when authentication is
+    /// enabled (Issue #1428).
+    pub allow_wildcard_cors: bool,
 
     /// @env RATE_LIMIT_PER_MINUTE
     /// @default 60
@@ -1069,7 +1079,8 @@ impl Default for Config {
             behind_proxy: false,
             rpc_connect_timeout_secs: 5,
             rpc_request_timeout_secs: 30,
-            allowed_origins: vec!["*".to_string()],
+            allowed_origins: Vec::new(),
+            allow_wildcard_cors: false,
             rate_limit_per_minute: 60,
             subscription_rate_limit_per_minute: 5,
             rate_limit_key_per_minute: None,

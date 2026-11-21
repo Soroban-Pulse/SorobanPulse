@@ -9,7 +9,6 @@
 //! - Auto-resolve of stale open incidents
 //! - Per-subscription configuration via `pagerduty_integrations` DB table
 
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -19,6 +18,7 @@ use tokio::time::sleep;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+use crate::net::outbound::{validate_outbound_url, OutboundClient};
 use crate::{metrics, models::SorobanEvent};
 
 /// PagerDuty Events API v2 endpoint
@@ -27,6 +27,9 @@ const PD_EVENTS_URL: &str = "https://events.pagerduty.com/v2/enqueue";
 const PD_API_BASE: &str = "https://api.pagerduty.com";
 /// Maximum delivery retry attempts
 const MAX_ATTEMPTS: u32 = 3;
+
+/// Domains that PagerDuty integrations are permitted to contact.
+const PD_ALLOWED_DOMAINS: &[&str] = &["events.pagerduty.com", "api.pagerduty.com"];
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -134,19 +137,19 @@ pub struct EscalationTarget {
 /// Create one per integration configuration and share it across async tasks
 /// via [`Arc`].
 pub struct PagerDutyClient {
-    client: Client,
+    client: OutboundClient,
     pub config: PagerDutyConfig,
 }
 
 impl PagerDutyClient {
     /// Construct a client from an explicit config.
     pub fn new(config: PagerDutyConfig) -> Result<Self, crate::error::InitError> {
-        let client = crate::net::outbound::build_http_client(
-            Client::builder().timeout(Duration::from_secs(10)),
-            "pagerduty",
-        )?;
+        let client = OutboundClient::builder("pagerduty")
+            .timeout(Duration::from_secs(10))
+            .allowed_domains(PD_ALLOWED_DOMAINS.iter().map(|d| d.to_string()).collect())
+            .build()?;
 
-        Ok(Self { client, config }
+        Ok(Self { client, config })
     }
 
     /// Build a client from the global application config when a routing key is
@@ -351,6 +354,9 @@ impl PagerDutyClient {
 
         let url = format!("{}/escalation_policies/{}", PD_API_BASE, policy_id);
 
+        // Validate the outbound destination before sending.
+        validate_outbound_url(&url).await?;
+
         let resp = self
             .client
             .get(&url)
@@ -412,6 +418,10 @@ impl PagerDutyClient {
             .ok_or("PagerDuty REST API key not configured")?;
 
         let url = format!("{}/escalation_policies", PD_API_BASE);
+
+        // Validate the outbound destination before sending.
+        validate_outbound_url(&url).await?;
+
         let resp = self
             .client
             .get(&url)
@@ -547,6 +557,9 @@ impl PagerDutyClient {
         &self,
         payload: Value,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        // Validate the outbound destination before sending.
+        validate_outbound_url(PD_EVENTS_URL).await?;
+
         let mut backoff_ms = 1_000u64;
 
         for attempt in 1..=MAX_ATTEMPTS {
@@ -787,5 +800,27 @@ mod tests {
         assert_ne!(k1, k2);
         assert_ne!(k1, k3);
         assert_ne!(k2, k3);
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_target_rejected() {
+        // A private-IP target must be rejected by the outbound SSRF guard.
+        let result = validate_outbound_url("http://127.0.0.1/v2/enqueue").await;
+        assert!(
+            result.is_err(),
+            "private-IP target should be rejected by the outbound guard"
+        );
+
+        let result = validate_outbound_url("http://10.0.0.1/escalation_policies").await;
+        assert!(
+            result.is_err(),
+            "private-IP target should be rejected by the outbound guard"
+        );
+
+        let result = validate_outbound_url("http://192.168.1.1/v2/enqueue").await;
+        assert!(
+            result.is_err(),
+            "private-IP target should be rejected by the outbound guard"
+        );
     }
 }

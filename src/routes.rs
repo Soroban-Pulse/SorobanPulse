@@ -1048,7 +1048,16 @@ fn build_cors(allowed_origins: &[String]) -> CorsLayer {
     let exposed_headers = [axum::http::header::HeaderName::from_static("x-request-id")];
     let max_age = std::time::Duration::from_secs(86400);
 
+    // Issue #1428: an empty allow-list means same-origin only. No
+    // `Access-Control-Allow-Origin` header is emitted, so browsers block
+    // cross-origin reads. The config layer decides whether `*` is permitted
+    // (development mode or explicit ALLOW_WILDCARD_CORS=true); if it reaches
+    // us here we honour it but warn loudly.
     if allowed_origins.iter().any(|o| o == "*") {
+        tracing::warn!(
+            "CORS is configured with a wildcard origin (*); any website can make \
+             cross-origin requests. Set ALLOWED_ORIGINS to an explicit list in production."
+        );
         return CorsLayer::new()
             .allow_origin(tower_http::cors::Any)
             .allow_methods(methods)
@@ -1059,8 +1068,14 @@ fn build_cors(allowed_origins: &[String]) -> CorsLayer {
 
     let origins: Vec<HeaderValue> = allowed_origins
         .iter()
+        .filter(|o| !o.trim().is_empty())
         .filter_map(|o| o.parse().ok())
         .collect();
+
+    if origins.is_empty() {
+        // Same-origin only: install no permissive CORS layer at all.
+        return CorsLayer::new();
+    }
 
     CorsLayer::new()
         .allow_origin(origins)
@@ -1367,6 +1382,27 @@ mod tests {
         Router::new()
             .route("/test", get(|| async { "ok" }))
             .layer(cors)
+    }
+
+    /// Issue #1428: with no configured origins, cross-origin requests must not
+    /// receive an `Access-Control-Allow-Origin` header.
+    #[tokio::test]
+    async fn empty_origins_emit_no_allow_origin_header() {
+        let app = cors_test_app(&[]);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/test")
+                    .header("Origin", "http://evil.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "empty allow-list must not emit Access-Control-Allow-Origin"
+        );
     }
 
     #[tokio::test]
