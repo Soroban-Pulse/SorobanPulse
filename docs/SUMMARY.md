@@ -22,7 +22,7 @@
 - [API Versioning](api-versioning.md)
   - [Migrating unversioned routes to /v1/](migration-unversioned-to-v1.md)
 - [API SLA](api-sla.md)
-- [GraphQL API](reference/graphql-api.md)
+- [GraphQL API](graphql_api.md)
 - [OpenAPI Spec](codegen.md)
 - [Postman Collection](postman.md)
 - [SDK Integration Guide](sdk-integration-guide.md)
@@ -33,7 +33,7 @@
 
 - [Notification Channels](notification-channels.md)
 - [Notification Features](notification-features.md)
-- [Webhook Signing](reference/webhook-signing.md)
+- [Webhook Signing](webhook_signing.md)
 - [Webhook Verification](webhook-verification.md)
 - [Webhook Endpoint Rate Limits](webhook-endpoint-rate-limits.md)
 - [Email Notifications](email-notifications.md)
@@ -49,7 +49,7 @@
 
 - [Event Feeds](event-feeds.md)
 - [SSE Reconnection](sse-reconnection.md)
-- [SSE Reverse Proxy Configuration](guides/sse-reverse-proxy-configuration.md)
+- [SSE Reverse Proxy Configuration](sse_reverse_proxy_configuration.md)
 - [Subscription Best Practices](subscription-best-practices.md)
 - [Contract Event Schemas](contract-event-schemas.md)
 - [Contract Event Simulation](contract-event-simulation.md)
@@ -62,9 +62,8 @@
 
 - [AWS SQS Integration](sqs-integration.md)
 - [Azure Event Hubs Integration](event-hubs-integration.md)
-- [Cross-Chain Correlation](integrations/cross-chain-correlation.md)
 - [Lua Event Transformation](lua-transformation.md)
-- [Streaming Responses](guides/streaming-responses.md)
+- [Streaming Responses](STREAMING_RESPONSES.md)
 
 ---
 
@@ -73,8 +72,6 @@
 - [Database Schema](schema.md)
 - [Data Retention Policy](data-retention.md)
 - [Encryption](encryption.md)
-- [Query Plan Caching](reference/query-plan-caching.md)
-- [Serialization Optimization](reference/serialization-optimization.md)
 
 ---
 
@@ -88,15 +85,14 @@
 
 - [Logging](logging.md)
 - [Log Aggregation](log-aggregation.md)
-- [Audit Logging](operations/audit-logging.md)
-- [Rate Limiting](operations/rate-limiting.md)
+- [Rate Limiting](rate_limiting.md)
 - [Performance Tuning](performance-tuning.md)
 - [Performance Regression Testing](performance-regression-testing.md)
 - [Capacity Planning](capacity-planning.md)
 - [Replica Monitoring](replica-monitoring.md)
 - [Statistics Auto Analysis](statistics-auto-analysis.md)
 - [Kubernetes Probes](kubernetes-probes.md)
-- [OWASP Security Headers](operations/owasp-security-headers.md)
+- [OWASP Security Headers](owasp_security_headers.md)
 
 ---
 
@@ -114,6 +110,8 @@
 
 - [Multi-Tenancy](multi-tenancy.md)
 - [Multi-Deployment Architecture](multi-deployment-architecture.md)
+- [SaaS Platform (Experimental)](SAAS_PLATFORM.md)
+- [ML Integration (Experimental)](ML_INTEGRATION.md)
 - [Feature Flag Rollback](feature-flag-rollback.md)
 
 ---
@@ -168,11 +166,8 @@
 # Reference
 
 - [Frequently Asked Questions (Issue #999)](FAQ.md)
-- [AI/ML Integration & Intelligence Features](ML_INTEGRATION.md)
-- [SaaS Platform & Multi-Tenant Hosting](SAAS_PLATFORM.md)
 - [Accessibility (WCAG 2.2 AA) Guide](accessibility-guide.md)
 - [Advisory Lock Behavior & Leader Election Race Fix](advisory-lock-behavior.md)
-- [Aggregation Merge Plan](aggregation-merge-plan.md)
 - [Real-time Alerting Configuration (Issue #897)](alerting.md)
 - [API Changelog Process](api-changelog.md)
 - [API Compliance Testing](api-compliance-testing.md)
@@ -186,20 +181,17 @@
 - [Background Job Framework](background-jobs.md)
 - [Batch Event Operations](batch-operations.md)
 - [Bulk Event Export with Compression](bulk_export.md)
-- [Cargo Workspace Plan](cargo-workspace-plan.md)
 - [Chaos Engineering Tests (Issue #921)](chaos-testing.md)
 - [`spulse` CLI Usage](cli-usage.md)
 - [Client Libraries](client-libraries.md)
 - [HTTP Response Compression](compression-optimization.md)
 - [Configuration Management — Issue #997](configuration-management.md)
-- [Connection Pool Consolidation](connection-pool-consolidation.md)
 - [Connection Pool Configuration & Optimization - Issue #888](connection-pool.md)
 - [Correlation IDs](correlation-ids.md)
 - [Cross-Chain Event Correlation](cross-chain-events.md)
 - [Cursor (Keyset) Pagination](cursor-pagination.md)
 - [Web dashboard](dashboard.md)
 - [Data Quality Monitoring](data-quality-monitoring.md)
-- [Multi-Tier Data Retention](data-retention-tiers.md)
 - [Data Warehouse Export](data-warehouse.md)
 - [Database Configuration Tuning (Issue #824)](database-configuration-tuning.md)
 - [Webhook Dead-Letter Replay](dead-letter-replay.md)

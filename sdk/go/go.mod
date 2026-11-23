@@ -1,6 +1,6 @@
-module github.com/soroban-pulse/client-go
+module github.com/Soroban-Pulse/SorobanPulse/sdk/go
 
-go 1.21
+go 1.22
 
 require github.com/stretchr/testify v1.8.4
 

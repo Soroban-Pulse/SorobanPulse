@@ -12,6 +12,7 @@ on:
       - "openapi.json"
       - "src/bin/gen_postman.rs"
       - ".github/workflows/deploy-docs.yml"
+      - "scripts/check-docs-summary.sh"
   pull_request:
     paths:
       - "docs/**"
@@ -21,6 +22,7 @@ on:
       - "openapi.json"
       - "src/bin/gen_postman.rs"
       - ".github/workflows/deploy-docs.yml"
+      - "scripts/check-docs-summary.sh"
   workflow_dispatch:
 
 # Allow only one concurrent deployment; cancel in-progress runs.
@@ -39,6 +41,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a6c4b5f7e3f8f9c1a2b3c4d5e6f7a8b9c # v4.2.2
+
+      # Fail if any docs/*.md outside adr/, archive/ and design/ is not
+      # linked from docs/SUMMARY.md, so new orphan pages can't slip in.
+      - name: Check for orphan docs not linked from SUMMARY.md
+        run: bash scripts/check-docs-summary.sh
 
       - name: Install mdbook
         run: |

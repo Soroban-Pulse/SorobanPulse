@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - "sdk/**"
+      - "sdk/go/**"
       - "openapi.json"
       - "tests/sdk_conformance/**"
       - "docker-compose.conformance.yml"
@@ -17,6 +18,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  go-sdk:
+    name: Go SDK (vet, test, staticcheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/go
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sdk/go/go.mod
+          cache-dependency-path: sdk/go/go.sum
+
+      - name: Download Go module dependencies
+        run: go mod download
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test ./...
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      - name: staticcheck
+        run: staticcheck ./...
+
   sdk-conformance:
     name: SDK Conformance Tests
     runs-on: ubuntu-latest

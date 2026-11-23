@@ -9,7 +9,7 @@
 > stub (webhook handling is not wired to a real provider). Do not rely on the
 > billing or usage figures described below for production decisions.
 >
-> See [Feature Maturity](../reference/feature-maturity.md) for the current
+> See [Feature Maturity](feature-maturity.md) for the current
 > status of this and other subsystems, and the tracking issues linked there.
 
 This document describes the SaaS platform features for managed multi-tenant hosting of SorobanPulse.
@@ -420,4 +420,4 @@ UPDATE subscriptions SET tenant_id = 'tenant_existing' WHERE tenant_id IS NULL;
 - [Billing Integration Guide](billing-integration.md)
 - [Security Best Practices](../operations/security.md)
 - [API Documentation](../reference/api.md)
-- [Feature Maturity](../reference/feature-maturity.md)
+- [Feature Maturity](feature-maturity.md)

@@ -20,7 +20,7 @@
 - [Tutorial: Token Transfer Alert Bot](../guides/tutorials/token-alert-bot.md)
 - [Frequently Asked Questions](../guides/faq.md)
 - [Video Tutorials and Demonstrations](../guides/video-tutorials.md)
-- [Feature Maturity](../reference/feature-maturity.md)
+- [Feature Maturity](../feature-maturity.md)
 
 ## Guides
 
@@ -105,12 +105,12 @@
 
 ### Advanced
 
-- [Multi-Tenant Access Isolation](../guides/multi-tenancy.md)
-- [SaaS Platform & Multi-Tenant Hosting (Experimental)](../guides/saas-platform.md)
-- [AI/ML Integration & Intelligence Features (Experimental)](../guides/ml-integration.md)
-- [ML Model Serving](../guides/ml-model-serving.md)
-- [Quantum-Ready Cryptography (Planned)](../guides/quantum-cryptography.md)
-- [Edge Computing & CDN Integration Guide](../guides/edge-computing-guide.md)
+- [Multi-Tenant Access Isolation](../multi-tenancy.md)
+- [SaaS Platform & Multi-Tenant Hosting (Experimental)](../SAAS_PLATFORM.md)
+- [AI/ML Integration & Intelligence Features (Experimental)](../ML_INTEGRATION.md)
+- [ML Model Serving](../ml-model-serving.md)
+- [Quantum-Ready Cryptography](../quantum-cryptography.md)
+- [Edge Computing & CDN Integration Guide](../edge-computing-guide.md)
 
 ### Migration Guides
 
@@ -214,21 +214,20 @@
 
 ### Database
 
-- [Connection Pool Configuration & Optimization](../operations/connection-pool.md)
-- [Table Partitioning Strategy](../operations/table-partitioning.md)
-- [Index Usage Analysis and Recommendations](../operations/index-analysis.md)
-- [Index Maintenance Guide](../operations/index-maintenance.md)
-- [Query Result Caching & Cache Invalidation](../operations/query-caching.md)
-- [PostgreSQL Query Plan Caching](../operations/query-plan-caching.md)
-- [Query Plan Caching and Tuning](../operations/query-plan-tuning.md)
-- [Query Profiler](../operations/query-profiler.md)
-- [Database Statistics Auto-Analysis Configuration](../operations/statistics-auto-analysis.md)
-- [Database Configuration Tuning](../operations/database-configuration-tuning.md)
-- [Backup Verification](../operations/backup-verification.md)
-- [Data Retention Policy](../operations/data-retention.md)
-- [Serialization Caching](../operations/serialization-caching.md)
-- [JSON Serialization Optimization](../operations/serialization-optimization.md)
-- [Bloom Filter Deduplication Memory Management](../operations/dedup-memory-management.md)
+- [Connection Pool Configuration & Optimization](../connection-pool.md)
+- [Connection Pool Optimization](../pool-optimization.md)
+- [Table Partitioning Strategy](../table-partitioning.md)
+- [Index Usage Analysis and Recommendations](../index-analysis.md)
+- [Index Maintenance Guide](../index-maintenance.md)
+- [Query Result Caching & Cache Invalidation](../query-caching.md)
+- [Query Plan Caching and Tuning](../query-plan-tuning.md)
+- [Query Profiler](../query-profiler.md)
+- [Database Statistics Auto-Analysis Configuration](../statistics-auto-analysis.md)
+- [Database Configuration Tuning](../database-configuration-tuning.md)
+- [Backup Verification](../backup-verification.md)
+- [Data Retention Policy](../data-retention.md)
+- [Serialization Caching](../serialization-caching.md)
+- [Bloom Filter Deduplication Memory Management](../dedup-memory-management.md)
 
 ### Security and Compliance
 

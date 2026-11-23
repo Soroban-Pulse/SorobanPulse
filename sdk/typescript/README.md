@@ -136,3 +136,63 @@ The server emits three types of SSE events:
 - **message**: Contains a JSON-serialized event object
 - **ping**: Sent every 15 seconds to keep the connection alive (data is an RFC 3339 timestamp)
 - **close**: Sent when the server is shutting down (clients should reconnect)
+
+## Webhook Signature Verification
+
+The SDK exports a `verifyWebhook` helper that validates incoming webhook
+signatures using a constant-time comparison (`crypto.timingSafeEqual`) and an
+optional timestamp tolerance check.
+
+```typescript
+import { verifyWebhook } from "@soroban-pulse/sdk";
+
+const result = verifyWebhook(rawBody, headers, secret, {
+  toleranceSec: 300, // reject signatures older than 5 minutes
+});
+
+if (!result.valid) {
+  // result.reason explains why verification failed
+  throw new Error(`Invalid webhook signature: ${result.reason}`);
+}
+```
+
+`rawBody` must be the **raw request body** (string or `Buffer`), not the
+parsed JSON — re-serializing the payload will change the bytes and break the
+signature. `headers` is a plain object of request headers (header names are
+matched case-insensitively).
+
+### Express example
+
+```typescript
+import express from "express";
+import { verifyWebhook } from "@soroban-pulse/sdk";
+
+const app = express();
+const secret = process.env.WEBHOOK_SECRET!;
+
+// Use express.raw so the exact bytes are preserved for verification.
+app.post(
+  "/webhooks/soroban-pulse",
+  express.raw({ type: "application/json" }),
+  (req, res) => {
+    const result = verifyWebhook(req.body, req.headers, secret, {
+      toleranceSec: 300,
+    });
+
+    if (!result.valid) {
+      return res.status(401).json({ error: result.reason });
+    }
+
+    const event = JSON.parse(req.body.toString("utf8"));
+    // ... handle the event
+    res.status(204).end();
+  }
+);
+```
+
+### Shared test vectors
+
+The helper is validated against the cross-language fixture
+[`sdk/testdata/webhook_vectors.json`](../testdata/webhook_vectors.json), which
+is shared with the Go and Python SDKs. Use it to confirm your integration
+verifies signatures identically across languages.

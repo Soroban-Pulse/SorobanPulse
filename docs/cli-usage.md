@@ -3,9 +3,29 @@
 _Issue #964_
 
 `spulse` is the command-line client for the Soroban Pulse API — see
-[`cli/README.md`](../cli/README.md) for install/build instructions. This
-page covers the commands added to round it out into a full API client:
+[`cli/README.md`](../cli/README.md) for build instructions. This page
+covers the commands added to round it out into a full API client:
 subscription management, a webhook test command, and configuration.
+
+## Installation
+
+The recommended install path on macOS (arm64/x86_64) and Linux is the
+Homebrew tap:
+
+```bash
+brew install soroban-pulse/tap/spulse
+```
+
+The formula lives in the `soroban-pulse/homebrew-tap` repository and is
+updated automatically by the CLI release workflow, so `brew upgrade spulse`
+always picks up the latest release with verified checksums.
+
+Prebuilt archives are also attached to each release at
+`https://github.com/Soroban-Pulse/SorobanPulse/releases/download/v<version>/`
+using the asset names `spulse-<version>-<os>-<arch>.tar.gz` (for example
+`spulse-1.2.3-darwin-arm64.tar.gz` or `spulse-1.2.3-linux-x86_64.tar.gz`).
+Download, extract, and place `spulse` on your `PATH` if you prefer not to
+use Homebrew.
 
 ## Configuration
 
