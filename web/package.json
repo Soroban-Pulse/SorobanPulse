@@ -24,7 +24,7 @@
   "devDependencies": {
     "@eslint/js": "^9.17.0",
     "@storybook/addon-essentials": "^8.4.7",
-    "@storybook/react": "^8.4.7",
+    "@storybook/react": "^10.6.8",
     "@storybook/react-vite": "^8.4.7",
     "@tanstack/react-query-devtools": "^5.62.7",
     "@testing-library/react": "^16.1.0",
