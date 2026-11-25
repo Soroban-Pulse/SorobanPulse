@@ -276,11 +276,9 @@ lua = ["dep:mlua"]
 graphql = []
 encryption = []
 
-# Issue #1349: Parquet export via GET /v1/events/export?format=parquet
-parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
+# Issue #1349: Parquet export via GET /v1/events/export?format=parquet (feature defined above)
 
-# Issue #1350: GraphQL API, including subscriptions over WebSocket at /graphql/ws
-graphql = []
+# Issue #1350: GraphQL API, including subscriptions over WebSocket at /graphql/ws (feature defined above)
 
 # Chaos testing (gates tests/chaos_tests.rs advisory-lock failover tests)
 chaos = []
