@@ -27,24 +27,24 @@ We use the [proptest](https://docs.rs/proptest/) framework, a property-based tes
 
 ### Run all property-based tests:
 ```bash
-cargo test --test property_based_tests
+cargo test --test property
 ```
 
 ### Run specific test category:
 ```bash
-cargo test --test property_based_tests pagination_tests::
-cargo test --test property_based_tests filter_tests::
-cargo test --test property_based_tests timestamp_tests::
+cargo test --test property pagination_tests::
+cargo test --test property filter_tests::
+cargo test --test property timestamp_tests::
 ```
 
 ### Run with detailed output:
 ```bash
-PROPTEST_VERBOSE=1 cargo test --test property_based_tests
+PROPTEST_VERBOSE=1 cargo test --test property
 ```
 
 ### Run with custom seed (for reproducibility):
 ```bash
-PROPTEST_RNG_SEED=12345 cargo test --test property_based_tests
+PROPTEST_RNG_SEED=12345 cargo test --test property
 ```
 
 ## Test Categories
@@ -289,7 +289,7 @@ This is the shrunk minimal case that reproduces the failure
 
 ```yaml
 - name: Run property-based tests
-  run: cargo test --test property_based_tests --verbose
+  run: cargo test --test property --verbose
   env:
     PROPTEST_CASES: 10000  # Run 10k cases per property
     PROPTEST_MAX_SHRINK_ITERS: 100000
@@ -456,7 +456,7 @@ The invariant might actually be false. Review the logic carefully.
 
 ## Resources
 
-- **Test file**: `tests/property_based_tests.rs`
+- **Test file**: `tests/property/` (consolidated from `property_tests.rs` and `property_based_tests.rs`, Issue #1503)
 - **Dependency**: `proptest = "1"` in `Cargo.toml`
 - **Issue tracker**: #554
 - **Contact**: @Xoulomon

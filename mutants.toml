@@ -48,8 +48,7 @@ jobs = 4
 command = "cargo test"
 args = [
     "--lib",
-    "--test", "property_based_tests",
-    "--test", "property_tests",
+    "--test", "property",
     "--test", "integration_tests",
     "--test", "contract_tests",
 ]

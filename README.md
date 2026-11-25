@@ -245,7 +245,7 @@ Run tests locally:
 make test
 
 # Property-based tests (discover edge cases)
-PROPTEST_CASES=10000 cargo test --test property_tests
+PROPTEST_CASES=10000 cargo test --test property
 
 # Mutation tests (evaluate test quality)
 cargo install cargo-mutants
