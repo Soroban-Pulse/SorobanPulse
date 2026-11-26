@@ -1,3 +1,20 @@
+-- Down migration for the SaaS API-key hashing migration (issue #1429).
+--
+-- WARNING: This rollback restores the legacy plaintext `saas_tenants.api_keys`
+-- column, but the original raw key values CANNOT be recovered: the forward
+-- migration only ever stored hashes in the unified `api_keys` table. After
+-- rolling back, every SaaS tenant must rotate its API keys and have the new
+-- plaintext values re-inserted into `saas_tenants.api_keys` (or, preferably,
+-- re-hashed into `api_keys`). See the upgrade notes for the rotation procedure.
+
+-- Remove the hashed keys that were migrated from saas_tenants.api_keys.
+-- The forward migration names them with the 'saas-tenant:' prefix.
+DELETE FROM api_keys WHERE name LIKE 'saas-tenant:%';
+
+-- Restore the legacy plaintext column (values are unrecoverable; see above).
+ALTER TABLE saas_tenants
+    ADD COLUMN IF NOT EXISTS api_keys TEXT[] NOT NULL DEFAULT '{}';
+
 -- Down migration for 20250826_saas_ml_features.sql
 DROP INDEX IF EXISTS idx_saas_tenants_tenant_id;
 DROP INDEX IF EXISTS idx_saas_tenants_status;

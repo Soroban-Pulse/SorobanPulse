@@ -599,4 +599,22 @@ mod tests {
         metrics.succeeded = 3;
         assert_eq!(metrics.success_rate(), 0.75);
     }
+
+    // Regression tests for fuzz_normalizer crashes (Issue #1380).
+    #[test]
+    fn fuzz_regression_divide_by_huge_decimals_does_not_panic() {
+        for d in [19u64, 38, u32::MAX as u64, u64::MAX] {
+            let r = apply_transform(&Transform::DivideByDecimals, &json!({"decimals": d}), &json!(i64::MIN));
+            assert!(r.is_err(), "decimals {d} should be rejected");
+        }
+    }
+
+    #[test]
+    fn fuzz_regression_odd_inputs_do_not_panic() {
+        for v in [json!(""), json!("0x"), json!("0x0x"), json!("-1"), json!("+"), json!(null), json!([]), json!({}), json!(f64::MAX), json!(u64::MAX)] {
+            let _ = apply_transform(&Transform::HexToDecimal, &json!({}), &v);
+            let _ = apply_transform(&Transform::Base64Decode, &json!({}), &v);
+            let _ = apply_transform(&Transform::DivideByDecimals, &json!({"decimals": 7}), &v);
+        }
+    }
 }

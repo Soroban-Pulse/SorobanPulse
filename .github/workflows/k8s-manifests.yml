@@ -1,14 +1,19 @@
 name: Kubernetes Manifests
 
+# The Helm chart in helm/soroban-pulse/ is the single source of truth for
+# Kubernetes deployment. Raw manifests are no longer hand-maintained: they are
+# rendered from the chart with `helm template` and validated here. To obtain
+# raw YAML locally, run `helm template` (see docs/deployment.md).
+
 on:
   push:
     branches: [main]
     paths:
-      - "k8s/**"
+      - "helm/soroban-pulse/**"
       - ".github/workflows/k8s-manifests.yml"
   pull_request:
     paths:
-      - "k8s/**"
+      - "helm/soroban-pulse/**"
       - ".github/workflows/k8s-manifests.yml"
 
 permissions:
@@ -16,6 +21,9 @@ permissions:
 
 env:
   KUBECONFORM_VERSION: v0.6.7
+  HELM_VERSION: v3.16.3
+  CHART_PATH: helm/soroban-pulse
+  RENDERED_DIR: rendered-manifests
 
 jobs:
   kubeconform:
@@ -28,10 +36,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: ${{ env.HELM_VERSION }}
+
       - name: Install kubeconform
         run: |
           curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
             | tar xz -C /usr/local/bin kubeconform
+
+      - name: Render manifests from the Helm chart
+        run: |
+          mkdir -p "${RENDERED_DIR}"
+          helm template soroban-pulse "${CHART_PATH}" \
+            --namespace soroban-pulse \
+            > "${RENDERED_DIR}/soroban-pulse.yaml"
+          echo "Rendered $(grep -c '^kind:' "${RENDERED_DIR}/soroban-pulse.yaml") resources"
 
       # Istio and Linkerd CRDs are validated with the datreeio CRDs-catalog
       # schemas. Skipped kinds:
@@ -39,11 +60,19 @@ jobs:
       #   HTTPRoute    - the catalog schema checks `format: duration` as
       #                  ISO-8601, so valid Kubernetes durations such as `5s`
       #                  are rejected.
-      - name: Validate k8s/ manifests
+      - name: Validate rendered manifests
         run: |
           kubeconform -strict -summary -output text \
             -kubernetes-version "${{ matrix.kubernetes }}" \
             -skip TrafficSplit,HTTPRoute \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
-            k8s/*.yaml
+            "${RENDERED_DIR}"/*.yaml
+
+      - name: Upload rendered manifests
+        if: matrix.kubernetes == '1.31.0'
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-manifests
+          path: ${{ env.RENDERED_DIR }}/*.yaml
+          retention-days: 7

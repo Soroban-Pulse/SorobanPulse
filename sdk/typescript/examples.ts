@@ -13,6 +13,8 @@ import {
   SystemApi,
   Configuration,
 } from "./index";
+import { createHmac, timingSafeEqual } from "crypto";
+import { verifyWebhook } from "./webhook";
 
 // ============================================================================
 // Example 1: Basic Event Queries
@@ -441,6 +443,170 @@ async function exportEventsAsNDJSON() {
 }
 
 // ============================================================================
+// Example 14: Webhook Signature Verification
+// ============================================================================
+
+/**
+ * Verify an incoming webhook using the raw request body.
+ *
+ * IMPORTANT: Always pass the *raw* request body (the exact bytes received),
+ * never a re-serialized JSON object. Re-serializing changes the bytes and
+ * the signature will no longer match.
+ *
+ * Express example:
+ *
+ *   app.post(
+ *     "/webhooks/soroban-pulse",
+ *     express.raw({ type: "application/json" }), // keep the raw Buffer
+ *     (req, res) => {
+ *       const result = verifyWebhook(
+ *         req.body, // raw Buffer
+ *         req.headers,
+ *         process.env.SOROBAN_PULSE_WEBHOOK_SECRET!,
+ *         { toleranceSec: 300 },
+ *       );
+ *       if (!result.valid) {
+ *         return res.status(400).json({ error: result.reason });
+ *       }
+ *       const event = JSON.parse(req.body.toString("utf8"));
+ *       // ... handle the event ...
+ *       res.status(200).json({ ok: true });
+ *     },
+ *   );
+ */
+function verifyIncomingWebhook(
+  rawBody: Buffer | string,
+  headers: Record<string, string | string[] | undefined>,
+  secret: string,
+) {
+  const result = verifyWebhook(rawBody, headers, secret, {
+    // Reject signatures older/newer than 5 minutes to prevent replays.
+    toleranceSec: 300,
+  });
+
+  if (!result.valid) {
+    console.warn(`Webhook rejected: ${result.reason}`);
+    return null;
+  }
+
+  // Only parse the body after the signature has been verified.
+  return JSON.parse(rawBody.toString("utf8"));
+}
+
+// ============================================================================
+// Example 15: Verifying Webhook Signatures (Signature v2)
+// ============================================================================
+
+/**
+ * Default tolerance window for webhook timestamps (5 minutes).
+ */
+const WEBHOOK_TOLERANCE_SECONDS = 5 * 60;
+
+/**
+ * Verify a Soroban Pulse webhook delivery using signature v2.
+ *
+ * The `X-SorobanPulse-Signature` header has the form:
+ *   t=<unix>,v1=<hex>
+ * where `v1 = HMAC-SHA256(secret, "<t>.<body>")`.
+ *
+ * The `X-SorobanPulse-Delivery-Id` header uniquely identifies the delivery
+ * and should be used to de-duplicate replayed deliveries.
+ *
+ * Returns the delivery ID on success, or throws if verification fails.
+ */
+function verifyWebhookSignature(
+  secret: string,
+  rawBody: string,
+  signatureHeader: string,
+  deliveryId: string | undefined,
+  toleranceSeconds: number = WEBHOOK_TOLERANCE_SECONDS
+): string {
+  if (!signatureHeader) {
+    throw new Error("Missing X-SorobanPulse-Signature header");
+  }
+  if (!deliveryId) {
+    throw new Error("Missing X-SorobanPulse-Delivery-Id header");
+  }
+
+  // Parse "t=<unix>,v1=<hex>"
+  let timestamp: number | undefined;
+  let providedHex: string | undefined;
+  for (const part of signatureHeader.split(",")) {
+    const [key, value] = part.split("=", 2);
+    if (key === "t") {
+      timestamp = parseInt(value, 10);
+    } else if (key === "v1") {
+      providedHex = value;
+    }
+  }
+
+  if (timestamp === undefined || Number.isNaN(timestamp)) {
+    throw new Error("Signature header is missing a valid timestamp");
+  }
+  if (!providedHex) {
+    throw new Error("Signature header is missing a v1 signature");
+  }
+
+  // Reject stale (or future-dated) signatures to prevent replay.
+  const now = Math.floor(Date.now() / 1000);
+  if (Math.abs(now - timestamp) > toleranceSeconds) {
+    throw new Error(
+      `Signature timestamp outside tolerance window ` +
+      `(now=${now}, t=${timestamp}, tolerance=${toleranceSeconds}s)`
+    );
+  }
+
+  // Compute HMAC over "<t>.<body>".
+  const expectedHex = createHmac("sha256", secret)
+    .update(`${timestamp}.${rawBody}`)
+    .digest("hex");
+
+  // Constant-time comparison.
+  const expected = Buffer.from(expectedHex, "hex");
+  const provided = Buffer.from(providedHex, "hex");
+  if (
+    expected.length !== provided.length ||
+    !timingSafeEqual(expected, provided)
+  ) {
+    throw new Error("Webhook signature verification failed");
+  }
+
+  return deliveryId;
+}
+
+async function handleWebhookRequest(req: {
+  headers: Record<string, string | undefined>;
+  rawBody: string;
+}) {
+  const secret = process.env.SOROBAN_PULSE_WEBHOOK_SECRET ?? "";
+  const seenDeliveryIds = new Set<string>();
+
+  try {
+    const deliveryId = verifyWebhookSignature(
+      secret,
+      req.rawBody,
+      req.headers["x-sorobanpulse-signature"] ?? "",
+      req.headers["x-sorobanpulse-delivery-id"]
+    );
+
+    // De-duplicate: a valid signature can still be replayed within the
+    // tolerance window, so track delivery IDs.
+    if (seenDeliveryIds.has(deliveryId)) {
+      console.warn(`Duplicate delivery ignored: ${deliveryId}`);
+      return { status: 200 };
+    }
+    seenDeliveryIds.add(deliveryId);
+
+    const event = JSON.parse(req.rawBody);
+    console.log(`Verified delivery ${deliveryId}:`, event);
+    return { status: 200 };
+  } catch (error) {
+    console.error("Webhook rejected:", (error as Error).message);
+    return { status: 401 };
+  }
+}
+
+// ============================================================================
 // Run Examples
 // ============================================================================
 
@@ -479,5 +645,8 @@ export {
   checkServiceHealth,
   errorHandlingWithMetrics,
   exportEventsAsNDJSON,
+  verifyIncomingWebhook,
+  verifyWebhookSignature,
+  handleWebhookRequest,
   runAllExamples,
 };

@@ -310,6 +310,18 @@ Not:
 20260527000000_add_webhook_failures_table.sql  # ❌ Duplicate timestamp!
 ```
 
+### Safe Migrations
+
+The `events` table is large and partitioned. Some DDL blocks writes for the length of a table rewrite or a full scan. CI runs [squawk](https://github.com/sbdchd/squawk) on every new or changed up migration (the `migration-safety` job) and fails on the statements below.
+
+- **Indexes on existing tables:** use `CREATE INDEX CONCURRENTLY`. It cannot run inside a transaction, so put `-- no-transaction` on the first line of the migration. sqlx then runs it outside a transaction.
+- **Constraints:** add them with `NOT VALID` first, then run `ALTER TABLE ... VALIDATE CONSTRAINT ...` in a later migration. Validation takes a weaker lock and does not block writes.
+- **Backfills:** run large `UPDATE`s in batches outside the migration, not as one statement inside it.
+- **Column types:** avoid changing the type of an existing column on a large table. Add a new column, backfill it in batches, then switch reads and writes over.
+- **Defaults:** adding a column with a volatile default rewrites the table. Add the column first, then set the default in a separate statement.
+
+If squawk flags a reviewed statement that is safe in context, add `-- squawk-ignore <rule-name>` on the line above it and explain why in the PR description.
+
 ## Working with Compile-Time SQL (`sqlx` macros)
 
 Hot-path queries use `sqlx::query_scalar!` and `sqlx::query_as!` macros so that
@@ -546,6 +558,29 @@ Never log passwords, API keys, tokens, or other credentials at any log level. Th
 - Any request header that may contain `Authorization` or `X-Api-Key` values
 
 When adding new log statements, double-check that no field contains a raw secret. If in doubt, strip credentials before logging (see `Config::safe_db_url()` for the pattern).
+
+## Security Review Guide
+
+The project's threat model and trust-boundary inventory live in
+[docs/security/threat-model.md](docs/security/threat-model.md). It documents the
+data flows (public API, admin API, indexer ↔ Stellar RPC, Postgres, Redis/Kafka/SQS
+sinks, outbound webhooks and integrations, inbound provider webhooks, dashboard),
+the assets and trust boundaries, and a STRIDE analysis with existing mitigations
+and known gaps.
+
+**PRs that add or change any of the following must follow the security review
+guide in [docs/security/threat-model.md](docs/security/threat-model.md):**
+
+- HTTP endpoints, especially admin endpoints or anything that accepts user input
+- Integrations: outbound webhooks, Kafka/SQS/Redis sinks, Slack, or any new
+  third-party service
+- Scripting: Lua scripts or other user-defined code execution paths
+- Credential handling (`integration_secrets.rs`) or inbound provider webhook
+  signature verification
+
+Walk through the guide's checklist in the PR description, note which trust
+boundaries your change crosses, and link any follow-up security issue you open.
+=======
 
 ## Code Style
 

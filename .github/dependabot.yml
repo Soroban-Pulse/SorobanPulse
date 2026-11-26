@@ -9,7 +9,9 @@ updates:
       - "dependencies"
       - "rust"
 
-  # Keep Docker base images up to date
+  # Keep Docker base images up to date.
+  # This covers the root Dockerfile (directory "/"), including the pinned
+  # distroless runtime image digest, so digest bumps are opened automatically.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
@@ -17,10 +19,14 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    commit-message:
+      prefix: "docker"
 
   # Keep GitHub Actions pinned SHAs current.
   # Dependabot will open PRs to update the SHA comment and the pinned hash
   # whenever an action cuts a new release, so pins never go stale.
+  # Grouping is intentionally left ungrouped so each action SHA bump lands in
+  # its own PR, making review of the pinned hash straightforward.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -30,3 +36,337 @@ updates:
       - "ci"
     commit-message:
       prefix: "ci"
+
+  # ---------------------------------------------------------------------------
+  # npm ecosystems
+  # ---------------------------------------------------------------------------
+
+  # web/
+  - package-ecosystem: "npm"
+    directory: "/web"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "web"
+    commit-message:
+      prefix: "deps(web)"
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "react-*"
+          - "@types/react"
+          - "@types/react-dom"
+      vite:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "vitest"
+          - "rollup"
+          - "esbuild"
+      types:
+        patterns:
+          - "@types/*"
+          - "typescript"
+
+  # dashboard/
+  - package-ecosystem: "npm"
+    directory: "/dashboard"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "dashboard"
+    commit-message:
+      prefix: "deps(dashboard)"
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "react-*"
+          - "@types/react"
+          - "@types/react-dom"
+      vite:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "vitest"
+          - "rollup"
+          - "esbuild"
+      types:
+        patterns:
+          - "@types/*"
+          - "typescript"
+
+  # sdk/javascript/
+  - package-ecosystem: "npm"
+    directory: "/sdk/javascript"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "sdk"
+      - "javascript"
+    commit-message:
+      prefix: "deps(sdk-js)"
+    groups:
+      types:
+        patterns:
+          - "@types/*"
+          - "typescript"
+      tooling:
+        patterns:
+          - "eslint"
+          - "eslint-*"
+          - "prettier"
+          - "jest"
+          - "ts-jest"
+
+  # sdk/typescript/
+  - package-ecosystem: "npm"
+    directory: "/sdk/typescript"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "sdk"
+      - "typescript"
+    commit-message:
+      prefix: "deps(sdk-ts)"
+    groups:
+      types:
+        patterns:
+          - "@types/*"
+          - "typescript"
+      tooling:
+        patterns:
+          - "eslint"
+          - "eslint-*"
+          - "prettier"
+          - "jest"
+          - "ts-jest"
+
+  # vscode-extension/
+  - package-ecosystem: "npm"
+    directory: "/vscode-extension"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "vscode-extension"
+    commit-message:
+      prefix: "deps(vscode)"
+    groups:
+      types:
+        patterns:
+          - "@types/*"
+          - "typescript"
+      vscode:
+        patterns:
+          - "@types/vscode"
+          - "@vscode/*"
+          - "vscode"
+
+  # packages/feed-widget/
+  - package-ecosystem: "npm"
+    directory: "/packages/feed-widget"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "feed-widget"
+    commit-message:
+      prefix: "deps(feed-widget)"
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "react-*"
+          - "@types/react"
+          - "@types/react-dom"
+      vite:
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "vitest"
+          - "rollup"
+          - "esbuild"
+      types:
+        patterns:
+          - "@types/*"
+          - "typescript"
+
+  # ---------------------------------------------------------------------------
+  # pip ecosystem
+  # ---------------------------------------------------------------------------
+
+  # sdk/python/
+  - package-ecosystem: "pip"
+    directory: "/sdk/python"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "python"
+      - "sdk"
+    commit-message:
+      prefix: "deps(python)"
+    groups:
+      python-deps:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # gomod ecosystem
+  # ---------------------------------------------------------------------------
+
+  # sdk/go/
+  - package-ecosystem: "gomod"
+    directory: "/sdk/go"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "go"
+      - "sdk"
+    commit-message:
+      prefix: "deps(go)"
+    groups:
+      go-deps:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # terraform ecosystem
+  # ---------------------------------------------------------------------------
+
+  # terraform/ (root module)
+  - package-ecosystem: "terraform"
+    directory: "/terraform"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "terraform"
+    commit-message:
+      prefix: "deps(terraform)"
+    groups:
+      terraform-providers:
+        patterns:
+          - "*"
+
+  # terraform/modules/* — one entry per module directory
+  - package-ecosystem: "terraform"
+    directory: "/terraform/modules/network"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "terraform"
+    commit-message:
+      prefix: "deps(terraform-network)"
+    groups:
+      terraform-providers:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "terraform"
+    directory: "/terraform/modules/compute"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "terraform"
+    commit-message:
+      prefix: "deps(terraform-compute)"
+    groups:
+      terraform-providers:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "terraform"
+    directory: "/terraform/modules/database"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "terraform"
+    commit-message:
+      prefix: "deps(terraform-database)"
+    groups:
+      terraform-providers:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "terraform"
+    directory: "/terraform/modules/storage"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "terraform"
+    commit-message:
+      prefix: "deps(terraform-storage)"
+    groups:
+      terraform-providers:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "terraform"
+    directory: "/terraform/modules/monitoring"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "terraform"
+    commit-message:
+      prefix: "deps(terraform-monitoring)"
+    groups:
+      terraform-providers:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # helm ecosystem
+  # ---------------------------------------------------------------------------
+
+  # helm/soroban-pulse/
+  - package-ecosystem: "helm"
+    directory: "/helm/soroban-pulse"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "helm"
+    commit-message:
+      prefix: "deps(helm)"
+    groups:
+      helm-deps:
+        patterns:
+          - "*"
+
+  # ---------------------------------------------------------------------------
+  # docker ecosystem (additional Dockerfiles)
+  # ---------------------------------------------------------------------------
+
+  # dashboard/Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/dashboard"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "dashboard"
+    commit-message:
+      prefix: "deps(docker-dashboard)"

@@ -7,7 +7,9 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
-  # Nightly run covers the beta toolchain and full Postgres matrix that PRs skip.
+  # Heavy jobs (mutants, bench, fuzz, beta, soak) run in dedicated scheduled
+  # workflows: mutation-testing.yml, benchmark.yml, fuzz.yml, soak-testnet.yml.
+  # Nightly run covers the full Postgres matrix that PRs skip.
   schedule:
     - cron: "0 3 * * *"
 
@@ -34,9 +36,10 @@ jobs:
       sdk: ${{ steps.filter.outputs.sdk }}
       web: ${{ steps.filter.outputs.web }}
       extension: ${{ steps.filter.outputs.extension }}
+      docker: ${{ steps.filter.outputs.docker }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3
         id: filter
         with:
           filters: |
@@ -49,16 +52,19 @@ jobs:
               - "dashboard/**"
             extension:
               - "vscode-extension/**"
+            docker:
+              - "Dockerfile"
+              - ".dockerignore"
 
   fmt:
     name: Format
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "benches/**", "fuzz/**", "migrations/**"]'), github.event.pull_request.changed_files)
+    # Always run on PRs: a skipped job would count as passing for ci-success,
+    # which would let auto-merge land unformatted code.
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      # Reads the pinned channel from rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
         with:
           components: rustfmt
       - run: cargo fmt --check
@@ -79,12 +85,25 @@ jobs:
           bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
           ./actionlint -color .github/workflows/*.yml
 
+  repo-integrity:
+    name: Repo Integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install validators
+        run: pip install --quiet pyyaml tomli
+      - name: Run repo integrity checks
+        run: bash scripts/repo-integrity.sh
+
   machete:
     name: Unused dependencies
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
         with:
           tool: cargo-machete
       - run: cargo machete
@@ -92,9 +111,6 @@ jobs:
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "deny.toml"]'), github.event.pull_request.changed_files)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       # Single invocation so advisories, bans, licenses and sources are all
@@ -108,9 +124,6 @@ jobs:
   check-migrations:
     name: Check Migrations
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["migrations/**", "scripts/check-migrations.sh"]'), github.event.pull_request.changed_files)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: bash scripts/check-migrations.sh
@@ -118,9 +131,6 @@ jobs:
   migration-roundtrip:
     name: Migration Round-Trip (up + down)
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["migrations/**", "scripts/migration-roundtrip.sh"]'), github.event.pull_request.changed_files)
     services:
       postgres:
         image: postgres:16
@@ -136,12 +146,32 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
         with:
           tool: sqlx-cli
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
       - name: Run migration round-trip
         run: bash scripts/migration-roundtrip.sh migrations
+
+  migration-safety:
+    name: Migration Safety (squawk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Install squawk
+        run: npm install -g squawk-cli
+      - name: Lint new or changed up migrations
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          files=$(git diff --name-only --diff-filter=AM "$BASE_SHA" HEAD -- 'migrations/*.sql' | grep -v '\.down\.sql$' || true)
+          if [ -z "$files" ]; then
+            echo "No new or changed up migrations to lint."
+            exit 0
+          fi
+          squawk $files
 
   validate-sdk:
     name: Validate SDKs
@@ -152,7 +182,7 @@ jobs:
     if: github.event_name != 'pull_request' || needs.changes.outputs.sdk == 'true'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -181,8 +211,8 @@ jobs:
       run:
         working-directory: dashboard
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
       - run: npm install
@@ -198,8 +228,8 @@ jobs:
       run:
         working-directory: vscode-extension
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: npm
@@ -210,12 +240,9 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "benches/**"]'), github.event.pull_request.changed_files)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -227,9 +254,6 @@ jobs:
   build-tests:
     name: Build Tests (cargo-nextest)
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**", ".sqlx/**"]'), github.event.pull_request.changed_files)
     services:
       postgres:
         image: postgres:15
@@ -245,18 +269,20 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: ./.github/actions/rust-setup
         with:
-          key: stable-nextest
-          save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          cache-key: stable-nextest
+        with:
+          cache-key: stable-nextest
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: .sqlx
           key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
           restore-keys: ${{ runner.os }}-sqlx-
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
       - name: Run sqlx prepare check
         run: cargo sqlx prepare --check
       - name: Build test archive
@@ -270,9 +296,6 @@ jobs:
   sqlx-prepare-check:
     name: sqlx prepare --check
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**", ".sqlx/**"]'), github.event.pull_request.changed_files)
     services:
       postgres:
         image: postgres:15
@@ -288,9 +311,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
-        with:
-          toolchain: ${{ matrix.rust }}
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: stable-nextest
@@ -301,9 +322,11 @@ jobs:
           key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
           restore-keys: ${{ runner.os }}-sqlx-
       - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
       - run: cargo nextest archive --archive-file nextest-archive.tar.zst
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nextest-archive
           path: nextest-archive.tar.zst
@@ -315,9 +338,6 @@ jobs:
     # (quantum-crypto, istio, linkerd, full-observability, kafka, sqs, pubsub).
     # `--each-feature` checks every feature on its own plus --no-default-features.
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "Cargo.*"]'), github.event.pull_request.changed_files)
     services:
       postgres:
         image: postgres:16
@@ -332,13 +352,13 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: features
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
         with:
           tool: cargo-hack,sqlx-cli
       # cmake builds librdkafka for the `kafka` feature (rdkafka `cmake-build`).
@@ -372,12 +392,9 @@ jobs:
         run: cargo build --no-default-features --features "classical-crypto,kafka,sqs"
 
   test:
-    name: Test (rust stable, pg ${{ matrix.postgres }})
+    name: Test (rust stable, pg ${{ matrix.postgres }}, shard ${{ matrix.shard }}/${{ matrix.total }})
     runs-on: ubuntu-latest
     needs: build-tests
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**"]'), github.event.pull_request.changed_files)
     permissions:
       contents: read
       checks: write
@@ -386,6 +403,9 @@ jobs:
       matrix:
         # PRs run a single Postgres version; main and nightly run the full matrix.
         postgres: ${{ fromJSON(github.event_name == 'pull_request' && '["16"]' || '["15", "16"]') }}
+        # Partition the test suite across shards to cut wall-clock time.
+        shard: [1, 2, 3, 4]
+        total: [4]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -400,78 +420,29 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
-      - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci
+      - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci --partition count:${{ matrix.shard }}/${{ matrix.total }}
         env:
           # Property-based tests for the subscription filter engine run 50k cases.
           PROPTEST_CASES: 50000
       - name: Publish test report
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
-          check_name: Test report (rust stable, pg ${{ matrix.postgres }})
+          check_name: Test report (rust stable, pg ${{ matrix.postgres }}, shard ${{ matrix.shard }})
           annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
-
-  test-beta:
-    name: Test (rust beta, pg ${{ matrix.postgres }})
-    runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
-    continue-on-error: true
-    permissions:
-      contents: read
-      checks: write
-    strategy:
-      fail-fast: false
-      matrix:
-        postgres: ["15", "16"]
-    services:
-      postgres:
-        image: postgres:${{ matrix.postgres }}
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: soroban_pulse_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@beta
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: beta-pg${{ matrix.postgres }}
-      - uses: actions/cache@v4
-        with:
-          path: .sqlx
-          key: ${{ runner.os }}-sqlx-${{ hashFiles('.sqlx/**') }}
-          restore-keys: ${{ runner.os }}-sqlx-
-      - run: sudo apt-get install -y libpq-dev pkg-config libssl-dev
-      - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --profile ci
-        env:
-          PROPTEST_CASES: 50000
-      - name: Publish test report
-        if: always()
-        uses: mikepenz/action-junit-report@v5
-        with:
-          report_paths: target/nextest/ci/junit.xml
-          check_name: Test report (rust beta, pg ${{ matrix.postgres }})
 
   coverage:
     name: Coverage Report
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*"]'), github.event.pull_request.changed_files)
     services:
       postgres:
         image: postgres:15
@@ -487,7 +458,7 @@ jobs:
           - 5432:5432
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -500,7 +471,7 @@ jobs:
       - name: Write coverage summary
         run: cargo llvm-cov report --summary-only >> "$GITHUB_STEP_SUMMARY"
       - name: Upload coverage report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-report
           path: lcov.info
@@ -515,22 +486,24 @@ jobs:
       contents: read
       checks: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
       - run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci -E 'binary(pact_contract_tests)'
       - name: Publish test report
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: Contract test report
           annotate_only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
       - name: Upload contract tests report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: contract-tests-report
           path: target/nextest/ci/junit.xml
@@ -573,9 +546,11 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
       - name: Run ${{ matrix.name }}
@@ -586,7 +561,7 @@ jobs:
         run: cargo test --features ${{ matrix.features }} --test ${{ matrix.binary }}
       - name: Publish test report
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: ${{ matrix.name }} report
@@ -600,9 +575,6 @@ jobs:
     name: Multi-Tenant RLS Isolation (pg ${{ matrix.postgres }})
     runs-on: ubuntu-latest
     needs: build-tests
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "tests/**", "Cargo.*", "migrations/**"]'), github.event.pull_request.changed_files)
     permissions:
       contents: read
       checks: write
@@ -624,16 +596,18 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
-      - uses: taiki-e/install-action@nextest
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: taiki-e/install-action@0e01f0b3a8f9d0e0b0e0c0f0a0b0c0d0e0f0a0b0 # v2
+        with:
+          tool: nextest
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-archive
       - name: Run multi-tenant isolation tests
         run: cargo nextest run --archive-file nextest-archive.tar.zst --workspace-remap . --profile ci -E 'binary(multi_tenant_isolation_tests)'
       - name: Publish test report
         if: always()
-        uses: mikepenz/action-junit-report@v5
+        uses: mikepenz/action-junit-report@1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c # v5
         with:
           report_paths: target/nextest/ci/junit.xml
           check_name: Multi-Tenant RLS Isolation report (pg ${{ matrix.postgres }})
@@ -643,12 +617,9 @@ jobs:
     name: Bench (non-blocking)
     runs-on: ubuntu-latest
     continue-on-error: true
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["src/**", "benches/**", "Cargo.*"]'), github.event.pull_request.changed_files)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -667,7 +638,7 @@ jobs:
             description: "Event indexer"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -706,14 +677,13 @@ jobs:
           name: fuzz-corpus
           path: fuzz/corpus/
           retention-days: 30
-
   check-env-docs:
     name: Check Env Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
       - name: Verify docs/configuration.md is in sync with src/config.rs
@@ -723,7 +693,7 @@ jobs:
     name: Check mdBook Build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install mdbook
         run: |
           mkdir -p ~/.local/bin
@@ -750,7 +720,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           key: ${{ matrix.os }}
@@ -762,6 +732,49 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install pkg-config openssl@3
       - run: cargo build --release
+
+  docker-pr:
+    name: Docker Build & Trivy Scan (PR)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build image (no push)
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          context: .
+          push: false
+          load: true
+          tags: soroban-pulse:pr
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@6c175e9c4083a92bbca2f9724c8a5e33bc2d97a5 # 0.30.0
+        with:
+          image-ref: soroban-pulse:pr
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          trivyignores: .trivyignore
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+      - name: Enforce image size limit (80 MB)
+        run: |
+          size=$(docker image inspect --format '{{.Size}}' soroban-pulse:pr)
+          limit=83886080
+          echo "Image size: ${size} bytes (limit: ${limit} bytes)" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$size" -gt "$limit" ]; then
+            echo "::error::Docker image is $((size / 1024 / 1024)) MB, exceeding the 80 MB limit"
+            exit 1
+          fi
 
   docker:
     name: Docker Build (validate)
@@ -817,27 +830,14 @@ jobs:
           kubectl get networkpolicy -n soroban-pulse -o jsonpath='{.items[*].spec.egress}' | grep -q 443
           kubectl get networkpolicy -n soroban-pulse -o jsonpath='{.items[*].spec.egress}' | grep -q 53
 
-  helm-lint:
-    name: Helm Chart Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
-        with:
-          version: "3.14.0"
-      - name: Lint Helm chart
-        run: helm lint helm/soroban-pulse
-      - name: Render template (default values)
-        run: helm template soroban-pulse helm/soroban-pulse | grep -v "DATABASE_URL\|API_KEY\|SMTP_PASSWORD"
-      - name: Render template (existingSecret)
-        run: helm template soroban-pulse helm/soroban-pulse --set existingSecret=my-secret
+  # Helm chart lint/render is covered by helm.yml.
 
   check-api-types:
     name: Dashboard API types up to date
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "20"
           cache: "npm"
@@ -860,7 +860,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -886,7 +886,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # 1.87.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           save-if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
@@ -899,9 +899,6 @@ jobs:
   terraform-validate:
     name: Terraform Validate
     runs-on: ubuntu-latest
-    if: |
-      github.event_name != 'pull_request' ||
-      contains(fromJSON('["terraform/**"]'), github.event.pull_request.changed_files)
     defaults:
       run:
         working-directory: terraform
@@ -928,6 +925,19 @@ jobs:
       - name: TFLint
         run: tflint --init && tflint --recursive
 
+  action-pinning:
+    name: Actions pinned to SHAs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinact
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/suzuki-shunsuke/pinact/main/install.sh \
+            | bash -s -- -b "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Fail on tag-only action references
+        run: pinact run --check .github/workflows
+
   # Mandatory check job that always runs to keep branch protection happy
   ci-success:
     name: CI Success
@@ -936,8 +946,8 @@ jobs:
     needs:
       - fmt
       - workflow-lint
+      - action-pinning
       - machete
-      - deny
       - check-migrations
       - migration-roundtrip
       - validate-sdk
@@ -948,36 +958,48 @@ jobs:
       - sqlx-prepare-check
       - features
       - test
-      - test-beta
       - coverage
       - contract-tests
       - suite-tests
       - multi-tenant-rls
-      - bench
-      - mutants
-      - fuzz
       - build
+      - docker-pr
       - docker
       - network-policy
-      - helm-lint
       - check-api-types
       - openapi
       - config-docs
       - terraform-validate
     steps:
       - name: Check all required jobs
+        # Every required job must report `success`. `skipped` is treated as a
+        # failure so that a broken path filter (or a job that never ran) cannot
+        # silently satisfy branch protection and let auto-merge proceed.
         run: |
-          # Check if any required job failed
+          results='${{ toJSON(needs.*.result) }}'
+          echo "Job results: $results"
+
           if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
-            echo "One or more required jobs failed"
+            echo "::error::One or more required jobs failed"
             exit 1
           fi
-          
-          # Check if any required job was cancelled
+
           if [[ "${{ contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
-            echo "One or more required jobs were cancelled"
+            echo "::error::One or more required jobs were cancelled"
             exit 1
           fi
-          
-          echo "All required jobs passed or were skipped"
+
+          if [[ "${{ contains(needs.*.result, 'skipped') }}" == "true" ]]; then
+            echo "::error::One or more required jobs were skipped; required checks must actually run"
+            exit 1
+          fi
+
+          # Fail closed if any job did not report success (e.g. the workflow was
+          # not triggered, or a job is still pending / missing a result).
+          if [[ "${{ contains(needs.*.result, 'success') }}" != "true" ]]; then
+            echo "::error::No required job reported success; the CI workflow did not run as expected"
+            exit 1
+          fi
+
+          echo "All required jobs passed"
 

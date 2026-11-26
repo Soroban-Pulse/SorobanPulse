@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 390 800" font-family="Inter, system-ui, sans-serif" font-size="14">
+  <rect width="390" height="800" fill="#F9FAFB"/>
+  <text x="16" y="24" font-weight="700" fill="#111827">Event Explorer — Mobile (390×800)</text>
+  <rect x="0" y="40" width="390" height="48" fill="#111827"/><text x="16" y="70" fill="#fff">☰  SorobanPulse</text>
+  <text x="16" y="120" font-size="20" font-weight="700">Event Explorer</text>
+  <rect x="16" y="136" width="358" height="36" rx="6" fill="#fff" stroke="#D1D5DB"/><text x="28" y="159" fill="#6B7280">Search contract ID…</text>
+  <rect x="16" y="180" width="170" height="32" rx="6" fill="#fff" stroke="#D1D5DB"/><text x="28" y="201">Filters (2) ▾</text>
+  <text x="200" y="201" fill="#6B7280">12,480 events</text>
+  <rect x="16" y="232" width="358" height="84" rx="8" fill="#fff" stroke="#E5E7EB"/><rect x="32" y="248" width="140" height="12" rx="3" fill="#D1D5DB"/><rect x="32" y="272" width="300" height="10" rx="3" fill="#E5E7EB"/><rect x="32" y="292" width="200" height="10" rx="3" fill="#E5E7EB"/>
+  <rect x="16" y="328" width="358" height="84" rx="8" fill="#fff" stroke="#E5E7EB"/><rect x="32" y="344" width="140" height="12" rx="3" fill="#D1D5DB"/><rect x="32" y="368" width="300" height="10" rx="3" fill="#E5E7EB"/><rect x="32" y="388" width="200" height="10" rx="3" fill="#E5E7EB"/>
+  <rect x="16" y="424" width="358" height="84" rx="8" fill="#fff" stroke="#E5E7EB"/><rect x="32" y="440" width="140" height="12" rx="3" fill="#D1D5DB"/><rect x="32" y="464" width="300" height="10" rx="3" fill="#E5E7EB"/><rect x="32" y="484" width="200" height="10" rx="3" fill="#E5E7EB"/>
+  <rect x="16" y="520" width="358" height="84" rx="8" fill="#fff" stroke="#E5E7EB"/><rect x="32" y="536" width="140" height="12" rx="3" fill="#D1D5DB"/><rect x="32" y="560" width="300" height="10" rx="3" fill="#E5E7EB"/><rect x="32" y="580" width="200" height="10" rx="3" fill="#E5E7EB"/>
+  <rect x="16" y="616" width="358" height="84" rx="8" fill="#fff" stroke="#E5E7EB"/><rect x="32" y="632" width="140" height="12" rx="3" fill="#D1D5DB"/><rect x="32" y="656" width="300" height="10" rx="3" fill="#E5E7EB"/><rect x="32" y="676" width="200" height="10" rx="3" fill="#E5E7EB"/>
+  <rect x="16" y="728" width="358" height="40" rx="6" fill="#fff" stroke="#D1D5DB"/><text x="150" y="753">Load more</text>
+</svg>

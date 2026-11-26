@@ -1,7 +1,14 @@
 image:
-  repository: soroban-pulse
-  tag: latest
-  pullPolicy: IfNotPresent
+  # Registry path of the published image (see .github/workflows/docker-publish.yml).
+  repository: ghcr.io/soroban-pulse/sorobanpulse
+  # Leave empty to use the chart's appVersion (Chart.yaml) as the image tag.
+  tag: ""
+  # Optional immutable digest (e.g. "sha256:abc..."). When set it takes
+  # precedence over tag and the image is referenced as repository@digest.
+  digest: ""
+  # Defaults to IfNotPresent for pinned tags/digests and Always for "latest".
+  # Set explicitly to override.
+  pullPolicy: ""
 imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
@@ -75,12 +82,21 @@ dashboard:
 # file excluded from version control.
 secrets:
   databaseUrl: "postgres://<USER>:<PASSWORD>@<HOST>:5432/<DATABASE>"
+  # Regular API key (sets API_KEY). When empty, non-admin endpoints are open.
   apiKey: ""
+  # Admin API key (sets ADMIN_API_KEY). REQUIRED to use any /v1/admin/*
+  # endpoint: admin routes are fail-closed, so without this key (or a
+  # DB-backed key with `admin` scope) every admin request returns 403.
+  # Supply it from a secret (existingSecret / external-secrets / Vault),
+  # never commit a real value here.
+  adminApiKey: ""
   smtpPassword: ""
 
 # When set to a non-empty name the chart will NOT create a Secret and will
 # reference this pre-existing Secret instead. The Secret must contain the same
-# keys: DATABASE_URL, API_KEY, SMTP_PASSWORD.
+# keys: DATABASE_URL, API_KEY, ADMIN_API_KEY, SMTP_PASSWORD.
+# ADMIN_API_KEY is required for admin access; admin routes fail closed (403)
+# when no admin credential is configured.
 # Recommended for production when using external-secrets, Vault Agent, or
 # Sealed Secrets.
 existingSecret: ""
@@ -264,6 +280,61 @@ networkPolicy:
     #   - port: 587
     #     protocol: TCP
     extraPorts: []
+
+# ── Service mesh integration ──────────────────────────────────────────────────
+# The Helm chart is the single source of truth for Kubernetes deployment.
+# Mesh-specific manifests (previously in k8s/istio and k8s/linkerd) are
+# expressed here as values instead of hand-maintained raw YAML.
+istio:
+  # Enable Istio sidecar injection and Istio resources for the pods.
+  enabled: false
+  # Value for the sidecar.istio.io/inject pod label.
+  injection: true
+  # Optional VirtualService for routing traffic through the mesh.
+  virtualService:
+    enabled: false
+    # Hosts the VirtualService applies to. Defaults to the ingress host when empty.
+    hosts: []
+    # Gateway names to attach the VirtualService to.
+    gateways: []
+    # Additional HTTP routes merged into the generated VirtualService.
+    http: []
+  # Optional DestinationRule for traffic policy (e.g. connection pooling).
+  destinationRule:
+    enabled: false
+    trafficPolicy: {}
+
+linkerd:
+  # Enable Linkerd mesh annotations on the pods.
+  enabled: false
+  # Value for the linkerd.io/inject annotation.
+  injection: enabled
+  # Optional ServiceProfile for per-route metrics and retries.
+  serviceProfile:
+    enabled: false
+    # Additional routes merged into the generated ServiceProfile.
+    routes: []
+
+# ── Observability add-ons ─────────────────────────────────────────────────────
+# Extra observability resources beyond ServiceMonitor/PrometheusRule above.
+# Expressed as chart values so the chart remains the single source of truth.
+observability:
+  # PodMonitor for scraping pods directly (alternative to ServiceMonitor).
+  podMonitor:
+    enabled: false
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    additionalLabels: {}
+    relabelings: []
+    metricRelabelings: []
+  # PrometheusRule with additional custom alerting/recording rules.
+  extraRules:
+    enabled: false
+    namespace: ""
+    additionalLabels: {}
+    # Groups merged into the generated PrometheusRule.
+    groups: []
 
 # ── Grafana dashboard ConfigMap ───────────────────────────────────────────────
 # Creates a ConfigMap containing the pre-built Grafana dashboard JSON.

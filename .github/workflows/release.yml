@@ -8,6 +8,13 @@ on:
     tags:
       - "v*.*.*"
 
+# Single authoritative publisher for a given tag: if two runs are queued for
+# the same tag (e.g. a re-push or a race with another workflow), only one runs
+# and any in-flight run for that tag is cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 # Minimal default — individual jobs declare extra permissions explicitly.
 permissions:
   contents: read
@@ -54,7 +61,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           targets: ${{ matrix.target }}
 
@@ -140,7 +147,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Rust stable toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
 
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked --version "^0.5"
@@ -234,7 +241,7 @@ jobs:
           push-to-registry: true
 
       - name: Attest container SBOM
-        uses: actions/attest-sbom@bd9c7c7c1a07a7d3a7b3b3b3d3b3c3e3f3a3b3c3 # v2
+        uses: actions/attest-sbom@115c3be05ff3974f61f515a5e275edd2d7d0b8b8 # v2
         with:
           subject-name: ${{ steps.image.outputs.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -261,7 +268,7 @@ jobs:
       id-token: write
     steps:
       - name: Install cosign
-        uses: sigstore/cosign-installer@main
+        uses: sigstore/cosign-installer@d7d6bc7722e3daa8354c50bcb52f4837da5e9b6a # v3.8.1
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -319,9 +326,9 @@ jobs:
           fetch-depth: 0
 
       - name: Install git-cliff
-        run: |
-          curl -L https://github.com/orhun/git-cliff/releases/latest/download/git-cliff-$(uname -m)-unknown-linux-gnu.tar.gz | tar -xz
-          sudo mv git-cliff /usr/local/bin/
+        uses: taiki-e/install-action@a37010ded18ff788be4440302bd9d4e3b9a9a9b1 # v2
+        with:
+          tool: git-cliff
 
       - name: Generate changelog for this release
         run: |
@@ -348,7 +355,7 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Helm
-        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.0
         with:
           version: "3.14.0"
 
@@ -434,7 +441,7 @@ jobs:
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.2
         with:
           tag_name: ${{ github.ref_name }}
           name: "SorobanPulse ${{ github.ref_name }}"

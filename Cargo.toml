@@ -2,10 +2,21 @@
 name = "soroban-pulse"
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.87"
 authors = ["SorobanPulse Team"]
 description = "Real-time event streaming and observability platform for Soroban/Stellar blockchain"
 license = "MIT"
 repository = "https://github.com/Soroban-Pulse/SorobanPulse"
+
+[workspace]
+members = ["cli", "fuzz"]
+
+[workspace.dependencies]
+# Stellar XDR (ScVal rendering, ledger meta / contract spec decoding).
+# 26.x is the newest line that still ships the `curr` module the codebase
+# imports. Every crate in the workspace inherits this single version so the
+# indexer, CLI and fuzzers all decode the same bytes identically.
+stellar-xdr = { version = "26.0.1", default-features = false, features = ["std", "curr", "base64", "serde"] }
 
 [dependencies]
 # Web framework
@@ -31,16 +42,13 @@ sqlx = { version = "0.7", features = ["runtime-tokio-native-tls", "postgres", "u
 
 # Cryptography - Classical
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 subtle = "2.6"
 aes-gcm = "0.10"
+# Issue #1421: RSA PKCS#1 v1.5 verification of AWS SNS message signatures.
+rsa = { version = "0.9", features = ["sha1", "sha2"] }
 
-# Cryptography - Post-Quantum (optional feature)
-pqcrypto-dilithium = { version = "0.5", optional = true }
-pqcrypto-kyber = { version = "0.8", optional = true }
-pqcrypto-falcon = { version = "0.3", optional = true }
-pqcrypto-sphincsplus = { version = "0.7", optional = true }
-pqcrypto-traits = { version = "0.3", optional = true }
 
 # Time and dates
 chrono = { version = "0.4", features = ["serde"] }
@@ -93,9 +101,9 @@ secrecy = "0.5"
 rand = "0.8"
 
 # Stellar XDR (ScVal rendering, ledger meta / contract spec decoding) and
-# zstd for Galexie ledger files (issues #1252-#1254). 26.x is the newest
-# line that still ships the `curr` module the codebase imports.
-stellar-xdr = { version = "26.0.1", default-features = false, features = ["std", "curr", "base64", "serde"] }
+# zstd for Galexie ledger files (issues #1252-#1254). Inherited from the
+# workspace so every crate shares a single version.
+stellar-xdr.workspace = true
 zstd = "0.13"
 
 # Caching / concurrency
@@ -119,9 +127,6 @@ pprof = { version = "0.13", features = ["flamegraph", "protobuf-codec"] }
 # Heavy / deployment-specific integrations
 # (optional; enabled through the matching cargo features below)
 mlua = { version = "0.10", features = ["lua54", "vendored", "send", "async"], optional = true }
-parquet = { version = "53", default-features = false, features = ["arrow", "zstd", "snap"], optional = true }
-arrow-array = { version = "53", optional = true }
-arrow-schema = { version = "53", optional = true }
 aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
 aws-sdk-s3 = { version = "1", optional = true }
 aws-sdk-kinesis = { version = "1", optional = true }
@@ -144,6 +149,40 @@ proptest = "1.4"
 tempfile = "3"
 wiremock = "0.6"
 insta = "1"
+
+# Issue #1415: Criterion benchmarks require `harness = false`; otherwise Cargo
+# links the default libtest harness, which conflicts with `criterion_main!`.
+[[bench]]
+name = "compression"
+harness = false
+
+[[bench]]
+name = "conditional_get"
+harness = false
+
+[[bench]]
+name = "db_queries"
+harness = false
+
+[[bench]]
+name = "pagination"
+harness = false
+
+[[bench]]
+name = "query_planning"
+harness = false
+
+[[bench]]
+name = "serialization"
+harness = false
+
+[[bench]]
+name = "serialization_cache"
+harness = false
+
+[[bench]]
+name = "streaming_response"
+harness = false
 
 # Issue #1441: development-only binaries. They are not built unless the
 # `dev-tools` feature is enabled, keeping production images free of them.
@@ -193,18 +232,21 @@ path = "src/bin/seed.rs"
 required-features = ["dev-tools"]
 
 [features]
-default = ["classical-crypto", "dashboard"]
+default = ["dashboard"]
 
 # Issue #1441: gates development-only binaries (seed, code generators, tooling)
 # so `cargo build --release` produces only the server.
 dev-tools = []
 
 # Issue #1112: serve the built web dashboard at /ui (runtime opt-in: SERVE_DASHBOARD=true).
-# Build with --no-default-features --features classical-crypto to drop it.
+# Build with --no-default-features to drop it.
 dashboard = ["tower-http/fs"]
 
 # Cryptography features
 classical-crypto = []
+# Issue #1484: Post-quantum crypto is Planned/Experimental — no code currently
+# references the pqcrypto crates, so enabling this feature has no effect.
+# See docs/feature-maturity.md for the authoritative maturity status.
 quantum-crypto = [
     "pqcrypto-dilithium",
     "pqcrypto-kyber",
@@ -234,11 +276,9 @@ lua = ["dep:mlua"]
 graphql = []
 encryption = []
 
-# Issue #1349: Parquet export via GET /v1/events/export?format=parquet
-parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
+# Issue #1349: Parquet export via GET /v1/events/export?format=parquet (feature defined above)
 
-# Issue #1350: GraphQL API, including subscriptions over WebSocket at /graphql/ws
-graphql = []
+# Issue #1350: GraphQL API, including subscriptions over WebSocket at /graphql/ws (feature defined above)
 
 # Chaos testing (gates tests/chaos_tests.rs advisory-lock failover tests)
 chaos = []
@@ -257,6 +297,13 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 # Used sparingly in test modules only.
 wildcard_imports = "allow"
+# Issue #1434: a panic in a request handler or background task can abort a
+# request, poison a mutex or silently kill a long-running task. These start as
+# `warn` so the existing call sites can be converted module by module; raise
+# them to `deny` once the non-test count reaches zero. Test modules are exempt
+# via `allow-unwrap-in-tests` / `allow-expect-in-tests` in `.clippy.toml`.
+unwrap_used = "warn"
+expect_used = "warn"
 
 [profile.release]
 opt-level = 3

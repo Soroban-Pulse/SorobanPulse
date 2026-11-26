@@ -4,6 +4,7 @@
 // arrive as base64 XDR ScVals (either a bare string or `{ "xdr": "..." }`).
 // Already-decoded JSON shapes are accepted too.
 
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { scValToNative, xdr } from "@stellar/stellar-sdk";
 
 /** The fields of a SorobanPulse webhook payload this bot uses. */
@@ -96,4 +97,125 @@ export function formatAmount(amount: bigint, decimals: number): string {
   const frac = digits.slice(digits.length - decimals).replace(/0+$/, "");
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `${negative ? "-" : ""}${grouped}${frac ? `.${frac}` : ""}`;
+}
+
+/** Default replay tolerance for signature v2, in seconds (5 minutes). */
+export const DEFAULT_TOLERANCE_SECONDS = 300;
+
+/** Header carrying the v2 signature: `t=<unix>,v1=<hex>`. */
+export const SIGNATURE_HEADER = "x-sorobanpulse-signature";
+/** Header carrying the unique delivery ID. */
+export const DELIVERY_ID_HEADER = "x-sorobanpulse-delivery-id";
+/** Legacy (v1) header: HMAC over the raw body only, no timestamp. */
+export const LEGACY_SIGNATURE_HEADER = "x-sorobanpulse-signature-v1";
+
+export interface VerifyOptions {
+  /** Shared webhook secret. */
+  secret: string;
+  /** Raw request body bytes exactly as received. */
+  body: string | Uint8Array;
+  /** Request headers (lower-cased lookup is performed internally). */
+  headers: Record<string, string | string[] | undefined>;
+  /** Max allowed age of the signed timestamp, in seconds. Defaults to 5 minutes. */
+  toleranceSeconds?: number;
+  /** Current unix time in seconds; injectable for tests. Defaults to `Date.now()`. */
+  now?: () => number;
+  /** Set of already-seen delivery IDs, used to reject replays. */
+  seenDeliveryIds?: Set<string>;
+}
+
+export interface VerifiedDelivery {
+  /** Delivery ID from `X-SorobanPulse-Delivery-Id`. */
+  deliveryId: string;
+  /** Signed unix timestamp (seconds). */
+  timestamp: number;
+  /** Which signature scheme verified the delivery. */
+  scheme: "v2" | "v1-legacy";
+}
+
+function headerValue(
+  headers: Record<string, string | string[] | undefined>,
+  name: string,
+): string | undefined {
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() !== name) continue;
+    return Array.isArray(value) ? value[0] : value;
+  }
+  return undefined;
+}
+
+function constantTimeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length || a.length % 2 !== 0) return false;
+  const ab = Buffer.from(a, "hex");
+  const bb = Buffer.from(b, "hex");
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+function hmacHex(secret: string, message: string | Uint8Array): string {
+  return createHmac("sha256", secret).update(message).digest("hex");
+}
+
+/**
+ * Verifies a SorobanPulse webhook delivery.
+ *
+ * Prefers signature v2 (`t=<unix>,v1=<hex>` where the HMAC covers `"<t>.<body>"`)
+ * and enforces the timestamp tolerance plus delivery-ID replay protection.
+ * Falls back to the legacy body-only signature during the deprecation window.
+ *
+ * Throws on any verification failure.
+ */
+export function verifyWebhook(options: VerifyOptions): VerifiedDelivery {
+  const {
+    secret,
+    body,
+    headers,
+    toleranceSeconds = DEFAULT_TOLERANCE_SECONDS,
+    now = () => Math.floor(Date.now() / 1000),
+    seenDeliveryIds,
+  } = options;
+
+  const deliveryId = headerValue(headers, DELIVERY_ID_HEADER);
+  if (!deliveryId) throw new Error("missing X-SorobanPulse-Delivery-Id header");
+
+  if (seenDeliveryIds?.has(deliveryId)) {
+    throw new Error(`replayed delivery: ${deliveryId}`);
+  }
+
+  const signature = headerValue(headers, SIGNATURE_HEADER);
+  if (signature) {
+    const parts = new Map<string, string>();
+    for (const piece of signature.split(",")) {
+      const idx = piece.indexOf("=");
+      if (idx > 0) parts.set(piece.slice(0, idx).trim(), piece.slice(idx + 1).trim());
+    }
+    const t = parts.get("t");
+    const v1 = parts.get("v1");
+    if (!t || !v1) throw new Error("malformed X-SorobanPulse-Signature header");
+
+    const timestamp = Number(t);
+    if (!Number.isInteger(timestamp)) throw new Error("invalid signature timestamp");
+
+    const age = Math.abs(now() - timestamp);
+    if (age > toleranceSeconds) {
+      throw new Error(`signature timestamp outside tolerance (${age}s > ${toleranceSeconds}s)`);
+    }
+
+    const expected = hmacHex(secret, `${t}.${body}`);
+    if (!constantTimeEqualHex(expected, v1)) throw new Error("signature mismatch");
+
+    seenDeliveryIds?.add(deliveryId);
+    return { deliveryId, timestamp, scheme: "v2" };
+  }
+
+  const legacy = headerValue(headers, LEGACY_SIGNATURE_HEADER);
+  if (!legacy) throw new Error("missing webhook signature header");
+
+  const expected = hmacHex(secret, body);
+  if (!constantTimeEqualHex(expected, legacy)) throw new Error("signature mismatch");
+
+  // Legacy signatures carry no timestamp; still record the delivery ID so a
+  // replayed legacy delivery is rejected once seen.
+  seenDeliveryIds?.add(deliveryId);
+  return { deliveryId, timestamp: now(), scheme: "v1-legacy" };
 }

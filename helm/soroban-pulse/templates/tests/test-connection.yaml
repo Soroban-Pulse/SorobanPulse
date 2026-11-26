@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: "{{ include "soroban-pulse.fullname" . }}-test-connection"
+  labels:
+    {{- include "soroban-pulse.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  restartPolicy: Never
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: test-connection
+      image: curlimages/curl:8.10.1
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          BASE_URL="http://{{ include "soroban-pulse.fullname" . }}:{{ .Values.service.port }}"
+          check() {
+            path="$1"
+            url="${BASE_URL}${path}"
+            echo "Checking ${url} ..."
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${url}")" || {
+              echo "Request to ${url} failed"
+              exit 1
+            }
+            case "${code}" in
+              2??)
+                echo "OK ${url} -> ${code}"
+                ;;
+              *)
+                echo "FAIL ${url} -> ${code}"
+                exit 1
+                ;;
+            esac
+          }
+          check "/healthz/ready"
+          check "/v1/meta"
+          echo "All checks passed"
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

@@ -5,21 +5,28 @@ to keep the default binary lean while making every optional subsystem available
 when you need it. This page documents each feature, the env vars it requires,
 its approximate effect on binary size, and when you would reach for it.
 
+!!! warning "Feature maturity"
+    Not every feature listed here is fully implemented. See the
+    [Feature Maturity](feature-maturity.md) page for the current status of each
+    subsystem. In particular, `quantum-crypto` and `hybrid-crypto` are
+    **Planned**: the features are declared in `Cargo.toml` but no code currently
+    uses them, so enabling them has no effect.
+
 ## Quick Reference
 
-| Feature | Default | Description |
-|---|---|---|
-| `dashboard` | ✅ | Serve the built-in ops dashboard at `/ui` |
-| `classical-crypto` | ✅ | HMAC-SHA256 + AES-GCM webhook signing and field encryption |
-| `quantum-crypto` | ❌ | Post-quantum algorithm suite (Dilithium, Kyber, Falcon, SPHINCS+) |
-| `hybrid-crypto` | ❌ | Both classical and post-quantum in parallel |
-| `istio` | ❌ | Istio service-mesh health check and mTLS probes |
-| `linkerd` | ❌ | Linkerd service-mesh health check and mTLS probes |
-| `full-observability` | ❌ | OpenTelemetry + Jaeger distributed tracing |
-| `kafka` | ❌ | Publish indexed events to an Apache Kafka topic |
-| `sqs` | ❌ | Publish indexed events to an AWS SQS queue |
-| `pubsub` | ❌ | Publish indexed events to a Google Cloud Pub/Sub topic |
-| `chaos` | ❌ | Enable chaos/resilience test gates (test-only) |
+| Feature | Default | Maturity | Description |
+|---|---|---|---|
+| `dashboard` | ✅ | Stable | Serve the built-in ops dashboard at `/ui` |
+| `classical-crypto` | ✅ | Stable | HMAC-SHA256 + AES-GCM webhook signing and field encryption |
+| `quantum-crypto` | ❌ | Planned | Post-quantum algorithm suite (Dilithium, Kyber, Falcon, SPHINCS+) — declared but unused |
+| `hybrid-crypto` | ❌ | Planned | Both classical and post-quantum in parallel — declared but unused |
+| `istio` | ❌ | Beta | Istio service-mesh health check and mTLS probes |
+| `linkerd` | ❌ | Beta | Linkerd service-mesh health check and mTLS probes |
+| `full-observability` | ❌ | Beta | OpenTelemetry + Jaeger distributed tracing |
+| `kafka` | ❌ | Beta | Publish indexed events to an Apache Kafka topic |
+| `sqs` | ❌ | Beta | Publish indexed events to an AWS SQS queue |
+| `pubsub` | ❌ | Beta | Publish indexed events to a Google Cloud Pub/Sub topic |
+| `chaos` | ❌ | Stable | Enable chaos/resilience test gates (test-only) |
 
 ---
 
@@ -77,8 +84,12 @@ cargo check --no-default-features --features classical-crypto
 
 ### `quantum-crypto`
 
-**Disabled by default.** Adds post-quantum cryptographic primitives via the
-`pqcrypto` family of crates:
+> **Status: Planned.** The feature is declared in `Cargo.toml`, but no code
+> currently uses it — enabling it has no effect. See
+> [Feature Maturity](feature-maturity.md) for the tracking issue.
+
+**Disabled by default.** Intended to add post-quantum cryptographic primitives
+via the `pqcrypto` family of crates:
 
 | Algorithm | Role |
 |---|---|
@@ -87,42 +98,53 @@ cargo check --no-default-features --features classical-crypto
 | Falcon-1024 | Compact signatures (embedded / IoT use cases) |
 | SPHINCS+-SHA2-256s | Hash-based signatures (stateless, highest assurance) |
 
-**When to use:** Environments that must be resistant to future quantum
-computers, or when you need to comply with NIST PQC standards.
+**When to use:** Not yet usable. The intended use case is environments that
+must be resistant to future quantum computers, or that need to comply with
+NIST PQC standards.
 
 ```bash
+# Compiles, but currently has no runtime effect
 cargo build --features quantum-crypto
 ```
 
-**Required env vars:** None beyond `ENCRYPTION_KEY`; algorithm selection is
-controlled via `CRYPTO_ALGORITHM` (default: `dilithium3`).
-See [docs/quantum-cryptography.md](quantum-cryptography.md) for full options.
+**Required env vars:** None yet. The planned design selects the algorithm via
+`CRYPTO_ALGORITHM` (default: `dilithium3`).
+See [docs/quantum-cryptography.md](quantum-cryptography.md) for the design notes.
 
-**Approximate binary size impact:** +6–8 MB (native C library compilations for
-each pqcrypto crate).
+**Approximate binary size impact:** 0 today (no dependencies are pulled in).
+The planned impact is +6–8 MB (native C library compilations for each pqcrypto
+crate).
 
 **CI note:** The `features` job runs `cargo hack check --each-feature`, which
-checks `quantum-crypto` independently. Building the pqcrypto crates requires
-a C compiler and takes ~2–3 minutes extra on a cold cache.
+checks `quantum-crypto` independently. Once the pqcrypto crates are added,
+building them will require a C compiler and take ~2–3 minutes extra on a cold
+cache.
 
 ---
 
 ### `hybrid-crypto`
 
-**Disabled by default.** A convenience alias for `classical-crypto +
-quantum-crypto`. Enables the hybrid key-exchange mode described in
+> **Status: Planned.** The feature is declared in `Cargo.toml`, but no code
+> currently uses it — enabling it has no effect. See
+> [Feature Maturity](feature-maturity.md) for the tracking issue.
+
+**Disabled by default.** Intended as a convenience alias for `classical-crypto
++ quantum-crypto`. The planned hybrid key-exchange mode is described in
 [docs/encryption.md](encryption.md): the classical ECDH path and the
-quantum-safe KEM path are run simultaneously; the shared secret is derived
-from both via HKDF.
+quantum-safe KEM path would run simultaneously; the shared secret would be
+derived from both via HKDF.
 
 ```bash
+# Compiles, but currently has no runtime effect
 cargo build --features hybrid-crypto
 ```
 
-**Required env vars:** Same as `classical-crypto` plus `quantum-crypto`.
-Set `CRYPTO_MODE=hybrid` to activate the hybrid code path at runtime.
+**Required env vars:** None yet. The planned design reuses the
+`classical-crypto` settings plus `quantum-crypto`, with `CRYPTO_MODE=hybrid`
+selecting the hybrid code path at runtime.
 
-**Approximate binary size impact:** +6–8 MB (sum of both crypto sets).
+**Approximate binary size impact:** 0 today (no dependencies are pulled in).
+The planned impact is +6–8 MB (sum of both crypto sets).
 
 ---
 
@@ -308,12 +330,16 @@ The right choice for most single-host and Kubernetes deployments.
 
 ### Quantum-ready + observability
 
+> **Not yet available.** `hybrid-crypto` is Planned (see
+> [Feature Maturity](feature-maturity.md)); only the observability half of this
+> combination works today.
+
 ```bash
 cargo build --release --features "hybrid-crypto,full-observability"
 ```
 
-Use in regulated environments that need forward-secure cryptography and want
-full distributed traces in Jaeger/Honeycomb.
+Intended for regulated environments that need forward-secure cryptography and
+want full distributed traces in Jaeger/Honeycomb.
 
 ### Kafka + SQS fan-out
 
@@ -371,8 +397,10 @@ Yes, both features compile independently. In practice you would only deploy
 with one — your Kubernetes cluster runs either Istio or Linkerd, not both.
 
 **Does `quantum-crypto` replace `classical-crypto`?**
-No. Use `hybrid-crypto` to run both simultaneously during a migration period.
-Disable `classical-crypto` only after all clients have migrated to PQC keys.
+Not yet — `quantum-crypto` is Planned and currently has no implementation
+(see [Feature Maturity](feature-maturity.md)). The intended path is to use
+`hybrid-crypto` to run both simultaneously during a migration period, and to
+disable `classical-crypto` only after all clients have migrated to PQC keys.
 
 **Is `chaos` safe to include in a production build?**
 Yes — it is purely a test gate with no runtime code. The release profile
@@ -390,12 +418,12 @@ to be declared with its dependencies, or the gated code removed.
 
 | Feature | Gated code | Dependencies it would need | Maturity |
 |---|---|---|---|
-| `graphql` | `src/graphql.rs`, `src/graphql_subscriptions.rs`. See [graphql_api.md](graphql_api.md). | `async-graphql` (already a non-optional dependency) | experimental |
+| `graphql` | `src/graphql.rs`, `src/graphql_subscriptions.rs`. See [graphql-api.md](graphql-api.md). | `async-graphql` (already a non-optional dependency) | experimental |
 | `otel` | OTLP tracing layer in `src/main.rs`, `src/distributed_tracing.rs`. Env: `OTEL_EXPORTER_OTLP_ENDPOINT`. | `opentelemetry`, `opentelemetry-otlp` (non-optional), `tracing-opentelemetry` | experimental |
 | `zipkin` | Only referenced by the `otel`/`zipkin` conflict check in `build.rs` | a Zipkin exporter crate | experimental |
 | `encryption` | AES-256-GCM `event_data` encryption in `src/encryption.rs`, `src/handlers.rs`. See [encryption.md](encryption.md). | `aes-gcm` (non-optional) | experimental |
 | `kinesis` | AWS Kinesis publisher (`src/kinesis.rs`). Env: `KINESIS_STREAM_NAME`, `AWS_REGION`. | an AWS Kinesis client | experimental |
-| `archive` | S3 archival job (`src/archiver.rs`). Env: `ARCHIVE_AFTER_DAYS`. See [data-retention-tiers.md](data-retention-tiers.md). | `aws-sdk-s3`, `flate2` | experimental |
+| `archive` | S3 archival job (`src/archiver.rs`). Env: `ARCHIVE_AFTER_DAYS`. See [data-retention.md](data-retention.md). | `aws-sdk-s3`, `flate2` | experimental |
 | `parquet` | Parquet export (`src/parquet_export.rs`). | `parquet`, `arrow` | experimental |
 | `lua` | Lua event transforms (`src/lua_transform.rs`). Env: `EVENT_TRANSFORM_SCRIPT`, `EVENT_TRANSFORM_TIMEOUT_MS`. See [lua-transformation.md](lua-transformation.md). | `mlua` | experimental |
 | `redis-queue` | Redis Streams publisher in `src/queue_publisher.rs`. Env: `REDIS_URL`, `REDIS_STREAM_KEY`, `REDIS_BUFFER_MAX_SIZE`. | `redis` | experimental |

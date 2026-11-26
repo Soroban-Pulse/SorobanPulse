@@ -69,8 +69,8 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "soroban-pulse.image" . }}
+          imagePullPolicy: {{ include "soroban-pulse.imagePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -85,6 +85,15 @@ spec:
           env:
             - name: ROLE
               value: "all"
+            # Admin API authentication is fail-closed: without ADMIN_API_KEY the
+            # server rejects every /v1/admin/* request with 403. The key is
+            # sourced from the chart Secret (never from the ConfigMap).
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "soroban-pulse.fullname" .)) }}
+                  key: {{ .Values.adminApiKeySecretKey | default "ADMIN_API_KEY" }}
+                  optional: true
           {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -167,8 +176,8 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}-api
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "soroban-pulse.image" . }}
+          imagePullPolicy: {{ include "soroban-pulse.imagePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -183,6 +192,15 @@ spec:
           env:
             - name: ROLE
               value: "api"
+            # Admin API authentication is fail-closed: without ADMIN_API_KEY the
+            # server rejects every /v1/admin/* request with 403. The key is
+            # sourced from the chart Secret (never from the ConfigMap).
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "soroban-pulse.fullname" .)) }}
+                  key: {{ .Values.adminApiKeySecretKey | default "ADMIN_API_KEY" }}
+                  optional: true
           {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -264,8 +282,8 @@ spec:
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}-indexer
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: {{ include "soroban-pulse.image" . }}
+          imagePullPolicy: {{ include "soroban-pulse.imagePullPolicy" . }}
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           ports:
@@ -280,6 +298,15 @@ spec:
           env:
             - name: ROLE
               value: "indexer"
+            # Admin API authentication is fail-closed: without ADMIN_API_KEY the
+            # server rejects every /v1/admin/* request with 403. The key is
+            # sourced from the chart Secret (never from the ConfigMap).
+            - name: ADMIN_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.existingSecret | default (printf "%s-secrets" (include "soroban-pulse.fullname" .)) }}
+                  key: {{ .Values.adminApiKeySecretKey | default "ADMIN_API_KEY" }}
+                  optional: true
           {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}

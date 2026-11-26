@@ -15,3 +15,10 @@ pre-commit:
     gen-openapi:
       run: cargo run --features dev-tools --bin gen_openapi > openapi.json && cp openapi.json docs/openapi.json && git add openapi.json docs/openapi.json
       glob: "*.rs"
+    repo-integrity:
+      run: bash scripts/repo-integrity.sh
+      glob: "*.{json,toml,yml,yaml,rs}"
+      files: git diff --name-only --cached
+      root: "."
+      exclude:
+        - "migrations/**"

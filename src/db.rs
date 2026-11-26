@@ -23,7 +23,17 @@ impl Default for QueryTimeouts {
 }
 
 /// Helper to set per-query timeout using SET LOCAL statement_timeout
-/// This should be called at the beginning of a transaction
+/// This should be called at the beginning of a transaction.
+///
+/// # Pooled-connection safety
+///
+/// Session-level `SET` must never be used on connections acquired from the
+/// shared pool: it persists for the life of the connection and leaks into
+/// whichever unrelated request checks the connection out next (issue #1438).
+/// Always scope planner/runtime settings with `SET LOCAL` inside an explicit
+/// transaction, or use `set_config(name, value, true)` with bound parameters.
+/// As defense in depth, the pool is built with an `after_release` hook that
+/// resets any leaked session state (see [`crate::db_pool`]).
 pub async fn set_query_timeout(
     conn: &mut sqlx::PgConnection,
     timeout_ms: u64,

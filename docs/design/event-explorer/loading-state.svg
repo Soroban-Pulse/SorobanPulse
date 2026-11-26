@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 600" font-family="Inter, system-ui, sans-serif" font-size="14">
+  <rect width="1280" height="600" fill="#F9FAFB"/>
+  <text x="16" y="24" font-weight="700" fill="#111827">Event Explorer — Loading state (skeleton rows, filter bar stays interactive)</text>
+  <text x="256" y="76" font-size="22" font-weight="700">Event Explorer</text>
+  <rect x="256" y="92" width="1008" height="56" rx="8" fill="#fff" stroke="#D1D5DB"/>
+  <rect x="256" y="200" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="214" width="160" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="214" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="214" width="280" height="12" rx="3" fill="#F3F4F6"/>
+  <rect x="256" y="244" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="258" width="140" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="258" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="258" width="280" height="12" rx="3" fill="#F3F4F6"/>
+  <rect x="256" y="288" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="302" width="180" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="302" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="302" width="280" height="12" rx="3" fill="#F3F4F6"/>
+  <rect x="256" y="332" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="346" width="150" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="346" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="346" width="280" height="12" rx="3" fill="#F3F4F6"/>
+  <rect x="256" y="376" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="390" width="170" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="390" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="390" width="280" height="12" rx="3" fill="#F3F4F6"/>
+  <rect x="256" y="420" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="434" width="130" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="434" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="434" width="280" height="12" rx="3" fill="#F3F4F6"/>
+  <rect x="256" y="464" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="478" width="160" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="478" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="478" width="280" height="12" rx="3" fill="#F3F4F6"/>
+  <rect x="256" y="508" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/><rect x="272" y="522" width="150" height="12" rx="3" fill="#E5E7EB"/><rect x="460" y="522" width="220" height="12" rx="3" fill="#F3F4F6"/><rect x="860" y="522" width="280" height="12" rx="3" fill="#F3F4F6"/>
+
+</svg>

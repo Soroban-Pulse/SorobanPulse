@@ -4,6 +4,11 @@ Entry point for the Soroban Pulse API surface. This page ties together the
 REST API, GraphQL, Server-Sent Events, and webhooks/subscriptions, and links
 out to the detailed docs for each rather than repeating them.
 
+> **Endpoint reference**: per-endpoint parameters, request/response schemas,
+> and status codes are documented in the generated API reference, which is
+> rendered from `openapi.json` when the docs site is built. This page covers
+> concepts only — consult the reference for anything endpoint-specific.
+
 ## Table of contents
 
 1. [API surfaces overview](#api-surfaces-overview)
@@ -17,12 +22,12 @@ out to the detailed docs for each rather than repeating them.
 
 ## API surfaces overview
 
-| Surface | Transport | Default path | Docs |
-|---|---|---|---|
-| REST | HTTP request/response | `/v1/*` (plus unversioned legacy paths) | [`docs/api-usage.md`](api-usage.md) |
-| Server-Sent Events | HTTP streaming (`text/event-stream`) | `/v1/events/stream`, `/v1/events/contract/{contract_id}/stream` | [`docs/api-usage.md#server-sent-events-sse`](api-usage.md#server-sent-events-sse), [`docs/sse-reconnection.md`](sse-reconnection.md) |
-| Webhooks / subscriptions | HTTP callbacks the server initiates | `/subscriptions` (management) | [`docs/webhook_signing.md`](webhook_signing.md), [`docs/subscription-best-practices.md`](subscription-best-practices.md) |
-| GraphQL | HTTP POST, single endpoint | `/graphql` (see caveat below) | [`docs/graphql_api.md`](graphql_api.md) |
+| Surface | Transport | Docs |
+|---|---|---|
+| REST | HTTP request/response | Generated API reference; [`docs/api-usage.md`](api-usage.md) |
+| Server-Sent Events | HTTP streaming (`text/event-stream`) | Generated API reference; [`docs/sse-reconnection.md`](sse-reconnection.md) |
+| Webhooks / subscriptions | HTTP callbacks the server initiates | Generated API reference; [`docs/webhook_signing.md`](webhook_signing.md), [`docs/subscription-best-practices.md`](subscription-best-practices.md) |
+| GraphQL | HTTP POST, single endpoint | [`docs/graphql_api.md`](graphql_api.md) (see caveat below) |
 
 All four sit on the same Axum application and (aside from the GraphQL
 caveat below) the same port — there's no separate service to stand up for
@@ -57,10 +62,9 @@ set on the server (`src/middleware/auth.rs`, `auth_middleware`):
   (SHA-256) and looked up against a `tenant_id` mapping; a valid key with no
   tenant mapping is rejected with `403`.
 
-Full request/response examples and the status-code table (401 vs 403, wrong
-key vs missing key) are in
-[`docs/api-usage.md#authentication`](api-usage.md#authentication) — this
-section only summarizes the mechanism.
+The exact status codes each route returns (401 vs 403, wrong key vs missing
+key) are listed per endpoint in the generated API reference; this section
+only summarizes the mechanism.
 
 ## Testing against the live Swagger UI
 
@@ -86,8 +90,7 @@ Practical ways to test authenticated endpoints today:
   Swagger UI will succeed with no auth needed.
 - **Against a server that does enforce `API_KEY`**: "Try it out" requests
   from `/docs` will get `401`/`403` for protected routes. Either test those
-  routes with `curl -H "X-Api-Key: $API_KEY"` instead (see
-  [`docs/api-usage.md`](api-usage.md#authentication)), or use a browser
+  routes with `curl -H "X-Api-Key: $API_KEY"` instead, or use a browser
   extension that injects the header on requests to your host, since the
   Swagger UI page itself has no field for it.
 - **Where to get a test key**: there's no key-issuance endpoint or portal —
@@ -136,7 +139,9 @@ how this also affects SDK generation.
 
 ## Where to go next
 
-- **REST recipes and full parameter reference**: [`docs/api-usage.md`](api-usage.md)
+- **Generated API reference**: rendered from `openapi.json` as part of the
+  docs site build — the source of truth for endpoints, parameters, and schemas
+- **REST recipes**: [`docs/api-usage.md`](api-usage.md)
 - **GraphQL**: [`docs/graphql_api.md`](graphql_api.md) (see status caveat above)
 - **Client SDKs (Go/Python/TypeScript)**: [`docs/client-libraries.md`](client-libraries.md), [`docs/sdk-integration-guide.md`](sdk-integration-guide.md)
 - **Local sandbox / test data**: [`docs/api-sandbox.md`](api-sandbox.md)
@@ -144,4 +149,5 @@ how this also affects SDK generation.
 - **Versioning policy**: [`docs/api-versioning.md`](api-versioning.md)
 - **Recording API changes**: [`docs/api-changelog.md`](api-changelog.md)
 - **Webhook signing/verification**: [`docs/webhook_signing.md`](webhook_signing.md)
-- **Postman collection generation**: [`docs/postman.md`](postman.md)
+- **Postman collection**: published as a release artifact, generated in CI
+  from the same `openapi.json` — see [`docs/postman.md`](postman.md)

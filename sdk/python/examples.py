@@ -23,6 +23,7 @@ from openapi_client import (
     create_conservative_retry_policy,
     get_global_retry_policy,
 )
+from openapi_client.webhook import verify_webhook
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -409,6 +410,55 @@ def multiple_sequential_calls():
 
 
 # ============================================================================
+# Example 14: Webhook Signature Verification
+# ============================================================================
+
+def webhook_verification():
+    """Verify an incoming webhook signature using the raw request body.
+
+    The signature is computed over the exact bytes received on the wire, so
+    always pass the raw body (never a re-serialized/parsed JSON object).
+    """
+    secret = "whsec_your_webhook_signing_secret"
+
+    # Simulated incoming request (e.g. from a FastAPI/Flask handler)
+    raw_body = b'{"event_id":"evt_123","event_type":"contract"}'
+    headers = {
+        "X-SorobanPulse-Signature": "t=1700000000,v1=deadbeef...",
+    }
+
+    try:
+        # Reject signatures older than 300 seconds (5 minutes) to prevent replays
+        verify_webhook(raw_body, headers, secret, tolerance_sec=300)
+        logger.info("Webhook signature is valid")
+    except Exception as error:
+        logger.error(f"Webhook signature verification failed: {error}")
+        raise
+
+
+# FastAPI integration example (raw body via `await request.body()`):
+#
+# from fastapi import FastAPI, Request, HTTPException
+# from openapi_client.webhook import verify_webhook, WebhookVerificationError
+#
+# app = FastAPI()
+#
+# @app.post("/webhooks/soroban-pulse")
+# async def handle_webhook(request: Request):
+#     raw_body = await request.body()  # raw bytes, do not parse first
+#     try:
+#         verify_webhook(
+#             raw_body,
+#             dict(request.headers),
+#             "whsec_your_webhook_signing_secret",
+#             tolerance_sec=300,
+#         )
+#     except WebhookVerificationError:
+#         raise HTTPException(status_code=400, detail="invalid signature")
+#     return {"ok": True}
+
+
+# ============================================================================
 # Run Examples
 # ============================================================================
 
@@ -428,6 +478,9 @@ def main():
 
     logger.info("\nExample 10: Error Handling with Metrics")
     error_handling_with_metrics()
+
+    logger.info("\nExample 14: Webhook Signature Verification")
+    webhook_verification()
 
 
 if __name__ == "__main__":

@@ -1,5 +1,17 @@
-/// GraphQL API layer for Soroban Pulse events
-/// Issue #683: Add GraphQL API layer for more flexible event querying
+//! GraphQL API layer for Soroban Pulse events.
+//!
+//! Issue #683: Add GraphQL API layer for more flexible event querying.
+//!
+//! # Maturity: Experimental
+//!
+//! This module is **experimental and not yet wired up**. The schema, resolvers
+//! and query guards below are implemented, but the GraphQL endpoint is not
+//! mounted in the HTTP router — see `src/routes.rs`, where the GraphQL route
+//! currently returns an empty `Router::new()`. Do not rely on this API being
+//! reachable in a deployment.
+//!
+//! See `docs/feature-maturity.md` for the authoritative maturity status of this
+//! and other subsystems.
 
 use async_graphql::{
     Context, InputObject, Object, Schema, Subscription, ID, SimpleObject,

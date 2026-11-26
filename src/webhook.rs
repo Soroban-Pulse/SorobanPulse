@@ -6,22 +6,119 @@ use tokio::time::sleep;
 use tracing::{error, info, warn, Span};
 use uuid::Uuid;
 
-/// Validate that `url` is reachable and returns a 2xx response.
+/// Generic error returned to callers when a webhook URL fails validation.
+///
+/// Deliberately opaque: it must not echo transport details, resolved
+/// addresses, or HTTP status codes, since those would let an attacker probe
+/// internal services (SSRF, #1426).
+pub const WEBHOOK_URL_VALIDATION_FAILED: &str = "URL failed validation";
+
+/// Validate that `url` is a safe, reachable webhook target.
+///
 /// Used when creating or updating webhook notification channels (#503).
+///
+/// The URL is first checked by the shared outbound SSRF guard
+/// (`net::outbound::validate_outbound_url`), which rejects non-HTTP(S)
+/// schemes, loopback/RFC1918/link-local/metadata addresses (including
+/// decimal/octal/hex IP encodings and DNS names resolving to private IPs)
+/// and pins the resolved IP to defend against DNS rebinding. Only after that
+/// check passes is a request issued, through the hardened outbound client
+/// (redirects disabled, timeouts applied).
+///
+/// Self-hosted deployments that intentionally target private addresses can
+/// opt in via the `WEBHOOK_ALLOW_PRIVATE_TARGETS` environment variable (or the
+/// `webhook_allow_private_targets` config flag), optionally narrowed to a
+/// comma-separated host allowlist in `WEBHOOK_PRIVATE_TARGET_ALLOWLIST`.
+///
+/// All failures are reported as [`WEBHOOK_URL_VALIDATION_FAILED`] so that the
+/// caller cannot distinguish "blocked" from "unreachable" or learn status
+/// codes.
 pub async fn validate_webhook_url(url: &str) -> Result<(), String> {
-    let client = Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|e| format!("failed to build HTTP client: {}", e))?;
+    // SSRF guard: reject unsafe destinations before any network request.
+    if crate::net::outbound::validate_outbound_url(url).await.is_err() {
+        warn!(url = %url, "Webhook URL rejected by outbound SSRF guard");
+        return Err(WEBHOOK_URL_VALIDATION_FAILED.to_string());
+    }
+
+    // Private-target opt-in for self-hosted deployments. Even when enabled,
+    // the allowlist (if configured) must match the URL's host.
+    if !private_targets_permitted(url) {
+        warn!(url = %url, "Webhook URL targets a private address and is not allowlisted");
+        return Err(WEBHOOK_URL_VALIDATION_FAILED.to_string());
+    }
+
+    let client = match crate::net::outbound::outbound_client(Duration::from_secs(10)) {
+        Ok(client) => client,
+        Err(_) => return Err(WEBHOOK_URL_VALIDATION_FAILED.to_string()),
+    };
 
     match client.head(url).send().await {
         Ok(resp) if resp.status().is_success() => Ok(()),
-        Ok(resp) => Err(format!(
-            "webhook URL returned non-2xx status: {}",
-            resp.status()
-        )),
-        Err(e) => Err(format!("webhook URL is unreachable: {}", e)),
+        // Do not leak the status code or transport error to the caller.
+        Ok(_) | Err(_) => Err(WEBHOOK_URL_VALIDATION_FAILED.to_string()),
     }
+}
+
+/// Returns `true` when the URL's host is permitted despite resolving to a
+/// private address.
+///
+/// Private targets are only permitted when the deployment explicitly opts in
+/// via `WEBHOOK_ALLOW_PRIVATE_TARGETS` (truthy). When
+/// `WEBHOOK_PRIVATE_TARGET_ALLOWLIST` is set, the URL host must appear in the
+/// comma-separated list. Public hosts are always permitted.
+fn private_targets_permitted(url: &str) -> bool {
+    let host = match reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+    {
+        Some(host) => host,
+        None => return false,
+    };
+
+    // If the host is not a private/loopback/link-local literal, it is a public
+    // destination and the SSRF guard has already vetted it.
+    if !host_is_private_literal(&host) {
+        return true;
+    }
+
+    let opt_in = std::env::var("WEBHOOK_ALLOW_PRIVATE_TARGETS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !opt_in {
+        return false;
+    }
+
+    match std::env::var("WEBHOOK_PRIVATE_TARGET_ALLOWLIST") {
+        Ok(list) if !list.trim().is_empty() => list
+            .split(',')
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .any(|entry| !entry.is_empty() && entry == host),
+        _ => true,
+    }
+}
+
+/// Best-effort check for private/loopback/link-local host literals.
+fn host_is_private_literal(host: &str) -> bool {
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback()
+                    || v4.is_private()
+                    || v4.is_link_local()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || v4.octets()[0] == 169 && v4.octets()[1] == 254
+            }
+            std::net::IpAddr::V6(v6) => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+            }
+        };
+    }
+    matches!(host, "localhost" | "localhost.localdomain")
 }
 
 use crate::{metrics, models::SorobanEvent, webhook_template::WebhookTemplate};
@@ -47,11 +144,104 @@ pub fn transform_webhook_payload(
 }
 
 /// Sign a payload with HMAC-SHA256 and return the hex digest.
+///
+/// This is the legacy (v1) scheme that signs the body only. It is retained
+/// during the deprecation window; new integrations should verify the
+/// timestamped v2 signature produced by [`sign_payload_v2`] (Issue #1431).
 pub fn sign_payload(secret: &str, body: &[u8]) -> String {
     let mut mac = crate::hmac_util::hmac_sha256(secret.as_bytes());
     mac.update(body);
     let result = mac.finalize();
     hex::encode(result.into_bytes())
+}
+
+/// Compute the v2 signature hex digest: `HMAC-SHA256(secret, "<t>.<body>")`.
+///
+/// Signing the timestamp together with the body lets receivers reject
+/// replayed deliveries by enforcing a tolerance window (Issue #1431).
+pub fn sign_payload_v2(secret: &str, timestamp: i64, body: &[u8]) -> String {
+    let mut mac = crate::hmac_util::hmac_sha256(secret.as_bytes());
+    mac.update(timestamp.to_string().as_bytes());
+    mac.update(b".");
+    mac.update(body);
+    let result = mac.finalize();
+    hex::encode(result.into_bytes())
+}
+
+/// Build the v2 signature header value: `t=<unix>,v1=<hex>`.
+pub fn signature_v2_header(secret: &str, timestamp: i64, body: &[u8]) -> String {
+    format!(
+        "t={},v1={}",
+        timestamp,
+        sign_payload_v2(secret, timestamp, body)
+    )
+}
+
+/// Generate a unique delivery ID for a webhook delivery (Issue #1431).
+pub fn new_delivery_id() -> String {
+    Uuid::new_v4().to_string()
+}
+
+/// The set of signature headers to attach to a delivery.
+///
+/// During the deprecation window both the legacy `X-Signature-256` header and
+/// the new timestamped `X-SorobanPulse-Signature` header are sent, along with
+/// a unique `X-SorobanPulse-Delivery-Id` (Issue #1431).
+#[derive(Debug, Clone)]
+pub struct SignatureHeaders {
+    pub delivery_id: String,
+    pub legacy: Option<String>,
+    pub v2: Option<String>,
+}
+
+impl SignatureHeaders {
+    /// Build the headers for a delivery. `secret` is optional; when absent only
+    /// the delivery ID is produced.
+    pub fn new(secret: Option<&str>, body: &[u8]) -> Self {
+        let delivery_id = new_delivery_id();
+        match secret {
+            Some(secret) => {
+                let timestamp = chrono::Utc::now().timestamp();
+                Self {
+                    delivery_id,
+                    legacy: Some(format!("sha256={}", sign_payload(secret, body))),
+                    v2: Some(signature_v2_header(secret, timestamp, body)),
+                }
+            }
+            None => Self {
+                delivery_id,
+                legacy: None,
+                v2: None,
+            },
+        }
+    }
+
+    /// Apply the headers to an outgoing request.
+    pub fn apply(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        req = req.header("X-SorobanPulse-Delivery-Id", &self.delivery_id);
+        if let Some(ref legacy) = self.legacy {
+            req = req.header("X-Signature-256", legacy);
+        }
+        if let Some(ref v2) = self.v2 {
+            req = req.header("X-SorobanPulse-Signature", v2);
+        }
+        req
+    }
+
+    /// Flatten the headers into `(name, value)` pairs for logging.
+    pub fn to_pairs(&self) -> Vec<(String, String)> {
+        let mut pairs = vec![(
+            "X-SorobanPulse-Delivery-Id".to_string(),
+            self.delivery_id.clone(),
+        )];
+        if let Some(ref legacy) = self.legacy {
+            pairs.push(("X-Signature-256".to_string(), legacy.clone()));
+        }
+        if let Some(ref v2) = self.v2 {
+            pairs.push(("X-SorobanPulse-Signature".to_string(), v2.clone()));
+        }
+        pairs
+    }
 }
 
 /// Evaluate the notification priority of an event using a JSONPath-style rule (Issue #492).
@@ -87,15 +277,19 @@ pub fn evaluate_priority<'a>(
 
 /// Deliver a single event to the webhook URL with the default retry policy.
 /// On final failure, insert into DLQ.
+///
+/// The supplied `client` is ignored in favour of the hardened outbound client
+/// so that every delivery goes through the SSRF guard (#1426, #1427). The
+/// parameter is retained for API compatibility.
 pub async fn deliver(
-    client: Client,
+    _client: Client,
     url: String,
     secret: Option<String>,
     event: SorobanEvent,
     pool: Option<&sqlx::PgPool>,
 ) {
     deliver_with_retry_policy(
-        client,
+        _client,
         url,
         secret,
         event,
@@ -116,7 +310,7 @@ pub async fn deliver(
 ///
 /// See docs/adr/0003-webhook-retry-strategy.md for the design rationale.
 pub async fn deliver_with_retry_policy(
-    client: Client,
+    _client: Client,
     url: String,
     secret: Option<String>,
     event: SorobanEvent,
@@ -124,6 +318,26 @@ pub async fn deliver_with_retry_policy(
     retry_policy: &crate::retry_policy::RetryPolicy,
     priority: String,
 ) {
+    // Route every delivery through the shared SSRF-safe outbound client
+    // (#1426, #1427). The caller-supplied client is intentionally ignored so
+    // that no integration can bypass the guard.
+    let client = match crate::net::outbound::outbound_client(Duration::from_secs(30)) {
+        Ok(client) => client,
+        Err(e) => {
+            error!(error = %e, url = %url, "Failed to build outbound client for webhook delivery");
+            return;
+        }
+    };
+
+    // Reject unsafe destinations before any request is attempted.
+    if crate::net::outbound::validate_outbound_url(&url).await.is_err()
+        || !private_targets_permitted(&url)
+    {
+        error!(url = %url, "Webhook delivery blocked by outbound SSRF guard");
+        metrics::record_webhook_failure();
+        return;
+    }
+
     // Create a root span for the entire delivery lifecycle
     #[cfg(feature = "full-observability")]
     let root_span = tracing::info_span!(
@@ -201,7 +415,7 @@ pub async fn deliver_with_retry_policy(
         }
     };
 
-    let signature = secret.as_deref().map(|s| sign_payload(s, &body));
+    let signature_headers = SignatureHeaders::new(secret.as_deref(), &body);
     let priority_owned = priority.clone();
 
     let log_pool = pool.cloned();
@@ -211,9 +425,7 @@ pub async fn deliver_with_retry_policy(
             ("Content-Type".to_string(), "application/json".to_string()),
             ("X-Notification-Priority".to_string(), priority_owned.clone()),
         ];
-        if let Some(ref sig) = signature {
-            headers.push(("X-Signature-256".to_string(), format!("sha256={sig}")));
-        }
+        headers.extend(signature_headers.to_pairs());
         headers
     };
     let log_request_body = payload.clone();
@@ -225,7 +437,7 @@ pub async fn deliver_with_retry_policy(
             let client = client.clone();
             let url = url.clone();
             let body = body.clone();
-            let signature = signature.clone();
+            let signature_headers = signature_headers.clone();
             let priority_header = priority_owned.clone();
             let log_pool = log_pool.clone();
             let log_url = log_url.clone();
@@ -251,15 +463,13 @@ pub async fn deliver_with_retry_policy(
 
                 let _enter = attempt_span.enter();
 
-                let mut req = client
+                let req = client
                     .post(&url)
                     .header("Content-Type", "application/json")
                     .header("X-Notification-Priority", priority_header)
                     .body(body);
 
-                if let Some(ref sig) = signature {
-                    req = req.header("X-Signature-256", format!("sha256={sig}"));
-                }
+                let req = signature_headers.apply(req);
 
                 // Create a span for the HTTP send
                 #[cfg(feature = "full-observability")]
@@ -525,7 +735,7 @@ async fn enqueue_endpoint_retry(
 /// Deliver with failover: if the primary URL fails, attempt the failover URL (#499).
 /// Returns true if delivered (primary or failover), false if both failed.
 pub async fn deliver_with_failover(
-    client: Client,
+    _client: Client,
     primary_url: String,
     primary_secret: Option<String>,
     failover_url: Option<String>,
@@ -534,6 +744,34 @@ pub async fn deliver_with_failover(
     pool: Option<&sqlx::PgPool>,
     retry_policy: &crate::retry_policy::RetryPolicy,
 ) -> bool {
+    // Use the hardened outbound client for both primary and failover hops
+    // (#1426, #1427).
+    let client = match crate::net::outbound::outbound_client(Duration::from_secs(30)) {
+        Ok(client) => client,
+        Err(e) => {
+            error!(error = %e, "Failed to build outbound client for webhook failover delivery");
+            return false;
+        }
+    };
+
+    // Reject unsafe primary/failover destinations before any request.
+    if crate::net::outbound::validate_outbound_url(&primary_url).await.is_err()
+        || !private_targets_permitted(&primary_url)
+    {
+        error!(url = %primary_url, "Primary webhook blocked by outbound SSRF guard");
+        metrics::record_webhook_failure();
+        return false;
+    }
+    if let Some(ref f_url) = failover_url {
+        if crate::net::outbound::validate_outbound_url(f_url).await.is_err()
+            || !private_targets_permitted(f_url)
+        {
+            error!(url = %f_url, "Failover webhook blocked by outbound SSRF guard");
+            metrics::record_webhook_failure();
+            return false;
+        }
+    }
+
     let body = match serde_json::to_vec(&event) {
         Ok(b) => b,
         Err(e) => {
@@ -542,7 +780,7 @@ pub async fn deliver_with_failover(
         }
     };
 
-    let primary_sig = primary_secret.as_deref().map(|s| sign_payload(s, &body));
+    let primary_sig = SignatureHeaders::new(primary_secret.as_deref(), &body);
 
     let primary_result = retry_policy.execute_with_retry(|attempt| {
         let client = client.clone();
@@ -550,13 +788,11 @@ pub async fn deliver_with_failover(
         let body = body.clone();
         let sig = primary_sig.clone();
         async move {
-            let mut req = client
+            let req = client
                 .post(&url)
                 .header("Content-Type", "application/json")
                 .body(body);
-            if let Some(ref s) = sig {
-                req = req.header("X-Signature-256", format!("sha256={s}"));
-            }
+            let req = sig.apply(req);
             match req.send().await {
                 Ok(resp) if resp.status().is_success() => {
                     info!(url = %url, attempt = attempt, "Webhook delivered (primary)");
@@ -581,7 +817,7 @@ pub async fn deliver_with_failover(
     // Attempt failover if configured
     if let Some(f_url) = failover_url {
         metrics::record_notification_failover("webhook");
-        let f_sig = failover_secret.as_deref().map(|s| sign_payload(s, &body));
+        let f_sig = SignatureHeaders::new(failover_secret.as_deref(), &body);
 
         let failover_result = retry_policy.execute_with_retry(|attempt| {
             let client = client.clone();
@@ -589,13 +825,11 @@ pub async fn deliver_with_failover(
             let body = body.clone();
             let sig = f_sig.clone();
             async move {
-                let mut req = client
+                let req = client
                     .post(&url)
                     .header("Content-Type", "application/json")
                     .body(body);
-                if let Some(ref s) = sig {
-                    req = req.header("X-Signature-256", format!("sha256={s}"));
-                }
+                let req = sig.apply(req);
                 match req.send().await {
                     Ok(resp) if resp.status().is_success() => {
                         info!(url = %url, attempt = attempt, "Webhook delivered (failover)");
@@ -807,6 +1041,110 @@ mod tests {
         );
     }
 
+    /// Load the shared cross-language webhook signature fixture and verify
+    /// every vector against the server's signing implementation
+    /// (Issue #1413). This ties the fixture to `sign_payload` so drift in
+    /// either the fixture or the signing scheme is caught.
+    #[test]
+    fn test_signature_vectors_fixture_matches_signing_implementation() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/webhook_signature_vectors.json");
+        let raw = std::fs::read_to_string(&fixture_path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", fixture_path.display()));
+        let fixture: serde_json::Value = serde_json::from_str(&raw)
+            .unwrap_or_else(|e| panic!("{} is not valid JSON: {e}", fixture_path.display()));
+
+        let vectors = fixture
+            .get("vectors")
+            .and_then(|v| v.as_array())
+            .expect("fixture must contain a `vectors` array");
+        assert!(!vectors.is_empty(), "fixture must contain at least one vector");
+
+        for vector in vectors {
+            let name = vector
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unnamed>");
+            let secret = vector
+                .get("secret")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `secret`"));
+            let timestamp = vector
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `timestamp`"));
+            let payload = vector
+                .get("payload")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `payload`"));
+            let expected = vector
+                .get("signature")
+                .and_then(|v| v.as_str())
+                .unwrap_or_else(|| panic!("vector {name} missing `signature`"));
+
+            let signed = format!("{timestamp}.{payload}");
+            let actual = sign_payload(secret, signed.as_bytes());
+            assert_eq!(
+                actual, expected,
+                "signature mismatch for vector `{name}` (signed payload: {signed:?})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sign_payload_v2_covers_timestamp() {
+        let body = b"{\"a\":1}";
+        let sig_a = sign_payload_v2("secret", 1_700_000_000, body);
+        let sig_b = sign_payload_v2("secret", 1_700_000_001, body);
+        assert_ne!(sig_a, sig_b);
+        assert_eq!(sig_a.len(), 64);
+    }
+
+    #[test]
+    fn test_sign_payload_v2_matches_manual_hmac() {
+        let body = b"hello";
+        let ts = 1_700_000_000i64;
+        let mut mac = crate::hmac_util::hmac_sha256(b"secret");
+        mac.update(format!("{ts}.", ).as_bytes());
+        mac.update(body);
+        let expected = hex::encode(mac.finalize().into_bytes());
+        assert_eq!(sign_payload_v2("secret", ts, body), expected);
+    }
+
+    #[test]
+    fn test_signature_v2_header_format() {
+        let header = signature_v2_header("secret", 1_700_000_000, b"body");
+        assert!(header.starts_with("t=1700000000,v1="));
+        let hex_part = header.split("v1=").nth(1).unwrap();
+        assert_eq!(hex_part.len(), 64);
+    }
+
+    #[test]
+    fn test_signature_headers_include_delivery_id_and_both_signatures() {
+        let headers = SignatureHeaders::new(Some("secret"), b"body");
+        assert!(!headers.delivery_id.is_empty());
+        assert!(headers.legacy.is_some());
+        assert!(headers.v2.is_some());
+        let pairs = headers.to_pairs();
+        assert!(pairs.iter().any(|(k, _)| k == "X-SorobanPulse-Delivery-Id"));
+        assert!(pairs.iter().any(|(k, _)| k == "X-Signature-256"));
+        assert!(pairs.iter().any(|(k, _)| k == "X-SorobanPulse-Signature"));
+    }
+
+    #[test]
+    fn test_signature_headers_without_secret_only_delivery_id() {
+        let headers = SignatureHeaders::new(None, b"body");
+        assert!(!headers.delivery_id.is_empty());
+        assert!(headers.legacy.is_none());
+        assert!(headers.v2.is_none());
+        assert_eq!(headers.to_pairs().len(), 1);
+    }
+
+    #[test]
+    fn test_delivery_ids_are_unique() {
+        assert_ne!(new_delivery_id(), new_delivery_id());
+    }
+
     #[test]
     fn test_evaluate_priority_no_rule_returns_default() {
         let event = mock_event("C1");
@@ -852,5 +1190,75 @@ mod tests {
             "medium",
         );
         assert_eq!(p, "medium");
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_loopback_without_request() {
+        let err = validate_webhook_url("http://127.0.0.1:5432/hook")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_metadata_ip() {
+        let err = validate_webhook_url("http://169.254.169.254/latest/meta-data/")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_rfc1918() {
+        let err = validate_webhook_url("http://10.0.0.5/hook").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_ipv6_loopback() {
+        let err = validate_webhook_url("http://[::1]:8080/hook")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_decimal_ip_encoding() {
+        // 2130706433 == 127.0.0.1
+        let err = validate_webhook_url("http://2130706433/hook").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_octal_ip_encoding() {
+        // 0177.0.0.1 == 127.0.0.1
+        let err = validate_webhook_url("http://0177.0.0.1/hook").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_localhost_name() {
+        let err = validate_webhook_url("http://localhost:6379/hook")
+            .await
+            .unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn test_validate_webhook_url_rejects_non_http_scheme() {
+        let err = validate_webhook_url("file:///etc/passwd").await.unwrap_err();
+        assert_eq!(err, WEBHOOK_URL_VALIDATION_FAILED);
+    }
+
+    #[test]
+    fn test_private_targets_permitted_public_host() {
+        assert!(private_targets_permitted("https://hooks.example.com/hook"));
+    }
+
+    #[test]
+    fn test_private_targets_permitted_private_host_without_opt_in() {
+        // Ensure the opt-in env var is not set for this test.
+        std::env::remove_var("WEBHOOK_ALLOW_PRIVATE_TARGETS");
+        assert!(!private_targets_permitted("http://10.1.2.3/hook"));
     }
 }

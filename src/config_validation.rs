@@ -95,6 +95,7 @@ pub fn validate(cfg: &Config) -> ConfigValidationReport {
     check_email(&mut report, cfg);
     check_encryption(&mut report, cfg);
     check_performance_thresholds(&mut report, cfg);
+    check_webhook_verifiers(&mut report, cfg);
 
     report
 }
@@ -204,25 +205,55 @@ fn check_pool_sizing(report: &mut ConfigValidationReport, cfg: &Config) {
     }
 }
 
+/// Minimum length (in bytes) for operator-supplied API keys and for the
+/// server-side pepper used to HMAC key digests (issue #1430).
+const MIN_API_KEY_LEN: usize = 32;
+
 fn check_auth(report: &mut ConfigValidationReport, cfg: &Config) {
     use secrecy::ExposeSecret;
 
-    // Warn about short API keys.
-    for key in &cfg.api_keys {
-        if key.expose_secret().len() < 32 {
-            report.add_warning(
-                "API_KEY is shorter than 32 characters — use a cryptographically random key of at least 32 characters",
+    // Issue #1430: short operator-supplied keys are brute-forceable offline
+    // from leaked digests, so reject them in production-like environments and
+    // warn elsewhere.
+    let strict = cfg.environment.is_production_like();
+    let mut check_key = |report: &mut ConfigValidationReport, name: &str, key: &str| {
+        if key.len() < MIN_API_KEY_LEN {
+            let msg = format!(
+                "{name} is shorter than {MIN_API_KEY_LEN} characters — use a cryptographically \
+                 random key of at least {MIN_API_KEY_LEN} characters"
             );
-            break;
+            if strict {
+                report.add_error(msg);
+            } else {
+                report.add_warning(msg);
+            }
         }
+    };
+
+    for key in &cfg.api_keys {
+        check_key(report, "API_KEY", key.expose_secret());
     }
     for key in &cfg.admin_api_keys {
-        if key.expose_secret().len() < 32 {
-            report.add_warning(
-                "ADMIN_API_KEY is shorter than 32 characters — admin keys should be strong",
-            );
-            break;
+        check_key(report, "ADMIN_API_KEY", key.expose_secret());
+    }
+
+    // Issue #1430: key digests are peppered HMACs; without the pepper they
+    // cannot be computed, so require it whenever any key is configured.
+    let any_key_configured =
+        !cfg.api_keys.is_empty() || !cfg.admin_api_keys.is_empty();
+    match cfg.api_key_pepper.as_ref().map(|p| p.expose_secret()) {
+        Some(pepper) if pepper.len() < MIN_API_KEY_LEN => {
+            report.add_error(format!(
+                "API_KEY_PEPPER must be at least {MIN_API_KEY_LEN} bytes — it peppers API key digests"
+            ));
         }
+        None if any_key_configured => {
+            report.add_error(
+                "API_KEY_PEPPER must be set when API_KEY or ADMIN_API_KEY is configured — \
+                 key digests are peppered HMAC-SHA256 values",
+            );
+        }
+        _ => {}
     }
 
     // Production without any auth key is suspicious.
@@ -235,6 +266,7 @@ fn check_auth(report: &mut ConfigValidationReport, cfg: &Config) {
         );
     }
 }
+=======
 
 fn check_webhook(report: &mut ConfigValidationReport, cfg: &Config) {
     if let Some(ref url) = cfg.webhook_url {
@@ -423,6 +455,51 @@ fn check_performance_thresholds(report: &mut ConfigValidationReport, cfg: &Confi
     }
 }
 
+/// Issue #1421 / #1422: inbound bounce/complaint webhook verifiers must be
+/// usable before the service starts.  A provider that is enabled but cannot
+/// verify signatures would accept forged events, so misconfiguration is fatal.
+fn check_webhook_verifiers(report: &mut ConfigValidationReport, cfg: &Config) {
+    // ── SendGrid event webhook (ECDSA-P256-SHA256) ────────────────────────
+    if cfg.sendgrid_webhook_enabled {
+        match cfg.sendgrid_webhook_public_key.as_deref() {
+            None => report.add_error(
+                "SENDGRID_WEBHOOK_ENABLED=true but SENDGRID_WEBHOOK_PUBLIC_KEY is not set — \
+                 SendGrid event signatures cannot be verified; set the base64 DER public key \
+                 from the SendGrid UI or disable the endpoint",
+            ),
+            Some(key) => {
+                if let Err(e) = crate::email_token::validate_sendgrid_public_key(key) {
+                    report.add_error(format!(
+                        "SENDGRID_WEBHOOK_PUBLIC_KEY is invalid: {e} — expected a base64-encoded \
+                         DER SubjectPublicKeyInfo for an ECDSA P-256 key"
+                    ));
+                }
+            }
+        }
+    }
+
+    // ── AWS SNS / SES bounce webhook (RSA PKCS#1 v1.5) ────────────────────
+    if cfg.sns_webhook_enabled {
+        if !crate::email_token::sns_verification_available() {
+            report.add_error(
+                "SNS_WEBHOOK_ENABLED=true but SNS signature verification is unavailable \
+                 (outbound HTTP client could not be initialised) — refusing to start with an \
+                 unauthenticated bounce endpoint; disable the endpoint or fix the outbound client",
+            );
+        }
+        if cfg.sns_timestamp_tolerance_secs == 0 {
+            report.add_error(
+                "SNS_TIMESTAMP_TOLERANCE_SECS=0 disables replay protection for SNS notifications",
+            );
+        } else if cfg.sns_timestamp_tolerance_secs > 24 * 60 * 60 {
+            report.add_warning(format!(
+                "SNS_TIMESTAMP_TOLERANCE_SECS={} is larger than 24 hours — replay protection is weak",
+                cfg.sns_timestamp_tolerance_secs
+            ));
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Config schema documentation generator (Issue #997)
 // ---------------------------------------------------------------------------
@@ -555,6 +632,20 @@ pub fn config_schema() -> Vec<ConfigFieldDoc> {
             default: None,
             required: false,
             category: "auth",
+        },
+        ConfigFieldDoc {
+            env_var: "API_KEY_PEPPER",
+            description: "Server-side pepper (≥32 bytes) used to HMAC-SHA256 API key digests; required when any API key is configured",
+            default: None,
+            required: false,
+            category: "auth",
+        },
+        ConfigFieldDoc {
+            env_var: "TRUSTED_PROXIES",
+            description: "Comma-separated CIDRs of trusted reverse proxies; X-Forwarded-For is only honoured from these peers",
+            default: None,
+            required: false,
+            category: "server",
         },
         // ── Server ───────────────────────────────────────────────────────
         ConfigFieldDoc {
@@ -693,6 +784,35 @@ pub fn config_schema() -> Vec<ConfigFieldDoc> {
             env_var: "WEBHOOK_REQUIRE_HTTPS",
             description: "Reject webhook URLs that use plain HTTP",
             default: Some("false"),
+            required: false,
+            category: "webhook",
+        },
+        // ── Inbound bounce webhooks (Issues #1421, #1422) ────────────────
+        ConfigFieldDoc {
+            env_var: "SENDGRID_WEBHOOK_ENABLED",
+            description: "Enable the SendGrid event webhook endpoint. Requires SENDGRID_WEBHOOK_PUBLIC_KEY",
+            default: Some("false"),
+            required: false,
+            category: "webhook",
+        },
+        ConfigFieldDoc {
+            env_var: "SENDGRID_WEBHOOK_PUBLIC_KEY",
+            description: "Base64-encoded DER ECDSA P-256 public key used to verify SendGrid event signatures (ECDSA-P256-SHA256 over timestamp || body)",
+            default: None,
+            required: false,
+            category: "webhook",
+        },
+        ConfigFieldDoc {
+            env_var: "SNS_WEBHOOK_ENABLED",
+            description: "Enable the AWS SNS/SES bounce and complaint webhook endpoint. Requires outbound HTTP access to fetch SNS signing certificates",
+            default: Some("false"),
+            required: false,
+            category: "webhook",
+        },
+        ConfigFieldDoc {
+            env_var: "SNS_TIMESTAMP_TOLERANCE_SECS",
+            description: "Maximum age in seconds of an SNS notification before it is rejected as a replay",
+            default: Some("3600"),
             required: false,
             category: "webhook",
         },
@@ -860,5 +980,57 @@ mod tests {
     fn report_log_does_not_panic_on_empty_report() {
         let report = ConfigValidationReport::default();
         report.log(); // should not panic
+    }
+
+    #[test]
+    fn short_api_key_is_a_warning_in_development() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.api_keys = vec![SecretString::from("short".to_string())];
+        cfg.api_key_pepper = Some(SecretString::from("p".repeat(32)));
+        let report = validate(&cfg);
+        assert!(report.is_ok(), "short key should only warn outside production");
+        assert!(report.warnings.iter().any(|w| w.contains("API_KEY")));
+    }
+
+    #[test]
+    fn short_api_key_is_an_error_in_production() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.environment = crate::config::Environment::Production;
+        cfg.api_keys = vec![SecretString::from("short".to_string())];
+        cfg.api_key_pepper = Some(SecretString::from("p".repeat(32)));
+        let report = validate(&cfg);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.contains("API_KEY")));
+    }
+
+    #[test]
+    fn missing_pepper_with_api_key_is_an_error() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.api_keys = vec![SecretString::from("k".repeat(32))];
+        cfg.api_key_pepper = None;
+        let report = validate(&cfg);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.contains("API_KEY_PEPPER")));
+    }
+
+    #[test]
+    fn short_pepper_is_an_error() {
+        use secrecy::SecretString;
+        let mut cfg = base_config();
+        cfg.api_keys = vec![SecretString::from("k".repeat(32))];
+        cfg.api_key_pepper = Some(SecretString::from("p".repeat(8)));
+        let report = validate(&cfg);
+        assert!(!report.is_ok());
+        assert!(report.errors.iter().any(|e| e.contains("API_KEY_PEPPER")));
+    }
+
+    #[test]
+    fn config_schema_documents_pepper_and_trusted_proxies() {
+        let schema = config_schema();
+        assert!(schema.iter().any(|f| f.env_var == "API_KEY_PEPPER"));
+        assert!(schema.iter().any(|f| f.env_var == "TRUSTED_PROXIES"));
     }
 }

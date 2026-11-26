@@ -66,8 +66,7 @@ fuzz_target!(|data: &[u8]| {
     // The normalizer walks event_data using JSON pointers; ensure that does
     // not panic on deeply-nested or self-referential-looking input.
     if let Some(obj) = value.as_object() {
-        for (key, inner_value) in obj.iter().take(4) {
-            let pointer = format!("/{key}");
+        for (_key, inner_value) in obj.iter().take(4) {
             let _ = apply_transform(&Transform::HexToDecimal, &serde_json::json!({}), inner_value);
         }
     }

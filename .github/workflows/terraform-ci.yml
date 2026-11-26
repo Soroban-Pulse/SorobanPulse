@@ -20,6 +20,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  security-events: write
 
 env:
   TF_IN_AUTOMATION: 'true'
@@ -54,6 +55,48 @@ jobs:
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: TFLint Init
+        id: tflint_init
+        run: tflint --init
+        continue-on-error: true
+
+      - name: TFLint (SARIF)
+        id: tflint
+        run: |
+          tflint --recursive --format sarif > tflint.sarif
+        continue-on-error: true
+
+      - name: Upload TFLint SARIF
+        if: always() && hashFiles('terraform/tflint.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: terraform/tflint.sarif
+          category: tflint
+
+      - name: Trivy Config Scan (SARIF)
+        id: trivy
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: config
+          scan-ref: terraform
+          format: sarif
+          output: terraform/trivy-config.sarif
+          severity: CRITICAL,HIGH,MEDIUM
+          exit-code: '0'
+        continue-on-error: true
+
+      - name: Upload Trivy SARIF
+        if: always() && hashFiles('terraform/trivy-config.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: terraform/trivy-config.sarif
+          category: trivy-config
 
       - name: Terraform Format Check
         id: fmt
@@ -172,4 +215,10 @@ jobs:
         if: steps.fmt.outcome != 'success' || steps.init.outcome != 'success' || steps.validate.outcome != 'success' || steps.plan.outcome != 'success'
         run: |
           echo "One or more Terraform steps failed. See the plan comment for details."
+          exit 1
+
+      - name: Fail on Security Scan Errors
+        if: steps.tflint_init.outcome != 'success' || steps.tflint.outcome != 'success' || steps.trivy.outcome != 'success'
+        run: |
+          echo "Terraform lint or security scanning failed. See the code scanning results for details."
           exit 1

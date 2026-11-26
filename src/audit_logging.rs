@@ -13,6 +13,8 @@ use sqlx::PgPool;
 use std::net::IpAddr;
 use tracing::{debug, error};
 
+use crate::client_ip::ClientIp;
+
 /// Severity levels for audit events
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AuditSeverity {
@@ -149,6 +151,17 @@ impl AuditLogEntry {
     /// Set the IP address
     pub fn with_ip_address(mut self, ip: IpAddr) -> Self {
         self.ip_address = Some(ip);
+        self
+    }
+
+    /// Set the IP address from a verified [`ClientIp`] (Issue #1432).
+    ///
+    /// The IP recorded here is the one resolved by the centralised
+    /// `ClientIp` extractor, which only honours forwarding headers when the
+    /// TCP peer is a trusted proxy. Callers must never parse
+    /// `X-Forwarded-For`/`Forwarded` themselves.
+    pub fn with_client_ip(mut self, client_ip: &ClientIp) -> Self {
+        self.ip_address = Some(client_ip.ip());
         self
     }
 
@@ -423,5 +436,14 @@ mod tests {
             .with_api_key("my_secret_key");
 
         assert_eq!(entry1.api_key_hash, entry2.api_key_hash);
+    }
+
+    #[test]
+    fn test_with_client_ip_records_resolved_ip() {
+        let client_ip = ClientIp::from_peer("203.0.113.7".parse().unwrap());
+        let entry = AuditLogEntry::new(AuditEventType::Delete, "DELETE_SCHEMA", "schema")
+            .with_client_ip(&client_ip);
+
+        assert_eq!(entry.ip_address, Some("203.0.113.7".parse().unwrap()));
     }
 }

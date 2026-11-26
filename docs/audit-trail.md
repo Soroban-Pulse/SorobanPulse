@@ -141,9 +141,82 @@ let rows = export_audit_logs(&pool, &params).await?;
 record_export(&pool, "compliance-officer", "json", rows.len() as i64, None).await?;
 ```
 
+## Client IP Attribution
+
+Audit records store the originating client IP. That value is **never** read directly from request headers by handlers. Instead, every handler that writes an audit record (including the anonymize/delete handler) uses the central `ClientIp` extractor, which combines the TCP peer address from axum's `ConnectInfo` with the proxy logic below.
+
+### How the client IP is resolved
+
+1. The TCP peer address is taken from `ConnectInfo<SocketAddr>`.
+2. If the peer is **not** in `TRUSTED_PROXIES`, any `X-Forwarded-For` or `Forwarded` header is ignored and the peer address is used. This prevents clients from spoofing their IP in audit trails, per-IP rate limits, SSE per-IP caps, and IP access control.
+3. If the peer **is** a trusted proxy, the forwarding chain is parsed and the **right-most untrusted hop** is selected — i.e. the last address that is not itself a trusted proxy. Left-most values are attacker-controlled and are never trusted.
+
+### Configuration
+
+`TRUSTED_PROXIES` is a comma-separated list of CIDRs (IPv4 and/or IPv6). Leave it empty when the service is exposed directly to clients.
+
+```bash
+# No proxies in front of the service (default): headers are ignored
+TRUSTED_PROXIES=""
+
+# Single reverse proxy on the loopback interface
+TRUSTED_PROXIES="127.0.0.1/32,::1/128"
+
+# Private network range used by an internal load balancer
+TRUSTED_PROXIES="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+```
+
+Only list addresses that you control and that always append to the forwarding chain. Never add `0.0.0.0/0` or `::/0`.
+
+#### nginx ingress
+
+nginx ingress appends the peer address to `X-Forwarded-For`. Trust the ingress controller pod/network range:
+
+```bash
+TRUSTED_PROXIES="10.244.0.0/16"
+```
+
+```nginx
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Real-IP $remote_addr;
+```
+
+#### Cloudflare
+
+Cloudflare edge IPs must be trusted, and the origin should only be reachable through Cloudflare (use `authenticated origin pulls` or firewall rules). Keep the list in sync with <https://www.cloudflare.com/ips/>:
+
+```bash
+TRUSTED_PROXIES="173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32"
+```
+
+#### AWS Application Load Balancer
+
+ALB appends the client address to `X-Forwarded-For` and sets `X-Forwarded-Proto`. Trust the ALB subnet CIDRs:
+
+```bash
+TRUSTED_PROXIES="10.0.1.0/24,10.0.2.0/24"
+```
+
+Ensure the security group only allows traffic from the ALB so clients cannot reach the service directly and bypass the trusted-proxy check.
+
+### Tests
+
+`src/client_ip.rs` contains tests covering:
+
+- Spoofed `X-Forwarded-For` from an untrusted peer is ignored (peer address is used).
+- Forwarded chain from a trusted proxy resolves to the right-most untrusted hop.
+- Malformed or empty headers fall back to the peer address.
+
+Run them with:
+
+```bash
+cargo test client_ip
+```
+
 ## API Access
 
 ### Query Audit Logs
+=======
 
 ```
 GET /v1/admin/audit-logs

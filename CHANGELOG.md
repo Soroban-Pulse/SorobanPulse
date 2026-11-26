@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Structured JSON logging support
 
 ### Changed
+- **Breaking:** `ALLOWED_ORIGINS` no longer defaults to `*`. When unset, CORS is same-origin only (no `Access-Control-Allow-Origin` header is sent for cross-origin requests) in production. Wildcard CORS is only enabled automatically when `ENVIRONMENT=development`, or explicitly via `ALLOW_WILDCARD_CORS=true`; a startup warning is logged whenever wildcard CORS is active, and `*` is refused when `REQUIRE_AUTH=true` unless `ALLOW_WILDCARD_CORS=true` is set (#1428)
 - Split `src/handlers.rs` into `src/handlers/{mod,events,health}.rs`; event and health handlers now live in their own modules and are re-exported unchanged (#1239)
 - Removed `--skip handlers::tests` flag from CI test job to run all tests including handler integration tests
 
@@ -54,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - API key authentication support via `Authorization: Bearer` or `X-Api-Key` headers (optional `API_KEY` environment variable)
+- Hardened SQL query construction to prevent SQL injection
+- Hardened outbound HTTP requests to prevent SSRF
+- CORS no longer allows any origin by default; see the `ALLOWED_ORIGINS` change above (#1428)
 
 ## [0.1.0] - 2026-04-21
 

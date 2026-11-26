@@ -13,10 +13,11 @@ cluster.
 
 ## Why GitOps
 
-SorobanPulse already has two ways to deploy: raw manifests in `k8s/` and the
-Helm chart in `helm/soroban-pulse/`. Both assume a human (or a CI job with
-cluster credentials) runs `kubectl` / `helm` against the target cluster.
-That means:
+SorobanPulse deploys exclusively through the Helm chart in
+`helm/soroban-pulse/` — it is the single source of truth for Kubernetes
+manifests (see [`docs/deployment.md`](deployment.md)). Without GitOps, that
+chart is applied by a human (or a CI job with cluster credentials) running
+`helm upgrade` against the target cluster. That means:
 
 - The cluster's actual state and the repository's declared state can drift
   silently — nothing notices if someone runs an imperative `kubectl edit`.
@@ -79,7 +80,7 @@ kubectl -n argocd port-forward svc/argocd-server 8080:443
 ```
 
 A production install should front `argocd-server` with the same ingress
-pattern already used for the app itself (see `k8s/ingress.yaml` /
+pattern already used for the app itself (see
 `helm/soroban-pulse/templates/ingress.yaml`) rather than leaving it on
 port-forward.
 
@@ -144,8 +145,15 @@ Example manifests live under [`gitops/argocd/`](../gitops/argocd/):
 | File | Purpose |
 |---|---|
 | [`project.yaml`](../gitops/argocd/project.yaml) | `AppProject` scoping allowed source repos, destination namespaces, and resource kinds |
-| [`application-production.yaml`](../gitops/argocd/application-production.yaml) | `Application` deploying `helm/soroban-pulse` (branch `main`) into `soroban-pulse-production` |
-| [`application-staging.yaml`](../gitops/argocd/application-staging.yaml) | `Application` deploying the same chart into `soroban-pulse-staging` |
+| [`application-production.yaml`](../gitops/argocd/application-production.yaml) | `Application` deploying `helm/soroban-pulse` (branch `main`, values `values.yaml` + `values-production.yaml`) into `soroban-pulse-production` |
+| [`application-staging.yaml`](../gitops/argocd/application-staging.yaml) | `Application` deploying the same chart (values `values.yaml` + `values-staging.yaml`) into `soroban-pulse-staging` |
+
+Both Applications deploy the Helm chart directly — there are no raw
+manifests under `k8s/` for Argo CD to point at, and no second set of
+Kubernetes YAML to keep in sync with the chart. Environment differences
+(Istio vs. Linkerd service-mesh settings, observability add-ons, replica
+counts, secrets backend) are expressed as per-environment values files
+layered on top of the chart defaults, not as separate manifest trees.
 
 Apply the project before the applications:
 
@@ -269,15 +277,13 @@ argocd app sync soroban-pulse-staging
 
 ## 6. Secrets management integration
 
-`k8s/secret.yaml` and `helm/soroban-pulse/templates/secret.yaml` currently
-render a plain `Secret` populated from `stringData` — either hardcoded
-placeholder values (`k8s/secret.yaml`, meant as a template for manual
-`kubectl apply`, not real credentials) or from `values.yaml`'s `secrets:`
-block (the Helm chart). Both are documented in
-[`helm/soroban-pulse/README.md`](../helm/soroban-pulse/README.md) as
-development/staging-only, because a Kubernetes `Secret` is base64-encoded,
-not encrypted, and `values.yaml` or a raw `Secret` manifest sitting in Git
-makes those credentials readable to anyone with read access to the repo.
+`helm/soroban-pulse/templates/secret.yaml` currently renders a plain
+`Secret` populated from `values.yaml`'s `secrets:` block. This is
+documented in [`helm/soroban-pulse/README.md`](../helm/soroban-pulse/README.md)
+as development/staging-only, because a Kubernetes `Secret` is
+base64-encoded, not encrypted, and a `values.yaml` (or values overlay)
+sitting in Git makes those credentials readable to anyone with read access
+to the repo.
 
 That's incompatible with GitOps as described in this document: if
 `gitops/argocd/application-production.yaml` syncs `helm/soroban-pulse`
@@ -464,3 +470,4 @@ whoever picks up running a real ArgoCD instance against this repo.
 | PR-based deployment workflow | Existing `helm-lint` CI job covers chart validation today; `gitops/` manifest validation and values-overlay linting are a documented gap, not yet implemented |
 | Audit logging | Git history + `argocd app history` need no new work; forwarding to `docs/log-aggregation.md`/`docs/tracing.md` is a documented follow-up |
 | `values-staging.yaml` / `values-production.yaml` | **Do not exist yet** — flagged as a prerequisite in §3, referenced but not fabricated by the example manifests |
+| Raw `k8s/` manifests | Removed as a deployment path — the Helm chart is the only hand-maintained source of Kubernetes manifests; raw YAML can be produced on demand with `helm template` (see [`docs/deployment.md`](deployment.md)) |

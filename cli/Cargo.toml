@@ -2,6 +2,7 @@
 name = "spulse"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
 description = "Command-line tool for querying and analyzing Soroban Pulse events locally"
 license = "MIT"
 repository = "https://github.com/soroban-pulse/soroban-pulse"
@@ -27,6 +28,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# Stellar XDR (shared version from workspace)
+stellar-xdr = { workspace = true }
 
 # Output formats
 csv = "1"

@@ -33,6 +33,32 @@ rights. Add yourself here via the process in [GOVERNANCE.md](GOVERNANCE.md).
 |---------------|-------|
 | _none yet_ | |
 
+## Automated Issue Rotation
+
+The scheduled `fuzz.yml` and `soak-testnet.yml` workflows open issues labelled
+`automated` (plus `fuzzing` or `soak-test`), and report build failures with the
+`build-failure` label. These issues are triaged on a weekly rotation so that
+real crashes — input-validation panics are a DoS vector — are not buried among
+noise.
+
+- **Who is on rotation:** one member of `@Soroban-Pulse/security` (fuzz-crash
+  issues) and one member of `@Soroban-Pulse/infra` (soak-testnet failures),
+  rotating weekly in the order listed in the organization's teams page.
+- **Cadence:** the rotation hand-off happens every Monday; the outgoing owner
+  must leave a comment on each open `automated` issue summarising its state.
+- **Expectations for each issue:**
+  1. Reproduce the crash or failure at the commit named in the issue.
+  2. Add the minimised crashing input to the regression corpus
+     (`fuzz/corpus/<target>/`) so the target no longer regresses.
+  3. Fix the underlying bug, or close the issue as a duplicate (linking the
+     original) or as a build failure (re-labelling it `build-failure`).
+- The bots comment on an existing open issue for the same target or test
+  instead of opening a new one; if you see duplicates anyway, close them and
+  link the canonical issue.
+
+If ownership of this rotation changes, update
+[.github/CODEOWNERS](.github/CODEOWNERS) in the same pull request.
+
 ## Emeritus
 
 We thank the following people for their past service as maintainers:

@@ -231,6 +231,62 @@ are parked in the dead-letter queue. Once the new channel is delivering:
 
 ---
 
+## Webhook Signature Verification Failures
+
+Inbound email provider webhooks are authenticated before they are allowed to
+change suppression state or delivery analytics. When verification fails the
+request is rejected with `401`/`403` and **no** suppression or delivery rows are
+written. Use this section when you see a spike in rejected webhooks.
+
+### SNS / SES bounce and complaint notifications
+
+`verify_sns_signature` validates the SNS envelope before processing:
+
+- `SigningCertURL` must be HTTPS, its host must match
+  `^sns\.[a-z0-9-]+\.amazonaws\.com(\.cn)?$` and its path must end in `.pem`.
+- The certificate is fetched through the SSRF-safe outbound client and cached by
+  URL.
+- The canonical string-to-sign (different for `Notification` vs
+  `SubscriptionConfirmation`) is verified with RSA PKCS#1 v1.5 for
+  `SignatureVersion` 1 (SHA1) and 2 (SHA256).
+- Messages whose `Timestamp` is older than the configured window (default
+  **1 hour**) are rejected as replays.
+
+Common causes and actions:
+
+| Symptom | Likely cause | Action |
+| --- | --- | --- |
+| `SigningCertURL` rejected | Non-AWS host or non-`.pem` path | Confirm the request really comes from AWS SNS; treat as an attack otherwise |
+| Certificate fetch failure | Egress blocked to `sns.*.amazonaws.com` | Allow egress to the SNS certificate hosts, or pre-warm the cache |
+| Signature mismatch | Tampered body or wrong cert | Do not relax verification; capture the raw request and escalate |
+| Timestamp rejected | Clock skew or replay | Check node clock (`timedatectl`); genuine retries older than the window must be re-sent by SNS |
+
+### SendGrid event webhooks
+
+`verify_sendgrid_signature` verifies
+`ECDSA-P256-SHA256(timestamp || raw_body)` using the public key from
+`SENDGRID_WEBHOOK_PUBLIC_KEY` (base64 DER, as shown in the SendGrid UI) and
+enforces a timestamp tolerance window to stop replays.
+
+- **Key missing while SendGrid is enabled**: the service fails closed. The
+  endpoint rejects all events and a startup error is logged. Set
+  `SENDGRID_WEBHOOK_PUBLIC_KEY` and restart.
+- **Signature mismatch**: the body was tampered with or the key was rotated in
+  SendGrid without updating config. Re-copy the key from the SendGrid UI.
+- **Stale timestamp**: check clock skew; events outside the tolerance window are
+  rejected as replays.
+
+### Fail-closed startup behavior
+
+If a webhook provider is configured but signature verification cannot be
+performed (for example SNS verification is unavailable, or SendGrid is enabled
+without a public key), the service **refuses to start** or disables the affected
+endpoint rather than accepting unauthenticated requests. Check the startup logs
+for `signature verification` errors and fix the configuration before rolling
+out.
+
+---
+
 ## Common Remediation Commands
 
 ### Flush stuck notifications
@@ -247,4 +303,10 @@ kubectl get pods -l app=soroban-pulse -o jsonpath='{.items[*].status.conditions[
 ### Restart notification workers
 ```bash
 kubectl rollout restart deployment/soroban-pulse-notifications
+```
+
+### Inspect rejected webhooks
+```bash
+# Count signature verification rejections in the last 15 minutes
+curl -s http://localhost:3000/metrics | grep -E 'webhook_(signature|verification)_(failure|rejected)'
 ```

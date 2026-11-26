@@ -10,8 +10,31 @@ Architecture Decision Records (ADRs) capture decisions that affect SorobanPulse�
 | [0002 — Multi-replica indexing](0002-multi-replica-indexing.md) | Single-writer indexing with monitored, optionally cross-region read replicas | Accepted |
 | [0003 — Webhook retry strategy](0003-webhook-retry-strategy.md) | Layered retry policy, per-endpoint backoff, and circuit breaking for webhook delivery | Accepted |
 | [0004 — Event compression](0004-event-compression.md) | Optional application-level gzip compression for stored event data | Accepted |
+| [0005 — Aggregation merge](0005-aggregation-merge.md) | Merge aggregation into the indexing pipeline (converted from `aggregation-merge-plan.md`) | Proposed |
+| [0006 — Cargo workspace](0006-cargo-workspace.md) | Single Cargo workspace with shared dependency and lint configuration (converted from `cargo-workspace-plan.md`) | Proposed |
+| [0007 — Connection pool consolidation](0007-connection-pool-consolidation.md) | Consolidate database connection pooling behind a single shared pool (converted from `connection-pool-consolidation.md`) | Proposed |
+| [0008 — Web framework](0008-web-framework.md) | Standardize on axum for HTTP services; actix-web is legacy and not to be extended | Accepted |
+| [0009 — Canonical frontend](0009-canonical-frontend.md) | Designate a single canonical frontend and classify the other two as legacy or experimental | Accepted |
+| [0010 — SDK packaging](0010-sdk-packaging.md) | Consolidate the two JavaScript SDKs into one published package | Accepted |
+| [0011 — Tenancy model](0011-tenancy-model.md) | Adopt a single canonical tenancy model; the alternate model is deprecated | Accepted |
+| [0012 — Scripting sandbox](0012-scripting-sandbox.md) | Use sandboxed Lua for user-defined transforms | Accepted |
+| [0013 — Event storage and partitioning](0013-event-storage-partitioning.md) | Partition event storage by ledger range with retention-aligned pruning | Accepted |
+| [0014 — Telemetry stack](0014-telemetry-stack.md) | OpenTelemetry-based metrics, tracing, and logging pipeline | Accepted |
+| [0015 — Feature-flag strategy](0015-feature-flag-strategy.md) | Compile-time Cargo features for build variants; runtime flags for rollout only | Accepted |
 
 New decisions must be added to this table and linked from the relevant code or documentation. Use the next available four-digit number; never renumber an existing ADR.
+
+## Converted planning documents
+
+The following planning documents were converted into ADRs and removed from `docs/` so that each decision carries an explicit status:
+
+| Former document | ADR | Status |
+|---|---|---|
+| `docs/aggregation-merge-plan.md` | [0005 — Aggregation merge](0005-aggregation-merge.md) | Proposed |
+| `docs/cargo-workspace-plan.md` | [0006 — Cargo workspace](0006-cargo-workspace.md) | Proposed |
+| `docs/connection-pool-consolidation.md` | [0007 — Connection pool consolidation](0007-connection-pool-consolidation.md) | Proposed |
+
+Do not add new `*-plan.md` documents under `docs/`; record the decision as an ADR instead.
 
 Regenerate a status overview of all ADRs (title, status, date) at any time with `scripts/adr-summary.sh`.
 

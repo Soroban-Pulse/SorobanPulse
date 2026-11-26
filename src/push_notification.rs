@@ -16,7 +16,6 @@
 //! - `PUSH_MAX_RETRIES` — Maximum delivery retries (default: 5).
 //! - `PUSH_BASE_DELAY_SECS` — Base delay for exponential backoff (default: 2).
 
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
@@ -25,6 +24,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::metrics;
+use crate::net::outbound::OutboundClient;
 
 /// Device/platform type for a push token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +73,7 @@ impl FcmConfig {
 /// Returns `true` on success, `false` for an invalid/expired token (caller
 /// should clean it up), and an `Err` for transient failures.
 pub async fn fcm_send(
-    client: &Client,
+    client: &OutboundClient,
     config: &FcmConfig,
     token: &str,
     title: &str,
@@ -93,12 +93,15 @@ pub async fn fcm_send(
     }
 
     let resp = client
-        .post("https://fcm.googleapis.com/fcm/send")
-        .header("Authorization", format!("key={}", config.server_key))
-        .header("Content-Type", "application/json")
-        .json(&payload)
-        .timeout(Duration::from_secs(10))
-        .send()
+        .post_json(
+            "https://fcm.googleapis.com/fcm/send",
+            &[
+                ("Authorization", format!("key={}", config.server_key)),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &payload,
+            Duration::from_secs(10),
+        )
         .await
         .map_err(|e| format!("FCM request failed: {e}"))?;
 
@@ -196,7 +199,7 @@ pub fn build_apns_jwt(config: &ApnsConfig) -> Result<String, String> {
 /// Send a push notification via APNs.
 /// Returns `true` on success, `false` for an invalid/expired device token.
 pub async fn apns_send(
-    client: &Client,
+    client: &OutboundClient,
     config: &ApnsConfig,
     device_token: &str,
     title: &str,
@@ -216,13 +219,16 @@ pub async fn apns_send(
     let url = format!("{}/3/device/{device_token}", config.endpoint());
 
     let resp = client
-        .post(&url)
-        .header("authorization", format!("bearer {jwt}"))
-        .header("apns-topic", &config.bundle_id)
-        .header("apns-push-type", "alert")
-        .json(&payload)
-        .timeout(Duration::from_secs(15))
-        .send()
+        .post_json(
+            &url,
+            &[
+                ("authorization", format!("bearer {jwt}")),
+                ("apns-topic", config.bundle_id.clone()),
+                ("apns-push-type", "alert".to_string()),
+            ],
+            &payload,
+            Duration::from_secs(15),
+        )
         .await
         .map_err(|e| format!("APNs request failed: {e}"))?;
 
@@ -333,7 +339,7 @@ pub fn build_vapid_auth_header(config: &VapidConfig, endpoint: &str) -> Result<S
 /// Returns `true` on success, `false` for an expired/invalid subscription
 /// (HTTP 404 or 410), and `Err` for transient failures.
 pub async fn web_push_send(
-    client: &Client,
+    client: &OutboundClient,
     config: &VapidConfig,
     subscription: &WebPushSubscription,
     title: &str,
@@ -347,16 +353,18 @@ pub async fn web_push_send(
         "body": body,
         "data": data,
     });
-    let payload_bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
 
     let resp = client
-        .post(&subscription.endpoint)
-        .header("Authorization", &auth_header)
-        .header("Content-Type", "application/json")
-        .header("TTL", "86400")
-        .body(payload_bytes)
-        .timeout(Duration::from_secs(15))
-        .send()
+        .post_json(
+            &subscription.endpoint,
+            &[
+                ("Authorization", auth_header),
+                ("Content-Type", "application/json".to_string()),
+                ("TTL", "86400".to_string()),
+            ],
+            &payload,
+            Duration::from_secs(15),
+        )
         .await
         .map_err(|e| format!("Web Push request failed: {e}"))?;
 
@@ -626,7 +634,7 @@ impl PushWorkerConfig {
 /// full [`WebPushSubscription`], not a bare token, so it isn't represented
 /// by this adapter — see docs/notification-architecture.md).
 pub struct PushChannelAdapter {
-    pub client: Client,
+    pub client: OutboundClient,
     pub config: std::sync::Arc<PushWorkerConfig>,
     pub device_type: DeviceType,
 }
@@ -705,10 +713,7 @@ pub async fn run_push_delivery_worker(pool: sqlx::PgPool) {
         return;
     }
 
-    let client = match crate::net::outbound::build_http_client(
-        Client::builder().timeout(Duration::from_secs(15)),
-        "push",
-    ) {
+    let client = match OutboundClient::new("push", Duration::from_secs(15)) {
         Ok(client) => client,
         Err(e) => {
             error!(error = %e, "Push worker disabled");
@@ -1071,6 +1076,33 @@ mod tests {
         // Should be None when FCM_SERVER_KEY is unset.
         std::env::remove_var("FCM_SERVER_KEY");
         assert!(FcmConfig::from_env().is_none());
+    }
+
+    // ── Outbound SSRF guard ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn web_push_send_rejects_private_ip_endpoint() {
+        let client = OutboundClient::new("push-test", Duration::from_secs(5))
+            .expect("outbound client should build");
+        let config = VapidConfig {
+            public_key: "test-pub".to_string(),
+            private_key: "test-priv".to_string(),
+            subject: "mailto:test@example.com".to_string(),
+        };
+        let sub = WebPushSubscription {
+            endpoint: "https://127.0.0.1/push".to_string(),
+            keys: WebPushKeys {
+                p256dh: "key".to_string(),
+                auth: "auth".to_string(),
+            },
+        };
+        let result = web_push_send(&client, &config, &sub, "t", "b", None).await;
+        assert!(result.is_err(), "private-IP target must be rejected");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("Web Push request failed"),
+            "unexpected error: {msg}"
+        );
     }
 
     // ── PushWorkerConfig ────────────────────────────────────────────────

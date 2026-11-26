@@ -1,39 +1,111 @@
+# Single compose file for all local and CI scenarios.
+#
+# Profiles:
+#   core          - postgres (db) + api (app)
+#   observability - prometheus, grafana, jaeger, loki, promtail
+#   e2e           - db, rpc-stub, app, seed, seed-bin, webhook-sink, web
+#   conformance   - db, rpc-stub, app, webhook-sink
+#
+# Usage (prefer the Make targets):
+#   make up               # core
+#   make up-observability # core + observability
+#   make e2e              # e2e
+#   make conformance      # conformance
+#   make down             # stop everything
+#
+# Or directly:
+#   docker compose --profile core up -d --wait
+#   docker compose --profile conformance up -d --wait
+#   docker compose --profile core --profile observability up -d --wait
+
+x-postgres-common: &postgres-common
+  image: postgres:16-alpine
+  environment:
+    POSTGRES_USER: ${POSTGRES_USER:-soroban}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-soroban}
+    POSTGRES_DB: ${POSTGRES_DB:-soroban_pulse}
+  healthcheck:
+    test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-soroban} -d ${POSTGRES_DB:-soroban_pulse}"]
+    interval: 5s
+    timeout: 5s
+    retries: 10
+
+x-app-common: &app-common
+  build: .
+  environment:
+    STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
+    START_LEDGER: ${START_LEDGER:-0}
+    PORT: "3000"
+    RUST_LOG: ${RUST_LOG:-info}
+  ports:
+    - "3000:3000"
+  healthcheck:
+    test: ["CMD-SHELL", "curl -f http://localhost:3000/healthz/ready || exit 1"]
+    interval: 5s
+    timeout: 5s
+    retries: 12
+    start_period: 30s
+
+x-webhook-sink-common: &webhook-sink-common
+  image: python:3.12-alpine
+  command:
+    - "python"
+    - "-c"
+    - |
+      import http.server, json, sys
+      class H(http.server.BaseHTTPRequestHandler):
+          def do_POST(self):
+              length = int(self.headers.get('Content-Length', 0))
+              body = self.rfile.read(length)
+              sys.stdout.write(json.dumps({
+                  'path': self.path,
+                  'headers': dict(self.headers),
+                  'body': body.decode('utf-8', 'replace'),
+              }) + "\n")
+              sys.stdout.flush()
+              self.send_response(200)
+              self.end_headers()
+              self.wfile.write(b'ok')
+          def do_GET(self):
+              self.send_response(200)
+              self.end_headers()
+              self.wfile.write(b'ok')
+          def log_message(self, *args):
+              pass
+      http.server.HTTPServer(('0.0.0.0', 9002), H).serve_forever()
+  ports:
+    - "9002:9002"
+  healthcheck:
+    test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:9002/healthz')\" || exit 1"]
+    interval: 5s
+    timeout: 5s
+    retries: 5
+    start_period: 5s
+
 services:
+  # ---------------------------------------------------------------------------
+  # core
+  # ---------------------------------------------------------------------------
   db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-soroban}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-soroban}
-      POSTGRES_DB: ${POSTGRES_DB:-soroban_pulse}
+    <<: *postgres-common
+    profiles: ["core", "e2e", "conformance"]
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-soroban}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
 
   app:
-    build: .
+    <<: *app-common
+    profiles: ["core", "e2e", "conformance"]
     depends_on:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgres://soroban:soroban@db:5432/soroban_pulse}
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:-soroban}@db:5432/${POSTGRES_DB:-soroban_pulse}}
       STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
       START_LEDGER: ${START_LEDGER:-0}
-      PORT: ${PORT:-3000}
+      PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info}
-    ports:
-      - "3000:3000"
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/healthz/ready || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   # Conformance-only app instance: same image as `app` but pointed at the
   # seeded conformance database and the webhook sink.
@@ -45,13 +117,13 @@ services:
       webhook-sink:
         condition: service_healthy
     environment:
-      DATABASE_URL: postgres://soroban:soroban@conformance-db:5432/soroban_pulse
+      DATABASE_URL: postgres://soroban:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@conformance-db:5432/soroban_pulse
       STELLAR_RPC_URL: ${STELLAR_RPC_URL:-https://soroban-testnet.stellar.org}
       START_LEDGER: ${START_LEDGER:-0}
       PORT: "3000"
       RUST_LOG: ${RUST_LOG:-info}
       WEBHOOK_URL: http://webhook-sink:9002/hooks
-      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-conformance-secret}
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?set WEBHOOK_SECRET in .env}
     ports:
       - "3000:3000"
     healthcheck:
@@ -66,10 +138,10 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: soroban
-      POSTGRES_PASSWORD: soroban
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: soroban_pulse
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"
     volumes:
       - conformance_pgdata:/var/lib/postgresql/data
       - ./sdk/conformance/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
@@ -79,14 +151,18 @@ services:
       timeout: 5s
       retries: 10
 
+  # ---------------------------------------------------------------------------
+  # observability
+  # ---------------------------------------------------------------------------
   prometheus:
     image: prom/prometheus:v2.52.0
+    profiles: ["observability"]
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
       - "--web.enable-lifecycle"
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./docs/alerts.yml:/etc/prometheus/alerts.yml:ro
@@ -97,12 +173,13 @@ services:
 
   grafana:
     image: grafana/grafana:11.1.0
+    profiles: ["observability"]
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
       GF_USERS_ALLOW_SIGN_UP: "false"
     ports:
-      - "3001:3000"
+      - "127.0.0.1:3001:3000"
     volumes:
       - grafanadata:/var/lib/grafana
       - ./docs/grafana/provisioning:/etc/grafana/provisioning:ro
@@ -110,11 +187,41 @@ services:
     depends_on:
       - prometheus
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  loki:
+    image: grafana/loki:3.0.0
+    profiles: ["observability"]
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - lokidata:/loki
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    profiles: ["observability"]
+    command: ["-config.file=/etc/promtail/config.yml"]
+    volumes:
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    depends_on:
+      - loki
+
   redis:
     image: redis:7-alpine
+    profiles: ["observability"]
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -123,9 +230,12 @@ services:
       timeout: 3s
       retries: 5
 
-  # Webhook sink used by the "verify webhook signature" conformance scenario.
-  webhook-sink:
+  # ---------------------------------------------------------------------------
+  # e2e
+  # ---------------------------------------------------------------------------
+  rpc-stub:
     image: python:3.12-alpine
+    profiles: ["e2e", "conformance"]
     command:
       - "python"
       - "-c"
@@ -137,41 +247,71 @@ services:
                 body = self.rfile.read(length)
                 sys.stdout.write(json.dumps({
                     'path': self.path,
-                    'headers': dict(self.headers),
                     'body': body.decode('utf-8', 'replace'),
                 }) + "\n")
                 sys.stdout.flush()
                 self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
                 self.end_headers()
-                self.wfile.write(b'ok')
+                self.wfile.write(b'{"jsonrpc":"2.0","id":1,"result":{}}')
             def do_GET(self):
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b'ok')
             def log_message(self, *args):
                 pass
-        http.server.HTTPServer(('0.0.0.0', 9002), H).serve_forever()
+        http.server.HTTPServer(('0.0.0.0', 8000), H).serve_forever()
     ports:
-      - "9002:9002"
+      - "8000:8000"
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:9002/healthz')\" || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')\" || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 5
       start_period: 5s
+
+  seed:
+    build: .
+    profiles: ["e2e"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:-soroban}@db:5432/${POSTGRES_DB:-soroban_pulse}}
+    command: ["/bin/sh", "-c", "true"]
+    restart: "no"
+
+  seed-bin:
+    build: .
+    profiles: ["e2e"]
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgres://${POSTGRES_USER:-soroban}:${POSTGRES_PASSWORD:-soroban}@db:5432/${POSTGRES_DB:-soroban_pulse}}
+    command: ["/bin/sh", "-c", "true"]
+    restart: "no"
+
+  web:
+    image: nginx:1.27-alpine
+    profiles: ["e2e"]
+    ports:
+      - "8080:80"
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # e2e + conformance
+  # ---------------------------------------------------------------------------
+  webhook-sink:
+    <<: *webhook-sink-common
+    profiles: ["e2e", "conformance"]
 
 volumes:
   pgdata:
   promdata:
   grafanadata:
   redisdata:
-
-# Conformance test stack: used by the `sdk-conformance` CI job.
-# Boots the app, PostgreSQL (seeded from sdk/conformance/seed.sql) and a
-# webhook sink on port 9002. All services expose healthchecks so CI can
-# wait for readiness before running the SDK scenario runners.
-#
-# Usage:
-#   docker compose -f docker-compose.conformance.yml up -d --wait
-#   docker compose -f docker-compose.conformance.yml down -v
+  lokidata:
   conformance_pgdata:

@@ -5,11 +5,14 @@ import { EventFilterBar } from "../components/EventFilterBar";
 import { EventTable } from "../components/EventTable";
 import { EmptyFilterResults } from "../components/EmptyFilterResults";
 import { EventDrawer } from "../components/EventDrawer";
+import { LoadingState } from "../components/LoadingState";
+import { ErrorBanner } from "../components/ErrorBanner";
 
 export function EventExplorerPage() {
   const navigate = useNavigate();
   const [events, setEvents] = useState<Event[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
   const [filters, setFilters] = useState<EventFilterParams>({ page: 1, limit: 20 });
   const [selectedEvent, setSelectedEvent] = useState<Event | null>(null);
@@ -17,11 +20,13 @@ export function EventExplorerPage() {
 
   const loadEvents = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const response = await dashboardApi.listEvents(filters);
       setEvents(response.events);
       setTotal(response.total);
-    } catch {
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unknown error");
       setEvents([]);
       setTotal(0);
     } finally {
@@ -63,9 +68,17 @@ export function EventExplorerPage() {
         <span>Showing {events.length} of {total.toLocaleString()}</span>
       </div>
 
+      {error && !loading && (
+        <ErrorBanner
+          title="Couldn't load events."
+          message={error}
+          onRetry={loadEvents}
+        />
+      )}
+
       {loading ? (
-        <p>Loading events…</p>
-      ) : events.length === 0 ? (
+        <LoadingState layout="table" rows={filters.limit ?? 20} columns={5} label="Loading events…" />
+      ) : error ? null : events.length === 0 ? (
         <EmptyFilterResults onClearFilter={() => setFilters({ page: 1, limit: 20 })} />
       ) : (
         <>

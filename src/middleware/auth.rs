@@ -7,8 +7,20 @@
 //! - [`AdminAuthState`] — shared state for the admin-only layer.
 //! - [`admin_auth_middleware`] — gates `/v1/admin/*` endpoints.
 //! - [`TenantId`] — request extension carrying the resolved tenant.
-//! - [`hash_api_key`] — SHA-256 hex digest helper.
+//! - [`hash_api_key`] — peppered HMAC-SHA256 hex digest helper.
 //! - [`require_admin_middleware`] — strict admin gate for key management.
+//!
+//! ## Fail-closed admin authentication (issue #1440)
+//!
+//! Admin routes are gated by [`admin_auth_middleware`], which **fails closed**:
+//! when no admin credential is configured (no `ADMIN_API_KEY` and no DB-backed
+//! key with the `admin` scope) every `/v1/admin/*` request is rejected with
+//! `403 Forbidden`.  A startup warning (see [`warn_if_admin_disabled`]) explains
+//! how to enable admin access.
+//!
+//! For local development only, [`AdminAuthState::allow_unauthenticated`] can be
+//! set via `ALLOW_UNAUTHENTICATED_ADMIN=true` (or `ADMIN_API_DISABLED=false`).
+//! This override is refused when `ENVIRONMENT=production`.
 //!
 //! ## Database-backed scoped keys (issue #1258)
 //!
@@ -18,6 +30,22 @@
 //! (see [`crate::api_keys::required_scope`]). Unknown or revoked `sp_` keys
 //! fall through to the legacy env-var key check, which keeps working
 //! unchanged for backward compatibility.
+//!
+//! ## Peppered key digests (issue #1430)
+//!
+//! Key digests are HMAC-SHA256 over the raw key, keyed by the server-side
+//! `API_KEY_PEPPER` secret (see [`crate::hmac_util::hmac_sha256`]). Only the
+//! digest is ever persisted or held in the tenant map; the raw key is never
+//! stored. Digests produced by the previous scheme (bare SHA-256, or an older
+//! pepper) are still accepted and are transparently rewritten with the
+//! current pepper on the next successful use — see [`verify_and_upgrade`].
+//!
+//! ## SaaS tenant keys (issue #1429)
+//!
+//! Tenant keys live in the unified `api_keys` table (hashed, with `tenant_id`,
+//! scopes and revocation). The legacy plaintext `saas_tenants.api_keys`
+//! column is no longer read anywhere; tenant resolution goes through the
+//! hashed-key lookup.
 
 use axum::{
     extract::{Request, State},
@@ -26,7 +54,6 @@ use axum::{
     response::Response,
     Json,
 };
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
@@ -89,11 +116,104 @@ impl AuthState {
 }
 
 /// Shared state for the admin-only authentication layer.
+///
+/// The layer **fails closed** (issue #1440): when [`admin_api_keys`] is empty
+/// and no DB-backed key with the `admin` scope is presented, every admin
+/// request is rejected with `403 Forbidden`.  The only way to bypass the gate
+/// is the explicit, development-only [`allow_unauthenticated`] override, which
+/// is refused when `ENVIRONMENT=production`.
+///
+/// [`admin_api_keys`]: AdminAuthState::admin_api_keys
+/// [`allow_unauthenticated`]: AdminAuthState::allow_unauthenticated
 #[derive(Clone)]
 pub struct AdminAuthState {
-    /// Keys that grant admin access.  When empty the layer is a no-op and
-    /// admin routes fall back to whatever the regular auth layer enforced.
+    /// Keys that grant admin access.
     pub admin_api_keys: Vec<String>,
+    /// Development-only escape hatch: when `true` (and not in production) the
+    /// admin layer is a no-op.  Set via `ALLOW_UNAUTHENTICATED_ADMIN=true` or
+    /// `ADMIN_API_DISABLED=false`.
+    pub allow_unauthenticated: bool,
+}
+
+impl AdminAuthState {
+    /// Build the admin auth state from the environment.
+    ///
+    /// Reads `ADMIN_API_KEY` (comma-separated) and the development-only
+    /// override `ALLOW_UNAUTHENTICATED_ADMIN` / `ADMIN_API_DISABLED`.  The
+    /// override is ignored (with a warning) when `ENVIRONMENT=production`.
+    pub fn from_env() -> Self {
+        let admin_api_keys: Vec<String> = std::env::var("ADMIN_API_KEY")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(str::to_owned)
+            .collect();
+
+        let requested = env_flag("ALLOW_UNAUTHENTICATED_ADMIN")
+            || std::env::var("ADMIN_API_DISABLED")
+                .map(|v| v.trim().eq_ignore_ascii_case("false"))
+                .unwrap_or(false);
+
+        let production = std::env::var("ENVIRONMENT")
+            .map(|v| v.trim().eq_ignore_ascii_case("production"))
+            .unwrap_or(false);
+
+        let allow_unauthenticated = if requested && production {
+            tracing::error!(
+                "ALLOW_UNAUTHENTICATED_ADMIN / ADMIN_API_DISABLED is refused when \
+                 ENVIRONMENT=production; admin routes stay fail-closed"
+            );
+            false
+        } else {
+            requested
+        };
+
+        Self { admin_api_keys, allow_unauthenticated }
+    }
+
+    /// Whether any admin credential is configured.
+    fn has_credentials(&self) -> bool {
+        !self.admin_api_keys.is_empty()
+    }
+}
+
+/// Parse a boolean-ish environment flag (`true`/`1`/`yes`/`on`).
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| {
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true")
+                || v == "1"
+                || v.eq_ignore_ascii_case("yes")
+                || v.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(false)
+}
+
+/// Emit a startup warning when admin access is disabled (issue #1440).
+///
+/// Call once during startup with the configured [`AdminAuthState`].  When no
+/// admin credential is configured and the development override is not active,
+/// every `/v1/admin/*` request will be rejected with `403`.
+pub fn warn_if_admin_disabled(state: &AdminAuthState) {
+    if state.has_credentials() {
+        return;
+    }
+    if state.allow_unauthenticated {
+        tracing::warn!(
+            "admin authentication is DISABLED via ALLOW_UNAUTHENTICATED_ADMIN / \
+             ADMIN_API_DISABLED; every /v1/admin/* endpoint is reachable without \
+             credentials — never use this in production"
+        );
+        return;
+    }
+    tracing::warn!(
+        "no admin credential configured: every /v1/admin/* request will be rejected \
+         with 403. Set ADMIN_API_KEY (or mint a DB-backed key with the `admin` scope) \
+         to enable admin access. For local development only, set \
+         ALLOW_UNAUTHENTICATED_ADMIN=true (refused when ENVIRONMENT=production)."
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -120,12 +240,75 @@ pub(crate) fn extract_api_key(req: &Request) -> Option<&str> {
     bearer.or(x_api_key)
 }
 
-/// SHA-256 hex digest of a raw API key — used as the lookup key in
-/// `tenant_map` so plain-text keys are never stored in memory after hashing.
+/// The pepper used for key digests, read from `API_KEY_PEPPER`.
+///
+/// Returns `None` when the variable is unset or empty, in which case digests
+/// fall back to the legacy bare SHA-256 scheme (kept only for backward
+/// compatibility; deployments should always set a pepper).
+pub fn api_key_pepper() -> Option<String> {
+    std::env::var("API_KEY_PEPPER")
+        .ok()
+        .filter(|p| !p.is_empty())
+}
+
+/// Peppered HMAC-SHA256 hex digest of a raw API key — used as the lookup key
+/// in `tenant_map` and the `api_keys` table. Only the digest is ever stored;
+/// the raw key is never persisted.
+///
+/// Uses `API_KEY_PEPPER` as the HMAC key. When no pepper is configured the
+/// legacy bare SHA-256 digest is produced so existing deployments keep
+/// working; [`verify_and_upgrade`] rewrites such digests once a pepper is set.
 pub fn hash_api_key(key: &str) -> String {
+    match api_key_pepper() {
+        Some(pepper) => hash_api_key_with_pepper(key, &pepper),
+        None => legacy_sha256(key),
+    }
+}
+
+/// Peppered HMAC-SHA256 hex digest of `key` using an explicit `pepper`.
+///
+/// Exposed for the one-time migration that re-hashes existing digests and for
+/// tests that exercise pepper rotation.
+pub fn hash_api_key_with_pepper(key: &str, pepper: &str) -> String {
+    crate::hmac_util::hmac_sha256(pepper.as_bytes(), key.as_bytes())
+}
+
+/// Legacy bare SHA-256 hex digest, retained only to verify digests written
+/// before peppering was introduced.
+pub fn legacy_sha256(key: &str) -> String {
+    use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(key.as_bytes());
     format!("{:x}", h.finalize())
+}
+
+/// Verify `key` against a stored `digest`, accepting digests produced with the
+/// current pepper, a previous pepper, or the legacy bare SHA-256 scheme.
+///
+/// Returns `Some(current_digest)` when the key matches and the stored digest
+/// was produced with an outdated scheme, so the caller can rewrite it with the
+/// current pepper. Returns `Some(digest)` unchanged when already current, and
+/// `None` when the key does not match.
+pub fn verify_and_upgrade(
+    key: &str,
+    stored_digest: &str,
+    previous_peppers: &[String],
+) -> Option<String> {
+    let current = hash_api_key(key);
+    let matches: bool = current.as_bytes().ct_eq(stored_digest.as_bytes()).into();
+    if matches {
+        return Some(current);
+    }
+    // Accept digests from previous peppers or the legacy bare SHA-256 scheme.
+    let legacy_ok = previous_peppers
+        .iter()
+        .any(|p| hash_api_key_with_pepper(key, p) == stored_digest)
+        || legacy_sha256(key) == stored_digest;
+    if legacy_ok {
+        Some(current)
+    } else {
+        None
+    }
 }
 
 /// Paths that never require authentication.
@@ -274,18 +457,35 @@ pub async fn auth_middleware(
 
 /// Admin-only authentication middleware.
 ///
-/// Guards `/v1/admin/*` endpoints independently of the global API key:
+/// Guards `/v1/admin/*` endpoints independently of the global API key and
+/// **fails closed** (issue #1440):
+/// - No admin credential configured (no `ADMIN_API_KEY`, no DB `admin` key)
+///   and no dev override → **403 Forbidden**.
+/// - Dev override active (`ALLOW_UNAUTHENTICATED_ADMIN=true`) → passes through.
+/// - DB key with the `admin` scope → passes through.
 /// - No key → **401 Unauthorized**.
 /// - Non-admin key → **403 Forbidden**.
-/// - Admin key, or a DB key with the `admin` scope → passes through.
-/// - No admin keys configured → no-op (backward-compatible fallback).
+/// - Admin key → passes through.
 pub async fn admin_auth_middleware(
     State(state): State<Arc<AdminAuthState>>,
     req: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    if state.admin_api_keys.is_empty() || has_admin_scoped_key(&req) {
+    if has_admin_scoped_key(&req) {
         return Ok(next.run(req).await);
+    }
+
+    if !state.has_credentials() {
+        if state.allow_unauthenticated {
+            return Ok(next.run(req).await);
+        }
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "admin access is disabled: no admin credential is configured",
+                "hint": "set ADMIN_API_KEY or mint a DB-backed key with the `admin` scope",
+            })),
+        ));
     }
 
     match extract_api_key(&req) {
@@ -432,10 +632,60 @@ mod tests {
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    fn admin_app(state: AdminAuthState) -> Router {
+        Router::new()
+            .route("/admin", get(|| async { "ok" }))
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::new(state),
+                admin_auth_middleware,
+            ))
+    }
+
+    #[tokio::test]
+    async fn admin_layer_fails_closed_without_credentials() {
+        let app = admin_app(AdminAuthState {
+            admin_api_keys: vec![],
+            allow_unauthenticated: false,
+        });
+        // No key at all → 403 (fail closed, not a no-op).
+        let resp = app
+            .clone()
+            .oneshot(axum::http::Request::get("/admin").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+        // Any key → still 403.
+        let resp = app
+            .oneshot(
+                axum::http::Request::get("/admin")
+                    .header("X-Api-Key", "anything")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn admin_layer_dev_override_allows_unauthenticated() {
+        let app = admin_app(AdminAuthState {
+            admin_api_keys: vec![],
+            allow_unauthenticated: true,
+        });
+        let resp = app
+            .oneshot(axum::http::Request::get("/admin").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
     #[tokio::test]
     async fn admin_layer_requires_admin_key() {
         let state = Arc::new(AdminAuthState {
             admin_api_keys: vec!["admin".into()],
+            allow_unauthenticated: false,
         });
         let app = Router::new()
             .route("/admin", get(|| async { "ok" }))
@@ -534,7 +784,10 @@ mod scoped_key_tests {
     }
 
     fn require_admin_app(admin_keys: Vec<String>, injected: Option<ScopedApiKey>) -> Router {
-        let state = Arc::new(AdminAuthState { admin_api_keys: admin_keys });
+        let state = Arc::new(AdminAuthState {
+            admin_api_keys: admin_keys,
+            allow_unauthenticated: false,
+        });
         Router::new()
             .route("/v1/admin/api-keys", get(|| async { "OK" }))
             .route_layer(axum::middleware::from_fn_with_state(
@@ -599,5 +852,12 @@ mod principal_tests {
         assert_ne!(Principal::from_api_key("a"), Principal::from_api_key("b"));
         assert_eq!(Principal::from_api_key("a"), Principal::from_api_key("a"));
         assert_eq!(Principal::anonymous().0, "anonymous");
+    }
+
+    #[test]
+    fn principal_is_derived_from_peppered_digest() {
+        let p = Principal::from_api_key("a");
+        let expected = format!("key:{}", &super::hash_api_key("a")[..16]);
+        assert_eq!(p.0, expected);
     }
 }

@@ -26,6 +26,55 @@ export interface VerifyWebhookOptions {
   toleranceSeconds?: number;
 }
 
+export interface VerifyWebhookConfig {
+  toleranceSec?: number;
+}
+
+export type WebhookHeaders =
+  | Record<string, string | string[] | undefined>
+  | { get(name: string): string | null | undefined };
+
+const SIGNATURE_HEADER = "x-sorobanpulse-signature";
+
+function getHeader(headers: WebhookHeaders, name: string): string | undefined {
+  if (typeof (headers as { get?: unknown }).get === "function") {
+    const value = (headers as { get(name: string): string | null | undefined }).get(name);
+    return value ?? undefined;
+  }
+  const record = headers as Record<string, string | string[] | undefined>;
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(record)) {
+    if (key.toLowerCase() === lower) {
+      const value = record[key];
+      return Array.isArray(value) ? value[0] : value;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Verifies a SorobanPulse webhook request using its raw body and headers,
+ * mirroring the Go SDK's `VerifyWebhook`. Reads the
+ * `X-SorobanPulse-Signature` header (`t=<unix_ts>,v1=<hex_hmac>`) and checks
+ * HMAC-SHA256 over `{timestamp}.{rawBody}` with a constant-time comparison.
+ *
+ * Always pass the raw, unparsed request body.
+ */
+export function verifyWebhook(
+  rawBody: string | Buffer,
+  headers: WebhookHeaders,
+  secret: string,
+  config: VerifyWebhookConfig = {},
+): boolean {
+  const signatureHeader = getHeader(headers, SIGNATURE_HEADER);
+  if (!signatureHeader) {
+    throw new WebhookVerificationError("missing signature header");
+  }
+  return verifyWebhookSignature(rawBody, signatureHeader, secret, {
+    toleranceSeconds: config.toleranceSec,
+  });
+}
+
 /**
  * Verifies a SorobanPulse webhook request body against its
  * `X-SorobanPulse-Signature` header (`t=<unix_ts>,v1=<hex_hmac>`), using
@@ -38,6 +87,9 @@ export function verifyWebhookSignature(
   options: VerifyWebhookOptions = {},
 ): boolean {
   const toleranceSeconds = options.toleranceSeconds ?? 300;
+  if (!Number.isFinite(toleranceSeconds) || toleranceSeconds < 0) {
+    throw new WebhookVerificationError("invalid tolerance");
+  }
   const { timestamp, signature } = parseSignatureHeader(signatureHeader);
 
   const timestampNum = Number(timestamp);

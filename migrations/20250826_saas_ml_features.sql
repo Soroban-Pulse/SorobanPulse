@@ -25,7 +25,10 @@ CREATE TABLE IF NOT EXISTS saas_tenants (
     sla_uptime_percentage DOUBLE PRECISION NOT NULL DEFAULT 95.0,
     dedicated_support BOOLEAN NOT NULL DEFAULT FALSE,
     custom_branding BOOLEAN NOT NULL DEFAULT FALSE,
-    api_keys TEXT[] NOT NULL DEFAULT '{}',
+    -- NOTE: API keys are NOT stored here. They live in the hashed `api_keys`
+    -- table (see 20261017000000_api_keys.sql). The legacy plaintext
+    -- `api_keys TEXT[]` column was removed by 20261101000000_saas_api_keys_hashed.sql
+    -- (issue #1429).
     billing_email VARCHAR(255),
     billing_id VARCHAR(255),
     metadata JSONB NOT NULL DEFAULT '{}',

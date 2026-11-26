@@ -188,7 +188,50 @@ soroban_pulse_streaming_response_errors_total{error_type}
 rate(soroban_pulse_streaming_response_errors_total[5m]) > 0.1
 ```
 
-## Configuration
+## Connection Limits (SSE and WebSocket)
+
+Both the SSE stream endpoints and the WebSocket endpoint `/v1/events/ws` share a single
+connection-admission path. Limits are enforced **before** a stream is started or a
+WebSocket upgrade is accepted, so over-limit clients never consume a broadcast receiver
+or a socket.
+
+### Limits
+
+| Limit | Config key | Scope |
+|-------|------------|-------|
+| Global connection cap | `sse_max_connections` | All streaming connections (SSE + WebSocket) across the process |
+| Per-IP connection cap | `sse_max_connections_per_ip` | Connections from a single client IP (resolved via the trusted `ClientIp` extractor) |
+| Per-API-key connection cap | `sse_max_connections_per_api_key` | Connections authenticated with the same API key |
+
+WebSocket connections count against exactly the same counters as SSE connections, so the
+SSE limits cannot be bypassed by switching transport.
+
+### Rejection Behaviour
+
+When a limit is reached, the request is rejected before any streaming or upgrade occurs:
+
+- **`503 Service Unavailable`** — the global cap is exhausted (server-wide overload).
+- **`429 Too Many Requests`** — the per-IP or per-API-key cap is exhausted.
+
+Both responses include a `Retry-After` header (in seconds) indicating when the client
+should retry. Clients should honour this header and apply exponential backoff rather than
+retrying immediately.
+
+### WebSocket Frame Limits
+
+The WebSocket upgrade is configured with explicit limits to bound per-connection memory:
+
+- `max_message_size` — maximum size of a single WebSocket message.
+- `max_frame_size` — maximum size of a single WebSocket frame.
+
+Messages or frames exceeding these limits cause the connection to be closed.
+
+### Slow and Lagged Consumers
+
+Each streaming connection holds a broadcast receiver. If a consumer cannot keep up and
+its receiver lags behind the broadcast buffer, the connection is closed rather than
+buffering unbounded data. Idle connections are likewise closed. This keeps memory bounded
+even when many clients connect and disconnect or stall.
 
 ### Server Configuration
 

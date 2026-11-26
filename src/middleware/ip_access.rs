@@ -16,12 +16,14 @@
 extern crate metrics as m;
 
 use axum::{
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use std::net::SocketAddr;
 
+use crate::client_ip::ClientIp;
 use crate::zero_trust::{AccessDecision, IpAllowListRule, IpDenyListRule, PolicyRule, RequestContext};
 
 pub async fn ip_access_control_middleware(
@@ -43,7 +45,15 @@ pub async fn ip_access_control_middleware(
         return next.run(req).await;
     };
 
-    let ip = crate::handlers::extract_client_ip(req.headers());
+    // Resolve the client IP through the shared `ClientIp` extractor so that
+    // `X-Forwarded-For` / `Forwarded` headers are only honoured when the TCP
+    // peer is a configured trusted proxy (Issue #1432). Untrusted peers cannot
+    // spoof their way past the allow/deny lists by rotating header values.
+    let peer = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0);
+    let ip = ClientIp::resolve(peer, req.headers(), &cfg.trusted_proxies).to_string();
     let ctx = RequestContext::new(ip, String::new(), req.uri().path(), req.method().as_str());
 
     if let Some(AccessDecision::Deny(reason)) = rule.evaluate(&ctx) {

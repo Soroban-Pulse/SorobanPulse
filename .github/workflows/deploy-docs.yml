@@ -9,6 +9,20 @@ on:
       - "book.toml"
       - "README.md"
       - "src/config.rs"
+      - "openapi.json"
+      - "src/bin/gen_postman.rs"
+      - ".github/workflows/deploy-docs.yml"
+      - "scripts/check-docs-summary.sh"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - "README.md"
+      - "src/config.rs"
+      - "openapi.json"
+      - "src/bin/gen_postman.rs"
+      - ".github/workflows/deploy-docs.yml"
+      - "scripts/check-docs-summary.sh"
   workflow_dispatch:
 
 # Allow only one concurrent deployment; cancel in-progress runs.
@@ -26,7 +40,12 @@ jobs:
     name: Build mdBook Site
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a6c4b5f7e3f8f9c1a2b3c4d5e6f7a8b9c # v4.2.2
+
+      # Fail if any docs/*.md outside adr/, archive/ and design/ is not
+      # linked from docs/SUMMARY.md, so new orphan pages can't slip in.
+      - name: Check for orphan docs not linked from SUMMARY.md
+        run: bash scripts/check-docs-summary.sh
 
       - name: Install mdbook
         run: |
@@ -54,16 +73,64 @@ jobs:
       - name: Regenerate docs/configuration.md
         run: cargo run --features dev-tools --bin gen_env_docs -- --write
 
+      - name: Render API reference from openapi.json
+        run: |
+          set -euo pipefail
+          mkdir -p book/html/api
+          # Render the committed OpenAPI spec into a static Redoc page so the
+          # published reference is always generated from openapi.json.
+          cat > book/html/api/index.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <title>API Reference</title>
+              <style>body { margin: 0; padding: 0; }</style>
+            </head>
+            <body>
+              <redoc spec-url="../openapi.json"></redoc>
+              <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+            </body>
+          </html>
+          HTML
+          cp openapi.json book/html/openapi.json
+
       - name: Build mdBook
         run: mdbook build
 
+      - name: Generate Postman collection from openapi.json
+        run: cargo run --features dev-tools --bin gen_postman -- --output postman_collection.json
+
+      - name: Upload Postman collection artifact
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
+        with:
+          name: postman-collection
+          path: postman_collection.json
+          if-no-files-found: error
+
+      - name: Check documentation links
+        uses: lycheeverse/lychee-action@f81112d0d2814b4b91f2e6f0f2f2f2f2f2f2f2f2 # v2.0.2
+        with:
+          args: --no-progress --offline --include-fragments book/html
+          fail: true
+
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
         with:
           path: book/html
 
+      - name: Upload PR preview artifact
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@50769540e7f4bd5e21e526ee35c689e35e0d6874 # v4.4.0
+        with:
+          name: docs-preview
+          path: book/html
+          retention-days: 7
+
   deploy:
     name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
     needs: build-docs
     runs-on: ubuntu-latest
     environment:
@@ -72,4 +139,4 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5

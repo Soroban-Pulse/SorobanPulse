@@ -218,11 +218,10 @@ export function useEventStream(
       // full page reload. Mirrors the strategy used in api/client.ts.
       const apiKey =
         sessionStorage.getItem("sp_api_key") ??
-        localStorage.getItem("sp_api_key") ??
         "";
       const adminKey =
         sessionStorage.getItem("sp_admin_key") ??
-        localStorage.getItem("sp_admin_key") ??
+        sessionStorage.getItem("sp_admin_key") ??
         "";
 
       if (apiKey) headers["X-Api-Key"] = apiKey;

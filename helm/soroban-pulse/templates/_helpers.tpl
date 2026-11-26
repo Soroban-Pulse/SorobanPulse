@@ -66,3 +66,18 @@ app.kubernetes.io/name: {{ include "soroban-pulse.name" . }}-indexer
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/component: indexer
 {{- end }}
+
+{{/*
+Resolve the container image reference.
+Returns repository@digest when image.digest is set, otherwise repository:tag
+with tag defaulting to the chart appVersion.
+*/}}
+{{- define "soroban-pulse.image" -}}
+{{- $repository := required "image.repository is required" .Values.image.repository }}
+{{- if .Values.image.digest }}
+{{- printf "%s@%s" $repository .Values.image.digest }}
+{{- else }}
+{{- $tag := default .Chart.AppVersion .Values.image.tag }}
+{{- printf "%s:%s" $repository $tag }}
+{{- end }}
+{{- end }}

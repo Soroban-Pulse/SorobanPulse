@@ -1,8 +1,9 @@
 # API Cookbook
 
 Worked examples for common tasks, each grounded in an endpoint documented in
-`openapi.json`. For full parameter reference on any endpoint here, see
-[`docs/api-usage.md`](api-usage.md); this doc focuses on end-to-end recipes.
+`openapi.json`. For full parameter reference on any endpoint here, see the
+generated [API reference](api-reference.md); this doc focuses on end-to-end
+recipes.
 
 All examples assume the service is running at `http://localhost:3000` and
 that `$API_KEY` is set only if the server actually requires it (see
@@ -24,7 +25,8 @@ that `$API_KEY` is set only if the server actually requires it (see
 ## 1. Subscribe to events for a contract with a webhook
 
 `POST /subscriptions` registers a callback URL that receives new events from
-a given ledger onward.
+a given ledger onward. See the [API reference](api-reference.md) for the full
+request schema.
 
 ```bash
 curl -X POST http://localhost:3000/subscriptions \
@@ -58,7 +60,8 @@ curl -X POST http://localhost:3000/subscriptions/<id>/resume
 
 `GET /v1/events/contract/{contract_id}` supports both offset (`page`/`limit`)
 and cursor-based pagination. Prefer the cursor for large backfills — it's
-stable under concurrent writes, offset pagination isn't.
+stable under concurrent writes, offset pagination isn't. See the
+[API reference](api-reference.md) for the full parameter list.
 
 ```bash
 CONTRACT="CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -100,7 +103,8 @@ Reject the request (do not process the payload) if verification fails.
 ## 4. Handle rate limiting with backoff
 
 The default limit is 60 requests/IP/minute (`RATE_LIMIT_PER_MINUTE`). A `429`
-response includes `Retry-After` and `X-RateLimit-*` headers:
+response includes `Retry-After` and `X-RateLimit-*` headers (see the
+[API reference](api-reference.md) for the full header list):
 
 ```python
 import time
@@ -126,7 +130,8 @@ rather than reimplementing it if you're using one of them. Full recipe detail
 
 `GET /v1/events/contract/{contract_id}/stream` is the preferred SSE endpoint
 for a single contract (`/v1/events/stream` also exists but is documented as
-less preferred for this case).
+less preferred for this case). See the [API reference](api-reference.md) for
+the full parameter list.
 
 ```bash
 curl -N "http://localhost:3000/v1/events/contract/CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4/stream"
@@ -147,7 +152,8 @@ Reconnection semantics (`Last-Event-ID` replay) are covered in
 ## 6. Bulk-export events as NDJSON
 
 `GET /v1/events/export` supports `csv`, `parquet`, and `jsonl` output, plus
-the same filters as `/v1/events`:
+the same filters as `/v1/events`. See the [API reference](api-reference.md)
+for the full parameter list:
 
 ```bash
 curl -H "Authorization: Bearer $API_KEY" \
@@ -166,7 +172,8 @@ curl -H "Authorization: Bearer $API_KEY" \
 ## 7. Look up events for multiple transactions in one call
 
 `POST /v1/events/tx/batch` avoids N round-trips when you already have a list
-of transaction hashes (e.g., collected from your own ledger watcher):
+of transaction hashes (e.g., collected from your own ledger watcher). See the
+[API reference](api-reference.md) for the full request schema:
 
 ```bash
 curl -X POST http://localhost:3000/v1/events/tx/batch \
@@ -188,7 +195,8 @@ call — a larger batch returns `400`.
 `GET /v1/events/tx/{tx_hash}/related` follows references inside `event_data`
 to pull in events from other transactions the root transaction points to
 (e.g., cross-contract calls) — useful for reconstructing a full call graph
-without walking it yourself.
+without walking it yourself. See the [API reference](api-reference.md) for
+the full parameter list.
 
 ```bash
 curl "http://localhost:3000/v1/events/tx/1a2b3c4d.../related?depth=2" | jq '.data[] | {tx_hash, contract_id, ledger}'

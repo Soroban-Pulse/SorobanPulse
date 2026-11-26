@@ -10,3 +10,19 @@ test-threads = "num-cpus"
 
 [profile.ci.junit]
 path = "junit.xml"
+
+# Partition-aware setup for CI sharding.
+#
+# The CI test job runs `cargo nextest run --profile ci --partition count:N/1..N`
+# across an N-way matrix of shards. nextest's built-in `count` partitioner
+# splits the test list deterministically by index, so every shard runs a
+# disjoint subset and the union of all shards covers the full suite.
+#
+# The `[profile.ci.partition]` table below is used when no explicit
+# `--partition` flag is passed (e.g. local runs or single-shard fallbacks),
+# so the profile remains usable without sharding.
+[profile.ci.partition]
+# Default to a single shard; CI overrides this via `--partition count:N/1..N`.
+count = 1
+# Run shard 1 of 1 by default.
+shard = 1

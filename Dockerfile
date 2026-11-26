@@ -1,4 +1,7 @@
-FROM rust:1.87-slim AS chef
+# The Rust version below must be kept in sync with `rust-toolchain.toml` (channel)
+# and `Cargo.toml`'s `rust-version` (MSRV). Renovate/Dependabot should bump all
+# three together so local, CI and Docker builds use the same compiler.
+FROM rust:1.87.0-slim AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
@@ -35,7 +38,7 @@ RUN cargo build --release --bin soroban-pulse ${CARGO_FEATURES:+--features "$CAR
 
 # Base runtime used by both the production and tools images.
 # gcr.io/distroless/cc-debian12 — digest pinned 2025-07-14. Update via Dependabot or manually with:
-# docker inspect --format='{{index .RepoDigests 0}}' gcr.io/distroless/cc-debian12
+# docker buildx imagetools inspect gcr.io/distroless/cc-debian12:nonroot
 # distroless/cc ships glibc + libssl + ca-certificates, so no apt-get layer is needed.
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9b8f8b1a1b6b0b6f3f0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e AS runtime-base
 WORKDIR /app

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" font-family="Inter, system-ui, sans-serif" font-size="14">
+  <rect width="1280" height="400" fill="#F9FAFB"/>
+  <text x="16" y="24" font-weight="700" fill="#111827">Event Explorer — Error banner</text>
+  <rect x="256" y="60" width="1008" height="56" rx="8" fill="#FEF2F2" stroke="#FCA5A5"/>
+  <text x="280" y="93" fill="#991B1B" font-weight="700">⚠ Couldn’t load events.</text><text x="460" y="93" fill="#991B1B">The API returned 503. Your filters are kept.</text>
+  <rect x="1160" y="72" width="88" height="32" rx="6" fill="#fff" stroke="#FCA5A5"/><text x="1204" y="93" text-anchor="middle" fill="#991B1B">Retry</text>
+</svg>

@@ -1,4 +1,9 @@
 //! Middleware for extracting and validating tenant context from requests.
+//!
+//! Tenant resolution here is purely header-based and never touches stored
+//! credentials. API-key authentication (including SaaS tenant keys) is handled
+//! exclusively by the auth middleware against the unified, hashed `api_keys`
+//! table; raw keys are never read from or forwarded by this module.
 
 use axum::{
     async_trait,
@@ -7,7 +12,7 @@ use axum::{
     response::Response,
 };
 use http::request::Parts;
-use crate::multi_tenancy::{TenantContext, TenantId};
+use crate::multi_tenancy::TenantContext;
 
 const TENANT_HEADER: &str = "x-tenant-id";
 const USER_HEADER: &str = "x-user-id";

@@ -9,16 +9,35 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" />
   </a>
+  <!-- Status badges: enable once the CI and docs workflows are valid again (see "Project status"). -->
+  <!-- <a href="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/ci.yml">
+    <img src="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/ci.yml/badge.svg" alt="CI status" />
+  </a>
+  <a href="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/docs.yml">
+    <img src="https://github.com/Soroban-Pulse/SorobanPulse/actions/workflows/docs.yml/badge.svg" alt="Docs status" />
+  </a> -->
 </p>
 
 A lightweight Rust backend service that indexes Soroban smart contract events on the Stellar network and exposes them via a REST API.
 
+## Project status
+
+> **⚠️ `main` is not currently in a buildable state.** A fresh clone fails to build (manifest parse error, missing dependencies) and the CI workflow is invalid, so no status badge is shown yet. We are tracking the work to restore a green build in the **[Restore green build & CI epic](https://github.com/Soroban-Pulse/SorobanPulse/issues?q=is%3Aissue+label%3Aci+green-build)**.
+
+Until that epic is closed:
+
+- Treat the quick start below as **aspirational** — see [docs/onboarding.md](docs/onboarding.md) for known first-build fixes.
+- CI and Docs status badges will be re-enabled once the workflows are valid.
+- Feature completeness varies by subsystem: see **[Feature maturity](docs/feature-maturity.md)** for what is Stable, Beta, Experimental or Planned.
+
 ## Tech Stack
+
+The list below mirrors the dependencies declared in [`Cargo.toml`](Cargo.toml):
 
 - **Rust** + **Axum** 0.8 / **tower-http** (web framework, WebSockets via `axum::extract::ws`)
 - **Tokio** (async runtime)
 - **PostgreSQL** + **SQLx** (database + migrations)
-- **utoipa** (OpenAPI generation), **async-graphql** (GraphQL)
+- **utoipa** (OpenAPI generation), **async-graphql** (GraphQL — experimental, see [feature maturity](docs/feature-maturity.md))
 - **metrics** + **metrics-exporter-prometheus** (Prometheus metrics)
 - **Stellar Soroban RPC** + **stellar-xdr** 26 (event source and XDR decoding)
 - Optional integrations behind cargo features: `kafka`, `pubsub`, `kinesis`, `archive` (S3), `parquet`, `redis-queue`, `lua`, `otel`
@@ -81,27 +100,45 @@ See [docs/schema.md](docs/schema.md) for a detailed description of the database 
 
 ## Documentation
 
+The published documentation site is built from [`docs/SUMMARY.md`](docs/SUMMARY.md), which is the authoritative table of contents. Every user and operator page is linked from it; planning and design material lives under [`docs/adr/`](docs/adr/README.md) and [`docs/design/`](docs/design/README.md), and superseded pages are kept in [`docs/archive/`](docs/archive/README.md).
+
+### Getting started
+
 - [Tutorial: token transfer alert bot](docs/tutorials/token-alert-bot.md) — index a testnet token and post large transfers to Discord.
-- [Configuration reference](docs/configuration.md) — every environment variable with its type, default and feature flag.
 - [Developer onboarding guide](docs/onboarding.md) — start here if you're new: a day-1 checklist and fixes for the most common first-build issues.
-- [Stellar & Soroban glossary](docs/glossary.md) — plain-language definitions of ledger, TOID, ScVal, XDR, Strkey, SAC, SEP-41, TTL/archival, RPC retention, and Soroban events 101.
-- [Module map](docs/module-map.md) — every `src/` module grouped by domain with one-line descriptions and "where do I start?" guidance.
 - [Development environment setup](docs/development-setup.md) — OS-specific setup, IDE/editor configuration, pre-commit hooks, debugging tools, and performance profiling.
-- [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
-- [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
+- [Stellar & Soroban glossary](docs/glossary.md) — plain-language definitions of ledger, TOID, ScVal, XDR, Strkey, SAC, SEP-41, TTL/archival, RPC retention, and Soroban events 101.
+
+### User guide
+
+- [Configuration reference](docs/configuration.md) — every environment variable with its type, default and feature flag.
 - [SDK integration guide](docs/sdk-integration-guide.md) — using the TypeScript, Python, and Go SDKs: auth, subscriptions, streaming, and error handling.
-- [SDK development guide](docs/sdk-development.md) — building and extending the SDKs themselves: architecture, per-language tutorials, and webhook verification.
 - [Subscription best practices](docs/subscription-best-practices.md) covers filter optimization, delivery frequency, retry/backoff guidance, performance benchmarks, monitoring, common patterns, and anti-patterns.
-- [Troubleshooting decision tree](docs/troubleshooting-guide.md) — symptom-first navigation into the detailed [troubleshooting guide](docs/troubleshooting.md) and runbooks.
 - [Contract event schemas](docs/contract-event-schemas.md) documents Stellar contract event patterns, XDR encoding, event data types, examples, and validation rules.
-- [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.
-- [Data retention policy](docs/data-retention.md) explains default retention periods, archival, GDPR procedures, deletion workflows, and audit trail retention.
+- [Platform integration guide](docs/guides/integration-guide.md) — GitHub, Discord, Slack and Telegram notification setup.
 - [Web dashboard](docs/dashboard.md) — the built-in UI served at `/ui` (`SERVE_DASHBOARD=true`), its caching and Content-Security-Policy.
 - [Embeddable feed widget](packages/feed-widget/README.md) — the `<soroban-pulse-feed>` web component for showing contract activity on your own site, including CORS and API-key guidance.
-- [Design system](docs/design/design-system.md) — design tokens, component specs and usage guidelines. Brand assets are in [docs/assets/brand](docs/assets/brand/README.md).
+- [Video tutorials and demonstrations](docs/video-tutorials.md) — the onboarding, API, operations, and troubleshooting video series index and recording scripts.
+
+### Operator guide
+
+- [Deployment guide](docs/deployment.md) — TLS termination options and production security guidance.
+- [Troubleshooting decision tree](docs/troubleshooting-guide.md) — symptom-first navigation into the detailed [troubleshooting guide](docs/troubleshooting.md) and runbooks.
+- [Data retention policy](docs/data-retention.md) explains default retention periods, archival, GDPR procedures, deletion workflows, and audit trail retention.
+- [Multi-deployment architecture](docs/multi-deployment-architecture.md) covers geo-redundancy, failover, cross-region sync, multi-cloud deployment, and consistency trade-offs.
+
+### Reference
+
+- [Module map](docs/module-map.md) — every `src/` module grouped by domain with one-line descriptions and "where do I start?" guidance.
+- [Feature maturity](docs/feature-maturity.md) — every subsystem rated Stable / Beta / Experimental / Planned, with links to tracking issues. **Read this before relying on a feature.**
 - [Cargo feature matrix](docs/features.md) — every cargo feature, what it enables, its dependencies, and how to build custom images.
-- [Platform integration guide](docs/guides/integration-guide.md) — GitHub, Discord, Slack and Telegram notification setup.
-- [Design specs / RFCs](docs/rfcs/README.md) and [historical implementation reports](docs/archive/README.md).
+- [SDK development guide](docs/sdk-development.md) — building and extending the SDKs themselves: architecture, per-language tutorials, and webhook verification.
+
+### Design and history
+
+- [Architecture Decision Records](docs/adr/README.md) — the numbered, reviewed record of architectural decisions and their trade-offs.
+- [Design documents](docs/design/README.md) — design system, component specs and other forward-looking design material. Brand assets are in [docs/assets/brand](docs/assets/brand/README.md).
+- [Archived documentation](docs/archive/README.md) — historical implementation reports and superseded pages kept for reference.
 
 ## Setup
 
@@ -155,13 +192,23 @@ Every other setting is listed in the [configuration reference](docs/configuratio
 >
 > Send the admin key the same way as a regular key (`Authorization: Bearer <ADMIN_API_KEY>` or `X-Api-Key: <ADMIN_API_KEY>`). Set `ADMIN_API_KEY_SECONDARY` to rotate the admin key without downtime. When `ADMIN_API_KEY` is unset, admin endpoints fall back to the regular `API_KEY` gate for backward compatibility.
 
-### 3. Run with Docker Compose (easiest)
+### 3. Quick start (one command)
+
+```bash
+make dev
+```
+
+`make dev` starts PostgreSQL via `docker compose up -d`, runs the service with `cargo run`, waits for `/healthz/ready` to report healthy, and then opens the built-in dashboard at <http://localhost:3000/ui> (`SERVE_DASHBOARD=true`). Press `Ctrl-C` to stop the service; run `make docker-down` to stop the database.
+
+> This target is validated end-to-end by the CI smoke job. If it fails on your machine, see [docs/onboarding.md](docs/onboarding.md).
+
+### 4. Run with Docker Compose
 
 ```bash
 make docker-up
 ```
 
-### 4. Run locally
+### 5. Run locally
 
 ```bash
 # Start PostgreSQL, then:
@@ -170,7 +217,7 @@ make run
 
 Migrations run automatically on startup.
 
-### 5. Common tasks
+### 6. Common tasks
 
 ```bash
 make help   # list all available targets with descriptions
@@ -198,7 +245,7 @@ Run tests locally:
 make test
 
 # Property-based tests (discover edge cases)
-PROPTEST_CASES=10000 cargo test --test property_tests
+PROPTEST_CASES=10000 cargo test --test property
 
 # Mutation tests (evaluate test quality)
 cargo install cargo-mutants

@@ -4,6 +4,11 @@ Practical recipes for working with the SorobanPulse REST API.  Every example
 uses `curl` and assumes the service is running at `http://localhost:3000`.
 Substitute your deployed base URL as needed.
 
+> **Looking for endpoint details?** Parameters, request/response schemas and
+> status codes are documented in the generated
+> [API reference](api-reference.md), which is built from `openapi.json` and is
+> always current.  This page covers concepts and end-to-end recipes only.
+
 ---
 
 ## Table of Contents
@@ -133,13 +138,8 @@ curl http://localhost:3000/v1/meta
 `GET /v1/events` returns paginated results.  Use `page` and `limit` to walk
 through large datasets.
 
-### Parameters
-
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `page` | integer | `1` | 1-based page number |
-| `limit` | integer | `20` | Events per page (max 100) |
-| `exact_count` | boolean | `false` | Use `true` for a precise `COUNT(*)`. Default uses PostgreSQL statistics for low-latency approximate counts |
+See the [API reference](api-reference.md#tag/events) for the full parameter
+list (`page`, `limit`, `exact_count`) and the response schema.
 
 ### Response shape
 
@@ -181,11 +181,9 @@ done
 
 ### Picking the right limit
 
-| Use case | Recommended limit |
-|---|---|
-| Real-time dashboard (low latency) | 20–50 |
-| Batch export | 100 |
-| Streaming (use NDJSON instead) | — |
+- **Real-time dashboard (low latency):** 20–50 events per page.
+- **Batch export:** 100 events per page.
+- **Streaming:** use the NDJSON export or SSE instead of paging.
 
 ---
 
@@ -194,7 +192,8 @@ done
 Event `event_data` (the `value` field and each `topic` entry) is stored as
 stellar-xdr's serde JSON. Every event endpoint (`/v1/events`, `/v1/events/{id}`,
 `/v1/events/stream` and the export endpoints) accepts a `format` query
-parameter to control how those ScVals are rendered:
+parameter to control how those ScVals are rendered (see the
+[API reference](api-reference.md#tag/events) for the exact parameter):
 
 - `json` (default): stellar-xdr's own serde JSON representation. Unchanged
   from before this parameter existed, for backward compatibility.
@@ -231,7 +230,8 @@ indexed events — never `404`.
 
 ### By event type
 
-Accepted values: `contract`, `diagnostic`, `system` (case-insensitive).
+Accepted values: `contract`, `diagnostic`, `system` (case-insensitive).  See
+the [API reference](api-reference.md#tag/events) for the full filter list.
 
 ```bash
 # Only contract events
@@ -376,13 +376,15 @@ Content-Type: application/problem+json
 
 ### Fields
 
-| Field | Type | Description |
-|---|---|---|
-| `type` | string (URI) | Stable identifier for the error kind.  Dereferencing it documents the error. |
-| `title` | string | Short, human-readable summary of the error kind (stable per `type`). |
-| `status` | integer | HTTP status code, duplicated in the body for convenience. |
-| `detail` | string | Human-readable explanation specific to this occurrence. |
-| `instance` | string | URI of the request that produced the error (usually the path). |
+- `type` — stable URI identifying the error kind; dereferencing it documents
+  the error.
+- `title` — short, human-readable summary of the error kind (stable per `type`).
+- `status` — HTTP status code, duplicated in the body for convenience.
+- `detail` — human-readable explanation specific to this occurrence.
+- `instance` — URI of the request that produced the error (usually the path).
+
+The full problem-details schema is in the
+[API reference](api-reference.md#section/Errors).
 
 ### `type` URI convention
 
@@ -403,19 +405,44 @@ wording).  Examples:
 
 > Older clients that read the legacy `error` field should migrate to `detail`.
 
+### Server-side and database failures
+
+Server-side failures — including database errors, connection-pool exhaustion,
+and unexpected query failures — are reported as **`5xx`** responses with the
+`https://sorobanpulse.dev/errors/internal` problem type.  They are **never**
+reported as `4xx`: a `4xx` means *your request* was wrong, a `5xx` means *the
+server* failed to handle an otherwise valid request.
+
+```json
+{
+  "type": "https://sorobanpulse.dev/errors/internal",
+  "title": "Internal server error",
+  "status": 500,
+  "detail": "An internal error occurred. Please contact support with the request ID.",
+  "instance": "/v1/contracts/CA3D.../stats",
+  "request_id": "01J9Z8Q2V3K4M5N6P7R8S9T0AB"
+}
+```
+
+Key guarantees:
+
+- **No raw database text.** Response bodies never contain raw `sqlx` or
+  PostgreSQL error text (table/column names, constraint names, SQL fragments,
+  or values).  The full error is logged server-side only.
+- **Generic `detail`.** The `detail` field is a fixed, generic message.  Do not
+  parse it; branch on `type` and `status` instead.
+- **Correlation ID.** Every `internal` response carries a `request_id`.  Quote
+  it when contacting support or when correlating with server logs — the same
+  ID appears in the server-side log entry for the failure.
+
+If you see a `4xx` where you expected a `5xx` (or vice versa), or a `detail`
+that looks like a database message, please report it — that is a bug.
+
 ### HTTP status codes
 
-| Status | Meaning | Common causes |
-|---|---|---|
-| `200 OK` | Success | — |
-| `400 Bad Request` | Invalid parameters | Unknown `event_type`, `from_ledger > to_ledger`, invalid UUID |
-| `401 Unauthorized` | Missing API key | `API_KEY` is set and no key was sent |
-| `403 Forbidden` | Wrong key / insufficient privileges | Wrong `API_KEY`, or regular key on admin endpoint |
-| `404 Not Found` | Route not found | Typo in path |
-| `422 Unprocessable Entity` | Validation failure | Malformed request body |
-| `429 Too Many Requests` | Rate limit exceeded | — |
-| `500 Internal Server Error` | Unexpected server error | DB query failure, unhandled panic |
-| `503 Service Unavailable` | Health check failed | DB unreachable, indexer stalled |
+Each endpoint's possible status codes are listed in the
+[API reference](api-reference.md).  In general: `4xx` means fix the request,
+`429` means back off and retry, and `5xx` may be transient.
 
 ### Checking for errors robustly
 
@@ -426,6 +453,10 @@ HTTP_CODE=$(curl -s -o /tmp/resp.json -w "%{http_code}" \
 
 if [ "$HTTP_CODE" -ne 200 ]; then
   echo "Error $HTTP_CODE: $(jq -r .detail /tmp/resp.json)"
+  # For 5xx, capture the request ID for support
+  if [ "$HTTP_CODE" -ge 500 ]; then
+    echo "Request ID: $(jq -r '.request_id // "n/a"' /tmp/resp.json)"
+  fi
   exit 1
 fi
 cat /tmp/resp.json
@@ -438,6 +469,9 @@ resp = requests.get("http://localhost:3000/v1/events")
 if resp.status_code >= 400:
     problem = resp.json()  # Content-Type: application/problem+json
     print(problem["type"], problem["title"], problem.get("detail"))
+    if resp.status_code >= 500:
+        # Log the correlation ID so support can find the server-side error
+        print("request_id:", problem.get("request_id"))
 ```
 
 ### Retryable vs non-retryable errors
@@ -513,10 +547,8 @@ curl -X POST http://localhost:3000/v1/subscriptions \
 
 ### Supported endpoints
 
-| Endpoint | Method |
-|---|---|
-| `/v1/subscriptions` | `POST` |
-| `/v1/webhooks` (webhook registration) | `POST` |
+Endpoints that honour `Idempotency-Key` are marked in the
+[API reference](api-reference.md).
 
 ### Retry recipe (Python)
 
@@ -567,11 +599,10 @@ curl -N "http://localhost:3000/v1/events/stream/multi?contract_ids=CABC...,CDEF.
 
 ### SSE event types
 
-| Event name | Payload | Description |
-|---|---|---|
-| *(unnamed)* | JSON event object | New indexed event |
-| `ping` | RFC 3339 timestamp | Keep-alive (every `SSE_KEEPALIVE_SECS`, default 15 s) |
-| `close` | — | Server shutting down — reconnect |
+- *(unnamed)* — a new indexed event, as a JSON event object.
+- `ping` — keep-alive carrying an RFC 3339 timestamp (every
+  `SSE_KEEPALIVE_SECS`, default 15 s).
+- `close` — the server is shutting down; reconnect.
 
 ### JavaScript (browser)
 
@@ -666,28 +697,11 @@ curl -H "X-Api-Key: $API_KEY" \
   -o events.parquet
 ```
 
-Response headers:
-
-| Header | Value |
-|--------|-------|
-| `Content-Type` | `application/vnd.apache.parquet` |
-| `Content-Disposition` | `attachment; filename="events.parquet"` |
-
-With `Accept-Encoding: gzip` or `br` the body is compressed and the filename
-becomes `events.parquet.gz` / `events.parquet.br`.
-
-Schema (SNAPPY-compressed, defined in `src/parquet_export.rs`):
-
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | UTF8 | Event UUID |
-| `contract_id` | UTF8 | |
-| `event_type` | UTF8 | |
-| `tx_hash` | UTF8 | |
-| `ledger` | INT64 | |
-| `timestamp_us` | INT64 | Microseconds since the Unix epoch |
-| `event_data` | UTF8 | JSON string |
-| `created_at_us` | INT64 | Microseconds since the Unix epoch |
+The response is served as `application/vnd.apache.parquet` with a
+`Content-Disposition: attachment; filename="events.parquet"` header.  With
+`Accept-Encoding: gzip` or `br` the body is compressed and the filename becomes
+`events.parquet.gz` / `events.parquet.br`.  The column schema is documented in
+the [API reference](api-reference.md) and defined in `src/parquet_export.rs`.
 
 Reading the file:
 
@@ -736,6 +750,11 @@ curl -H "X-Api-Key: $API_KEY" http://localhost:3000/v1/contracts/$CONTRACT_ID/st
 - Returns `404` until resource data exists for the contract. Collection is
   opt-in on the indexer: set `RESOURCE_STATS_ENABLED=true` (one extra
   `getTransaction` call per new transaction).
+- If the underlying database query fails, the endpoint returns `500` with the
+  `internal` problem type and a `request_id` — never a `4xx` and never raw
+  database error text.
+
+The full response schema is in the [API reference](api-reference.md).
 
 ---
 
@@ -824,3 +843,6 @@ open http://localhost:3000/docs
 # Download the OpenAPI spec
 curl -o openapi.json http://localhost:3000/openapi.json
 ```
+
+The same spec is rendered as the [API reference](api-reference.md) in this
+documentation site.

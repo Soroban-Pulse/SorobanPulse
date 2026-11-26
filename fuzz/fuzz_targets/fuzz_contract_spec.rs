@@ -4,7 +4,7 @@
 //! Feed arbitrary WASM-like bytes through the contract spec extraction code:
 //! - `custom_section(wasm, "contractspecv0")` — extract spec bytes
 //! - `wasm_hash_from_instance(entry)` — parse a ContractData XDR entry
-//! - `contract_hash(contract_id)` — decode a C-type Strkey
+//! - `ContractId::from_str(contract_id)` — decode a C-type Strkey
 //!
 //! The target must NOT panic on any input.
 //!
@@ -20,7 +20,9 @@
 //! binaries from testnet contracts to seed realistic paths.
 
 use libfuzzer_sys::fuzz_target;
-use soroban_pulse::contract_specs::{contract_hash, custom_section, wasm_hash_from_instance};
+use soroban_pulse::contract_specs::{custom_section, parse_spec, wasm_hash_from_instance};
+use std::str::FromStr;
+use stellar_xdr::curr::{ContractId, LedgerEntryData, Limits, ReadXdr};
 
 fuzz_target!(|data: &[u8]| {
     // ── 1. custom_section — arbitrary WASM bytes ──────────────────────────
@@ -30,13 +32,21 @@ fuzz_target!(|data: &[u8]| {
     let _ = custom_section(data, ""); // empty section name
 
     // ── 2. wasm_hash_from_instance — arbitrary XDR-like bytes ────────────
-    // Must not panic.
-    let _ = wasm_hash_from_instance(data);
+    // Decode with bounded limits so hostile length prefixes / nesting cannot
+    // exhaust memory or the stack, then extract the hash. Must not panic.
+    let limits = Limits { depth: 64, len: data.len() };
+    if let Ok(entry) = LedgerEntryData::from_xdr(data, limits) {
+        let _ = wasm_hash_from_instance(&entry);
+    }
 
-    // ── 3. contract_hash — arbitrary Strkey strings ───────────────────────
-    // Attempt to interpret the data as a UTF-8 string.
+    // Spec parsing of arbitrary section bytes must not panic either.
+    if let Some(section) = custom_section(data, "contractspecv0") {
+        let _ = parse_spec(&section);
+    }
+
+    // ── 3. Contract Strkey decoding — arbitrary strings ───────────────────
     if let Ok(s) = std::str::from_utf8(data) {
-        let _ = contract_hash(s);
+        let _ = ContractId::from_str(s);
     }
 
     // ── 4. Determinism — same input must produce identical results ─────────

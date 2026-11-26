@@ -71,6 +71,7 @@ jobs:
             --bench compression \
             --bench conditional_get \
             --bench serialization \
+            --bench serialization_cache \
             --bench query_planning \
             --bench streaming_response \
             --bench db_queries \
@@ -82,9 +83,13 @@ jobs:
         with:
           tool: 'cargo'
           output-file-path: bench_output.txt
+          # Persist results to the gh-pages branch so history is retained
+          # across runs and can be compared on future PRs.
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
           fail-on-alert: false
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: false
+          auto-push: true
 
       - name: Compare against baseline and detect regressions
         id: compare

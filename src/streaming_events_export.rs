@@ -193,8 +193,12 @@ pub async fn build_event_stream(
     }
     q = q.bind(max_rows);
 
-    // Get total count for reference (can be used for progress tracking)
-    let count_str = format!("SELECT COUNT(*) FROM events {}", where_clause);
+    // Capped count for reference (exact COUNT(*) scans large tables at export start)
+    let count_str = format!(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM events {} LIMIT {}) capped",
+        where_clause,
+        crate::query_builder::TOTAL_COUNT_CAP
+    );
     let mut cq = sqlx::query_scalar::<_, i64>(&count_str);
     if let Some(ref cid) = params.contract_id {
         cq = cq.bind(cid);
@@ -212,7 +216,7 @@ pub async fn build_event_stream(
     if let Some(from_ts) = params.from_timestamp {
         cq = cq.bind(from_ts);
     }
-    if let Some(to_ts) = params.from_timestamp {
+    if let Some(to_ts) = params.to_timestamp {
         cq = cq.bind(to_ts);
     }
     let total_count = cq.fetch_one(pool).await?;

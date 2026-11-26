@@ -59,6 +59,32 @@ against researchers who act in good faith and disclose responsibly.
 - Social-engineering attacks targeting maintainers
 - Already-public issues
 
+## Threat Model
+
+The threat model and security architecture document lives at
+[docs/security/threat-model.md](docs/security/threat-model.md). It contains the
+data-flow diagram, the asset and trust-boundary inventory, a STRIDE analysis
+per boundary (with existing mitigations and gaps linked to tracking issues),
+and the [security review guide](docs/security/threat-model.md#security-review-guide)
+that every PR adding endpoints, integrations or scripting must follow.
+
+## Admin API Authentication (Fail-Closed)
+
+Admin routes under `/v1/admin/*` are **fail-closed**. If no admin credential is
+configured — neither the `ADMIN_API_KEY` environment variable nor a
+database-backed API key carrying the `admin` scope — every admin request is
+rejected with `403 Forbidden` and a startup warning explains how to enable
+admin access.
+
+- Admin access requires a valid `ADMIN_API_KEY` or a DB key with `admin` scope.
+- The development-only override (`ALLOW_UNAUTHENTICATED_ADMIN=true` /
+  `ADMIN_API_DISABLED=false`) is refused when `ENVIRONMENT=production`.
+- Deployers should supply `ADMIN_API_KEY` from a secret manager and, where
+  possible, expose admin routes on an internal-only listener.
+
+See [docs/security/threat-model.md](docs/security/threat-model.md) for the
+trust boundaries around the admin API and the related tracking issues.
+
 ## Security Best Practices for Deployers
 
 See docs/secret-management.md, docs/deployment.md, and

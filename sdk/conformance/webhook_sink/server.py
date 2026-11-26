@@ -24,6 +24,8 @@ Environment:
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -32,6 +34,32 @@ from typing import Any
 received: list[dict[str, Any]] = []
 
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
+
+# Path to the shared cross-language webhook signature fixture.
+_FIXTURE_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "..",
+    "..",
+    "..",
+    "tests",
+    "fixtures",
+    "webhook_signature_vectors.json",
+)
+
+
+def compute_signature(secret: str, timestamp: str, payload: str) -> str:
+    """Compute the webhook signature: HMAC-SHA256(secret, timestamp + "." + payload)."""
+    message = f"{timestamp}.{payload}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def load_signature_vectors(path: str = _FIXTURE_PATH) -> list[dict[str, Any]]:
+    """Load the shared webhook signature test vectors fixture."""
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if isinstance(data, dict):
+        return data.get("vectors", [])
+    return data
 
 
 class SinkHandler(BaseHTTPRequestHandler):
@@ -76,6 +104,20 @@ class SinkHandler(BaseHTTPRequestHandler):
             self._send(200, {"deliveries": received, "count": len(received)})
         else:
             self._send(404, {"error": "not found"})
+
+
+def test_webhook_signature_vectors() -> None:
+    """Verify every fixture vector against the server's signing scheme."""
+    vectors = load_signature_vectors()
+    assert vectors, "webhook_signature_vectors.json must contain at least one vector"
+    for vector in vectors:
+        expected = compute_signature(
+            vector["secret"], vector["timestamp"], vector["payload"]
+        )
+        assert expected == vector["signature"], (
+            f"signature mismatch for vector {vector.get('name', '<unnamed>')}: "
+            f"expected {vector['signature']}, computed {expected}"
+        )
 
 
 def main() -> None:

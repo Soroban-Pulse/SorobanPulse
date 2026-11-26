@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 800" font-family="Inter, system-ui, sans-serif" font-size="14">
+  <rect width="1280" height="800" fill="#F9FAFB"/>
+  <text x="16" y="24" font-weight="700" fill="#111827">Event Explorer — Desktop (1280×800)</text>
+  <rect x="0" y="40" width="240" height="760" fill="#111827"/>
+  <text x="24" y="80" fill="#fff" font-weight="700">SorobanPulse</text>
+  <text x="24" y="120" fill="#C7D2FE">▸ Event Explorer</text><text x="24" y="150" fill="#9CA3AF">Live Stream</text><text x="24" y="180" fill="#9CA3AF">Contracts</text><text x="24" y="210" fill="#9CA3AF">Subscriptions</text>
+  <text x="256" y="76" font-size="22" font-weight="700" fill="#111827">Event Explorer</text>
+  <rect x="256" y="92" width="1008" height="56" rx="8" fill="#fff" stroke="#D1D5DB"/>
+  <rect x="272" y="106" width="260" height="28" rx="4" fill="#F3F4F6" stroke="#D1D5DB"/><text x="282" y="125" fill="#6B7280">Contract ID…</text>
+  <rect x="548" y="106" width="160" height="28" rx="4" fill="#F3F4F6" stroke="#D1D5DB"/><text x="558" y="125" fill="#6B7280">Event type ▾</text>
+  <rect x="724" y="106" width="220" height="28" rx="4" fill="#F3F4F6" stroke="#D1D5DB"/><text x="734" y="125" fill="#6B7280">Ledger / date range</text>
+  <rect x="1144" y="106" width="104" height="28" rx="4" fill="#4F46E5"/><text x="1170" y="125" fill="#fff">Search</text>
+  <text x="256" y="178" fill="#6B7280">Total events: 12,480 · Showing 20</text>
+  <rect x="256" y="160" width="1008" height="1" fill="none"/>
+  <rect x="256" y="200" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="214" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="214" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="214" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="214" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="244" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="258" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="258" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="258" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="258" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="288" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="302" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="302" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="302" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="302" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="332" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="346" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="346" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="346" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="346" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="376" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="390" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="390" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="390" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="390" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="420" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="434" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="434" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="434" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="434" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="464" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="478" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="478" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="478" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="478" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="508" width="1008" height="40" fill="#fff" stroke="#E5E7EB"/>
+  <rect x="272" y="522" width="160" height="12" rx="3" fill="#D1D5DB"/><rect x="460" y="522" width="220" height="12" rx="3" fill="#E5E7EB"/><rect x="720" y="522" width="100" height="12" rx="3" fill="#E5E7EB"/><rect x="860" y="522" width="280" height="12" rx="3" fill="#E5E7EB"/>
+  <rect x="256" y="568" width="96" height="32" rx="4" fill="#fff" stroke="#D1D5DB"/><text x="268" y="589">← Previous</text>
+  <text x="700" y="589" fill="#374151">Page 1 of 624</text>
+  <rect x="1168" y="568" width="96" height="32" rx="4" fill="#fff" stroke="#D1D5DB"/><text x="1186" y="589">Next →</text>
+</svg>

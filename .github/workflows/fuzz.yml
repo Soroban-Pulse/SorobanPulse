@@ -3,6 +3,11 @@ name: Nightly Fuzz
 # Issue #1154 — Run each fuzz target for 5 minutes nightly.
 # Existing targets: fuzz_validate_contract_id, fuzz_validate_tx_hash, fuzz_pagination_params
 # New targets (issue #1154): fuzz_xdr_scval, fuzz_normalizer, fuzz_contract_spec
+#
+# Issue #1498 — Fuzzing is a heavy, non-PR-blocking job and lives here on a
+# schedule (alongside the other heavy scheduled workflows: mutants, bench,
+# soak). It is intentionally NOT part of ci.yml. Any crash opens (or comments
+# on) a GitHub issue so failures are never silently ignored.
 
 on:
   schedule:
@@ -109,30 +114,182 @@ jobs:
           path: /tmp/fuzz-${{ matrix.target }}.log
           retention-days: 30
 
-      - name: Report crash as GitHub Issue
+      - name: Report crash or build failure as GitHub Issue
         if: failure()
         uses: actions/github-script@v7
         with:
           script: |
+            const fs = require('fs');
             const target = '${{ matrix.target }}';
+            const runId = context.runId;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${runId}`;
+            const artifactUrl = `${runUrl}/artifacts`;
+            const artifactName = `fuzz-artifacts-${target}-${runId}`;
+            const logPath = `/tmp/fuzz-${target}.log`;
+            const artifactDir = `/tmp/fuzz-artifacts/${target}`;
+
+            // --- Classify the failure: build failure vs. genuine crash ---
+            let log = '';
+            try {
+              log = fs.readFileSync(logPath, 'utf8');
+            } catch (e) {
+              core.warning(`Could not read fuzz log ${logPath}: ${e.message}`);
+            }
+
+            // A build failure is indicated by compiler errors emitted before
+            // the fuzzer actually starts running (no "Running" banner / no
+            // libFuzzer output). We also treat "no artifact produced" as a
+            // build failure when the log shows compile errors.
+            const hasCompilerError = /(^|\n)\s*error(\[E\d+\])?:/.test(log);
+            const fuzzerStarted = /Running\s+\S+/.test(log) || /INFO:\s+Seed corpus/.test(log) || /libFuzzer/.test(log);
+
+            let crashFiles = [];
+            try {
+              crashFiles = fs.readdirSync(artifactDir).filter(f => f.startsWith('crash-') || f.startsWith('timeout-') || f.startsWith('oom-'));
+            } catch (e) {
+              // artifact dir missing -> nothing produced
+            }
+
+            const isBuildFailure = hasCompilerError && (!fuzzerStarted || crashFiles.length === 0);
+
+            // --- Helper: paginate open issues filtered by labels ---
+            async function findOpenIssue(labels, matcher) {
+              const per_page = 100;
+              for (let page = 1; ; page++) {
+                const { data } = await github.rest.issues.listForRepo({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  state: 'open',
+                  labels,
+                  per_page,
+                  page,
+                });
+                // listForRepo returns PRs too; filter them out.
+                const issues = data.filter(i => !i.pull_request);
+                const hit = issues.find(matcher);
+                if (hit) return hit;
+                if (data.length < per_page) return null;
+              }
+            }
+
+            const today = new Date().toISOString().slice(0, 10);
+
+            if (isBuildFailure) {
+              // --- Build failure path ---
+              const title = `[Fuzz] Build failure in ${target}`;
+              const body = [
+                `## 🛠️ Fuzz Target Build Failure: \`${target}\``,
+                '',
+                `**Run:** ${runUrl}`,
+                `**Date:** ${new Date().toUTCString()}`,
+                `**Commit:** ${context.sha}`,
+                '',
+                'The fuzz target failed to compile; this is **not** a crash.',
+                '',
+                '### What to do',
+                '1. Check the build log in the run above.',
+                '2. Fix the compilation error on `main`.',
+                '3. Re-run the fuzz target to confirm it builds and runs.',
+              ].join('\n');
+
+              const existing = await findOpenIssue(
+                'fuzzing,automated,build-failure',
+                i => i.title.includes(target),
+              );
+
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body: `## Build still failing (${today})\n\n${body}`,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                  labels: ['bug', 'fuzzing', 'automated', 'build-failure'],
+                });
+              }
+            } else {
+              // --- Genuine crash path ---
+              const title = `[Fuzz] Crash found in ${target} — ${today}`;
+              const crashList = crashFiles.length
+                ? crashFiles.map(f => `- \`${f}\``).join('\n')
+                : '- (no artifact file found; check the run log)';
+
+              const body = [
+                `## 🔴 Fuzz Target Crash: \`${target}\``,
+                '',
+                `**Run:** ${runUrl}`,
+                `**Artifacts:** [${artifactName}](${artifactUrl})`,
+                `**Date:** ${new Date().toUTCString()}`,
+                `**Commit:** ${context.sha}`,
+                '',
+                '### Minimised crashing input(s)',
+                crashList,
+                '',
+                '### What to do',
+                '1. Download the `' + artifactName + '` artifact from the run.',
+                '2. Reproduce with:',
+                '   ```bash',
+                `   cargo +nightly fuzz run ${target} fuzz/corpus/${target}/ -- <crash-file>`,
+                '   ```',
+                '3. Fix the panic and add the input to the regression corpus.',
+                '4. Re-run the fuzz target to confirm the fix.',
+              ].join('\n');
+
+              const existing = await findOpenIssue(
+                'fuzzing,automated',
+                i => i.title.includes(target) && !i.labels.some(l => (l.name || l) === 'build-failure'),
+              );
+
+              if (existing) {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body: `## New crash (${today})\n\n${body}`,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  title,
+                  body,
+                  labels: ['bug', 'fuzzing', 'security', 'automated'],
+                });
+              }
+            }
+
+  # Issue #1498 — Aggregate failure notification for the scheduled run so a
+  # broken fuzz job (e.g. toolchain/install failure) is never silent, even if
+  # the per-target issue reporter above could not run.
+  notify-failure:
+    name: Notify on fuzz failure
+    needs: fuzz
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open or update tracking issue
+        uses: actions/github-script@v7
+        with:
+          script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            const title = `[Fuzz] Crash found in ${target} — ${new Date().toISOString().slice(0,10)}`;
+            const title = '[Fuzz] Nightly fuzz run failed';
 
             const body = [
-              `## 🔴 Fuzz Target Crash: \`${target}\``,
+              '## 🔴 Nightly fuzz workflow failed',
               '',
               `**Run:** ${runUrl}`,
               `**Date:** ${new Date().toUTCString()}`,
               `**Commit:** ${context.sha}`,
               '',
-              '### What to do',
-              '1. Download the `fuzz-artifacts-' + target + '` artifact from the run.',
-              '2. Reproduce with:',
-              '   ```bash',
-              `   cargo +nightly fuzz run ${target} fuzz/corpus/${target}/ -- <crash-file>`,
-              '   ```',
-              '3. Fix the panic and add a regression test.',
-              '4. Re-run the fuzz target to confirm the fix.',
+              'One or more fuzz targets failed. Check the run for crash artifacts',
+              'and per-target issues, then reproduce locally with `cargo +nightly fuzz run <target>`.',
             ].join('\n');
 
             const { data: issues } = await github.rest.issues.listForRepo({
@@ -142,14 +299,14 @@ jobs:
               labels: 'fuzzing,automated',
             });
 
-            const existing = issues.find(i => i.title.includes(target));
+            const existing = issues.find(i => i.title === title);
 
             if (existing) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: existing.number,
-                body: `## New crash\n\n${body}`,
+                body,
               });
             } else {
               await github.rest.issues.create({
@@ -157,6 +314,6 @@ jobs:
                 repo: context.repo.repo,
                 title,
                 body,
-                labels: ['bug', 'fuzzing', 'security', 'automated'],
+                labels: ['bug', 'fuzzing', 'automated'],
               });
             }

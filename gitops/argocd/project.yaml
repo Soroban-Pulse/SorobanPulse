@@ -40,8 +40,9 @@ spec:
     - group: ""
       kind: Namespace
 
-  # Namespaced resource kinds this project's Applications may create. This
-  # mirrors what the soroban-pulse Helm chart actually renders
+  # Namespaced resource kinds this project's Applications may create. The
+  # Helm chart in helm/soroban-pulse/ is the single source of truth for
+  # Kubernetes deployment, and this list mirrors what its templates render
   # (helm/soroban-pulse/templates/) — extend it if the chart grows new
   # resource kinds.
   namespaceResourceWhitelist:
@@ -55,12 +56,20 @@ spec:
       kind: ServiceAccount
     - group: apps
       kind: Deployment
+    - group: batch
+      kind: Job
     - group: autoscaling
       kind: HorizontalPodAutoscaler
     - group: policy
       kind: PodDisruptionBudget
     - group: networking.k8s.io
       kind: Ingress
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: monitoring.coreos.com
+      kind: ServiceMonitor
+    - group: monitoring.coreos.com
+      kind: PrometheusRule
 
   # Roles below are illustrative starting points, not a complete RBAC design.
   # Wire actual group/SSO mappings before relying on this in a real cluster.

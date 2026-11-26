@@ -424,6 +424,19 @@ pub enum AppError {
     #[allow(dead_code)]
     Internal(String),
 
+    /// An internal server error whose details must never reach the client.
+    ///
+    /// The full error is logged server-side (with the request correlation ID)
+    /// when the error is converted; only a generic message is rendered in the
+    /// response body.  See [`AppError::from_sqlx`] and issue #1435.
+    #[error("Internal error (correlation_id={correlation_id}): {source}")]
+    InternalWithId {
+        /// Correlation ID that ties the logged error to the client response.
+        correlation_id: String,
+        /// Server-side-only description of the failure.
+        source: String,
+    },
+
     // --- errors with attached context ------------------------------------
     /// An error bundled with rich context metadata.  Use
     /// [`AppError::with_context`] to construct these.
@@ -472,6 +485,58 @@ impl From<SubscriptionError> for AppError {
 impl From<AuthError> for AppError {
     fn from(e: AuthError) -> Self {
         AppError::Auth(e)
+    }
+}
+
+/// Type alias for API error (backward compatibility)
+pub type ApiError = AppError;
+
+// ---------------------------------------------------------------------------
+// sqlx error mapping — Issue #1435
+// ---------------------------------------------------------------------------
+
+impl AppError {
+    /// Map a [`sqlx::Error`] to an [`AppError`] without leaking database
+    /// internals to API clients.
+    ///
+    /// The full error (table/column/constraint names, values) is logged
+    /// server-side together with the current request correlation ID; the
+    /// client only ever sees a generic `internal` problem with that ID.
+    ///
+    /// Timeouts are preserved as a 503 `DATABASE_TIMEOUT` so clients can
+    /// retry, but the raw error text is still never included in the body.
+    pub fn from_sqlx(e: sqlx::Error) -> Self {
+        let correlation_id = get_request_id();
+
+        if is_query_timeout_sqlx(&e) {
+            tracing::warn!(
+                error = %e,
+                correlation_id = %correlation_id,
+                "Database query timed out"
+            );
+            return AppError::DatabaseDomain(DatabaseError::Timeout);
+        }
+
+        tracing::error!(
+            error = %e,
+            correlation_id = %correlation_id,
+            "Database error"
+        );
+
+        AppError::InternalWithId {
+            correlation_id,
+            source: e.to_string(),
+        }
+    }
+}
+
+impl From<sqlx::Error> for AppError {
+    /// Converts a raw `sqlx::Error` into a sanitised [`AppError`].
+    ///
+    /// Prefer this over `AppError::Database(e)` in request-serving code: the
+    /// `Database` variant keeps the raw error around and risks leaking it.
+    fn from(e: sqlx::Error) -> Self {
+        AppError::from_sqlx(e)
     }
 }
 
@@ -614,7 +679,9 @@ impl AppError {
                 (StatusCode::TOO_MANY_REQUESTS, "SUBSCRIPTION_LIMIT_EXCEEDED")
             }
 
-            AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR"),
+            AppError::Internal(_) | AppError::InternalWithId { .. } => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
+            }
 
             AppError::WithContext { source, .. } => source.status_and_code(),
         }
@@ -675,6 +742,17 @@ impl AppError {
             }
             AppError::Internal(msg) => {
                 tracing::error!(error = %msg, "Internal error");
+                ("internal server error".to_string(), None)
+            }
+            AppError::InternalWithId {
+                correlation_id,
+                source,
+            } => {
+                tracing::error!(
+                    error = %source,
+                    correlation_id = %correlation_id,
+                    "Internal error"
+                );
                 ("internal server error".to_string(), None)
             }
             AppError::NotFound => ("not found".to_string(), None),
@@ -1073,5 +1151,57 @@ mod tests {
             response.headers().get(header::CONTENT_TYPE).unwrap(),
             "application/problem+json"
         );
+    }
+
+    // Issue #1435: database errors must not leak to clients.
+
+    #[test]
+    fn internal_with_id_maps_to_500() {
+        let e = AppError::InternalWithId {
+            correlation_id: "abc".into(),
+            source: "secret".into(),
+        };
+        assert_eq!(
+            e.status_and_code(),
+            (StatusCode::INTERNAL_SERVER_ERROR, "INTERNAL_ERROR")
+        );
+    }
+
+    #[test]
+    fn internal_with_id_renders_generic_detail_and_correlation_id() {
+        set_request_id("req-1435".to_string());
+        let problem = AppError::InternalWithId {
+            correlation_id: "req-1435".into(),
+            source: "relation \"users\" does not exist".into(),
+        }
+        .to_problem_detail(Some("/v1/admin".to_string()));
+        REQUEST_ID.with(|r| *r.borrow_mut() = None);
+
+        assert_eq!(problem.status, 500);
+        assert_eq!(
+            problem.type_uri,
+            "https://sorobanpulse.dev/errors/internal_error"
+        );
+        assert_eq!(problem.detail.as_deref(), Some("internal server error"));
+        assert_eq!(problem.correlation_id.as_deref(), Some("req-1435"));
+
+        let value = serde_json::to_value(&problem).unwrap();
+        let serialised = value.to_string();
+        assert!(!serialised.contains("relation"));
+        assert!(!serialised.contains("users"));
+    }
+
+    #[test]
+    fn from_sqlx_hides_raw_error_text() {
+        set_request_id("req-sqlx".to_string());
+        let sqlx_err = sqlx::Error::RowNotFound;
+        let app_err = AppError::from_sqlx(sqlx_err);
+        let problem = app_err.to_problem_detail(None);
+        REQUEST_ID.with(|r| *r.borrow_mut() = None);
+
+        assert_eq!(problem.status, 500);
+        assert_eq!(problem.detail.as_deref(), Some("internal server error"));
+        assert_eq!(problem.correlation_id.as_deref(), Some("req-sqlx"));
+        assert!(matches!(app_err, AppError::InternalWithId { .. }));
     }
 }

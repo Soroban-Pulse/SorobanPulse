@@ -36,6 +36,10 @@ jobs:
   apply:
     name: Terraform Apply (${{ github.event.inputs.TF_WORKSPACE || 'staging' }})
     runs-on: ubuntu-latest
+    # Gate applies behind a manual approval. Configure required reviewers on the
+    # `staging` and `production` environments in the repository settings so that
+    # infrastructure changes cannot reach those environments without approval.
+    environment: ${{ github.event.inputs.TF_WORKSPACE || 'staging' }}
     defaults:
       run:
         working-directory: terraform

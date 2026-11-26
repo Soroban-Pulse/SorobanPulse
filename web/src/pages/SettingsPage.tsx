@@ -30,14 +30,12 @@ type FormState = {
   serverUrl: string;
   apiKey: string;
   adminKey: string;
-  remember: boolean;
 };
 
 type FormAction =
   | { type: "set_server_url"; value: string }
   | { type: "set_api_key"; value: string }
   | { type: "set_admin_key"; value: string }
-  | { type: "set_remember"; value: boolean }
   | { type: "reset"; payload: FormState };
 
 function formReducer(state: FormState, action: FormAction): FormState {
@@ -45,7 +43,6 @@ function formReducer(state: FormState, action: FormAction): FormState {
     case "set_server_url": return { ...state, serverUrl: action.value };
     case "set_api_key":    return { ...state, apiKey: action.value };
     case "set_admin_key":  return { ...state, adminKey: action.value };
-    case "set_remember":   return { ...state, remember: action.value };
     case "reset":          return action.payload;
     default:               return state;
   }
@@ -135,7 +132,6 @@ export default function SettingsPage() {
     serverUrl: settings.serverUrl,
     apiKey:    settings.apiKey,
     adminKey:  settings.adminKey,
-    remember:  settings.remember,
   });
 
   const [testState, setTestState] = useReducer(
@@ -152,7 +148,6 @@ export default function SettingsPage() {
     serverUrl: `${idPrefix}-server-url`,
     apiKey:    `${idPrefix}-api-key`,
     adminKey:  `${idPrefix}-admin-key`,
-    remember:  `${idPrefix}-remember`,
   };
 
   // ── Handlers ────────────────────────────────────────────────────────────────
@@ -182,7 +177,6 @@ export default function SettingsPage() {
         serverUrl: settings.serverUrl,
         apiKey:    settings.apiKey,
         adminKey:  settings.adminKey,
-        remember:  settings.remember,
       },
     });
     setTestState({ status: "idle" });
@@ -193,8 +187,7 @@ export default function SettingsPage() {
   const isDirty =
     form.serverUrl !== settings.serverUrl ||
     form.apiKey    !== settings.apiKey    ||
-    form.adminKey  !== settings.adminKey  ||
-    form.remember  !== settings.remember;
+    form.adminKey  !== settings.adminKey;
 
   const canTest = Boolean(form.serverUrl.trim() && form.apiKey.trim()) && !isTesting;
 
@@ -267,23 +260,6 @@ export default function SettingsPage() {
           />
           <p id={`${ids.adminKey}-hint`} className="settings-form__hint">
             Sent as <code>X-Admin-Key</code>. Unlocks admin navigation when set.
-          </p>
-        </div>
-
-        {/* ── Remember on this device ──────────────────────────────────────── */}
-        <div className="settings-form__group settings-form__group--inline">
-          <input
-            id={ids.remember}
-            type="checkbox"
-            className="settings-form__checkbox"
-            checked={form.remember}
-            onChange={(e) => dispatch({ type: "set_remember", value: e.target.checked })}
-          />
-          <label htmlFor={ids.remember} className="settings-form__inline-label">
-            Remember on this device
-          </label>
-          <p className="settings-form__hint settings-form__hint--inline">
-            Saves credentials in <code>localStorage</code>. Disable on shared computers.
           </p>
         </div>
 

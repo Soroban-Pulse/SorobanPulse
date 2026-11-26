@@ -17,6 +17,10 @@
 //!
 //!   # Dry-run: print collection JSON to stdout
 //!   cargo run --bin gen_postman -- --dry-run
+//!
+//! CI (see `.github/workflows/deploy-docs.yml`) runs this against the committed
+//! `openapi.json` — the same spec used to render the API reference — and uploads
+//! the generated collection and environments as release artifacts.
 // Issue #1246: a panic in production is a silent availability incident.
 // Test code is exempt via `allow-{unwrap,expect}-in-tests` in .clippy.toml.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
@@ -28,6 +32,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
+
+/// Committed OpenAPI spec used by both the docs reference and this generator.
+const DEFAULT_SPEC_PATH: &str = "openapi.json";
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -43,11 +50,13 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| PathBuf::from("postman"));
     let dry_run = args.iter().any(|a| a == "--dry-run");
 
-    // Read OpenAPI spec
+    // Read OpenAPI spec. When no --input is given, prefer the committed
+    // `openapi.json` at the repository root (the same spec the docs reference
+    // is generated from) so CI can run this without piping; fall back to stdin.
     let spec: Value = if let Some(ref path) = input_file {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("cannot read '{}': {e}", path))?;
-        serde_json::from_str(&content)?
+        read_spec_file(path)?
+    } else if Path::new(DEFAULT_SPEC_PATH).is_file() {
+        read_spec_file(DEFAULT_SPEC_PATH)?
     } else {
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf)?;
@@ -508,6 +517,13 @@ fn write_outputs(
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn read_spec_file(path: &str) -> anyhow::Result<Value> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("cannot read '{path}': {e}"))?;
+    serde_json::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("cannot parse '{path}' as JSON: {e}"))
+}
+
 fn count_requests(collection: &Value) -> usize {
     let mut count = 0;
     if let Some(folders) = collection.get("item").and_then(Value::as_array) {
@@ -534,7 +550,8 @@ Reads OpenAPI 3.0 JSON from stdin (or --input) and writes a Postman Collection
 v2.1 + environment files to --output-dir (default: postman/).
 
 Options:
-  --input <file>       OpenAPI JSON file (default: stdin)
+  --input <file>       OpenAPI JSON file (default: ./openapi.json if present,
+                       otherwise stdin)
   --output-dir <path>  Output directory (default: postman/)
   --dry-run            Print collection JSON to stdout, do not write files
   -h, --help           Show this message
@@ -713,6 +730,22 @@ mod tests {
         assert!(keys.contains(&"base_url"));
         assert!(keys.contains(&"api_key"));
         assert!(keys.contains(&"admin_api_key"));
+    }
+
+    #[test]
+    fn read_spec_file_reports_missing_file() {
+        let err = read_spec_file("does-not-exist-openapi.json").unwrap_err();
+        assert!(err.to_string().contains("cannot read"));
+    }
+
+    #[test]
+    fn read_spec_file_reports_invalid_json() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("gen_postman_bad_{}.json", Uuid::new_v4()));
+        std::fs::write(&path, "not json").unwrap();
+        let err = read_spec_file(path.to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("cannot parse"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

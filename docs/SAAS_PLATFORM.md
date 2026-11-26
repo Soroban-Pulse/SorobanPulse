@@ -2,6 +2,16 @@
 
 **Issue #841**
 
+> [!WARNING]
+> **Status: Experimental.** The SaaS platform is not production-ready. Tenant
+> provisioning and quota enforcement are implemented, but usage tracking
+> currently reports **zero storage and bandwidth**, and billing integration is a
+> stub (webhook handling is not wired to a real provider). Do not rely on the
+> billing or usage figures described below for production decisions.
+>
+> See [Feature Maturity](feature-maturity.md) for the current
+> status of this and other subsystems, and the tracking issues linked there.
+
 This document describes the SaaS platform features for managed multi-tenant hosting of SorobanPulse.
 
 ## Overview
@@ -406,7 +416,8 @@ UPDATE subscriptions SET tenant_id = 'tenant_existing' WHERE tenant_id IS NULL;
 
 ## See Also
 
-- [Multi-Tenant Architecture](MULTI_TENANT_ARCHITECTURE.md)
-- [Billing Integration Guide](BILLING_INTEGRATION.md)
-- [Security Best Practices](SECURITY.md)
-- [API Documentation](API.md)
+- [Multi-Tenant Architecture](multi-tenant-architecture.md)
+- [Billing Integration Guide](billing-integration.md)
+- [Security Best Practices](../operations/security.md)
+- [API Documentation](../reference/api.md)
+- [Feature Maturity](feature-maturity.md)

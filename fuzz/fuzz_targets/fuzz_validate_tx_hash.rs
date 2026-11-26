@@ -12,7 +12,12 @@ fuzz_target!(|data: &[u8]| {
 
     // A valid tx_hash must be accepted.
     // 64-char hex string is always valid.
-    if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+    if s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()) {
         assert!(result1.is_ok(), "valid tx_hash was rejected: {s}");
+    }
+
+    // Anything accepted must be exactly 64 ASCII hex bytes.
+    if result1.is_ok() {
+        assert!(s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
     }
 });

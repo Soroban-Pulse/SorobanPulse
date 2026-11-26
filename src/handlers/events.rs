@@ -15,16 +15,20 @@ pub(super) fn compact_event_data(value: &Value) -> Result<Value, AppError> {
     use flate2::{write::GzEncoder, Compression};
     use std::io::Write;
 
-    let json_bytes = serde_json::to_vec(value)
-        .map_err(|e| AppError::Internal(format!("serialization error: {e}")))?;
+    let json_bytes = serde_json::to_vec(value).map_err(|e| {
+        tracing::error!(error = %e, "compact_event_data: serialization error");
+        AppError::Internal("failed to serialize event data".to_string())
+    })?;
 
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder
-        .write_all(&json_bytes)
-        .map_err(|e| AppError::Internal(format!("gzip write error: {e}")))?;
-    let compressed = encoder
-        .finish()
-        .map_err(|e| AppError::Internal(format!("gzip finish error: {e}")))?;
+    encoder.write_all(&json_bytes).map_err(|e| {
+        tracing::error!(error = %e, "compact_event_data: gzip write error");
+        AppError::Internal("failed to compress event data".to_string())
+    })?;
+    let compressed = encoder.finish().map_err(|e| {
+        tracing::error!(error = %e, "compact_event_data: gzip finish error");
+        AppError::Internal("failed to compress event data".to_string())
+    })?;
 
     Ok(Value::String(STANDARD.encode(&compressed)))
 }
@@ -2501,6 +2505,7 @@ pub async fn get_recent_events(
 
     let rows = q.fetch_all(&state.pool).await?;
     let has_next = rows.len() > limit as usize;
+    // `limit` is clamped to 1..=100 above, so this slice bound is always valid.
     let rows = if has_next {
         &rows[..limit as usize]
     } else {
@@ -2524,10 +2529,11 @@ pub async fn get_recent_events(
         "limit": limit,
     });
 
-    if has_next && !rows.is_empty() {
-        let last_event = &rows[rows.len() - 1];
-        let next_cursor = encode_cursor(last_event.ledger, last_event.id);
-        response["next_cursor"] = json!(next_cursor);
+    if has_next {
+        if let Some(last_event) = rows.last() {
+            let next_cursor = encode_cursor(last_event.ledger, last_event.id);
+            response["next_cursor"] = json!(next_cursor);
+        }
     }
 
     Ok(Json(response))
@@ -2901,6 +2907,10 @@ pub async fn bulk_insert_events(
     let mut skipped = 0i64;
     let mut failed = 0i64;
     let mut errors = Vec::new();
+    // Rows that failed for server-side reasons. Raw database error text is
+    // never returned to the client (issue #1435); it is logged server-side
+    // only and surfaced as a generic message.
+    let mut internal_failures = 0i64;
     
     for event in body.events {
         // Validate contract_id
@@ -2956,9 +2966,21 @@ pub async fn bulk_insert_events(
             }
             Err(e) => {
                 failed += 1;
-                errors.push(format!("Database error: {}", e));
+                internal_failures += 1;
+                tracing::error!(error = %e, "bulk_insert_events: database error while inserting event");
+                errors.push(
+                    "Database error while inserting event (see server logs)".to_string(),
+                );
             }
         }
+    }
+
+    if internal_failures > 0 && inserted == 0 && skipped == 0 {
+        // Every row failed for a server-side reason: this is not a client
+        // error, so report it as an internal failure without leaking details.
+        return Err(AppError::Internal(
+            "bulk insert failed due to internal database errors".to_string(),
+        ));
     }
     
     Ok(Json(crate::models::BulkInsertResponse {
@@ -3189,7 +3211,7 @@ pub async fn delete_contract_events(
     State(state): State<AppState>,
     Path(contract_id): Path<String>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
-    headers: axum::http::HeaderMap,
+    client_ip: crate::middleware::client_ip::ClientIp,
 ) -> Result<Json<Value>, AppError> {
     validate_contract_id(&contract_id)?;
 
@@ -3198,10 +3220,10 @@ pub async fn delete_contract_events(
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(false);
 
-    let client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .unwrap_or("unknown");
+    // Verified client IP: X-Forwarded-For is only honoured when the TCP peer is a
+    // configured trusted proxy, and the right-most untrusted hop is used. Never
+    // trust the raw header here, otherwise audit records can be falsified.
+    let client_ip = client_ip.as_str();
 
     if anonymize_only {
         // Anonymize: set anonymized=true and hash tx_hash
@@ -4587,10 +4609,12 @@ pub async fn get_event_correlations(
     let contract_ids: Vec<String> = series.keys().cloned().collect();
     let mut vectors: HashMap<String, Vec<f64>> = HashMap::new();
     for cid in &contract_ids {
-        let bucket_map: HashMap<String, f64> = series[cid]
-            .iter()
-            .cloned()
-            .collect();
+        // `contract_ids` is derived from `series.keys()`, so the lookup always
+        // succeeds; skip defensively rather than panicking if that changes.
+        let Some(entries) = series.get(cid) else {
+            continue;
+        };
+        let bucket_map: HashMap<String, f64> = entries.iter().cloned().collect();
         let vec: Vec<f64> = all_buckets
             .iter()
             .map(|b| *bucket_map.get(b).unwrap_or(&0.0))
@@ -4615,8 +4639,9 @@ pub async fn get_event_correlations(
     let mut pairs: Vec<Value> = Vec::new();
     for i in 0..contract_ids.len() {
         for j in (i + 1)..contract_ids.len() {
-            let cid_a = &contract_ids[i];
-            let cid_b = &contract_ids[j];
+            let (Some(cid_a), Some(cid_b)) = (contract_ids.get(i), contract_ids.get(j)) else {
+                continue;
+            };
             let va = vectors.get(cid_a).map(Vec::as_slice).unwrap_or(&[]);
             let vb = vectors.get(cid_b).map(Vec::as_slice).unwrap_or(&[]);
             let r = pearson(va, vb);
@@ -4768,10 +4793,912 @@ pub async fn start_event_export(
     Json(request): Json<crate::bulk_export::ExportRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let job_id = state.bulk_export_manager.start_export(&state.pool, request).await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "start_event_export: failed to start export job");
+            AppError::Internal("failed to start export job".to_string())
+        })?;
 
     Ok(Json(json!({
         "job_id": job_id,
         "status": "pending",
     })))
+}
+
+// ── Moved from handlers/mod.rs (Issue #1241) ─────────────────────────────────
+
+/// Execute a future (typically a DB query), record its duration, and warn if it
+/// exceeds `threshold_ms`. Returns the future's output unchanged.
+pub(super) async fn timed_query<F, T>(
+    fut: F,
+    query_type: &str,
+    threshold_ms: u64,
+    context: Option<&str>,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    let start = std::time::Instant::now();
+    let result = fut.await;
+    let elapsed = start.elapsed();
+    crate::metrics::record_query_duration(query_type, elapsed);
+    if elapsed.as_millis() as u64 > threshold_ms {
+        crate::metrics::record_slow_query(query_type);
+        tracing::warn!(
+            query_type = %query_type,
+            duration_ms = elapsed.as_millis(),
+            threshold_ms = threshold_ms,
+            context = context.unwrap_or("-"),
+            "slow query detected"
+        );
+    }
+    result
+}
+
+/// Attach `ETag` + `Cache-Control: no-cache`, skipping an ETag that is not a
+/// valid header value rather than panicking.
+pub(super) fn insert_etag_headers(headers: &mut HeaderMap, tag: &str) {
+    if let Ok(value) = axum::http::HeaderValue::from_str(tag) {
+        headers.insert("ETag", value);
+    }
+    headers.insert("Cache-Control", axum::http::HeaderValue::from_static("no-cache"));
+}
+
+/// Gzip an in-memory buffer. Replaces a `Handle::block_on` + `unwrap()` that
+/// panicked when called from inside the async runtime (issue #1246).
+pub(super) async fn compress_gzip(input: &[u8]) -> Result<Vec<u8>, AppError> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    async_compression::tokio::bufread::GzipEncoder::new(input)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| AppError::Internal(format!("gzip error: {e}")))?;
+    Ok(buf)
+}
+
+/// Brotli-compress an in-memory buffer. See [`compress_gzip`].
+pub(super) async fn compress_brotli(input: &[u8]) -> Result<Vec<u8>, AppError> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    async_compression::tokio::bufread::BrotliEncoder::new(input)
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| AppError::Internal(format!("brotli error: {e}")))?;
+    Ok(buf)
+}
+
+pub(super) fn format_jsonpath_filter(path: &str, pattern: &str) -> String {
+    let escaped = pattern.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("{path} ? (@ like_regex \"{escaped}\")")
+}
+
+pub(super) fn compute_etag(last_id: &Uuid, last_created_at: &DateTime<Utc>, total: Option<i64>) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(last_id.as_bytes());
+    h.update(
+        last_created_at
+            .timestamp_nanos_opt()
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    if let Some(t) = total {
+        h.update(t.to_le_bytes());
+    } else {
+        h.update(0i64.to_le_bytes());
+    }
+    let digest = h.finalize();
+    format!("\"{}\"", URL_SAFE_NO_PAD.encode(&digest[..8]))
+}
+
+pub(super) static EVENTS_FEED_CACHE: OnceLock<Mutex<HashMap<String, CacheEntry>>> = OnceLock::new();
+
+/// Extract the tenant_id from request extensions when multi-tenant mode is active.
+/// Returns `None` in single-tenant mode (extension not present).
+pub(super) fn extract_tenant_id(extensions: &axum::http::Extensions) -> Option<&str> {
+    extensions.get::<TenantId>().map(|t| t.0.as_str())
+}
+
+/// Append a `tenant_id = $N` condition when multi-tenant mode is active.
+/// Returns the bind index incremented by 1 if a condition was added.
+pub(super) fn maybe_add_tenant_condition(
+    conditions: &mut Vec<String>,
+    bind_idx: &mut i32,
+    tenant_id: Option<&str>,
+) {
+    if tenant_id.is_some() {
+        conditions.push(format!("tenant_id = ${bind_idx}"));
+        *bind_idx += 1;
+    }
+}
+
+/// Encode a cursor with a tag indicating the sort column.
+pub(super) fn encode_cursor_tagged(tag: &str, value: &str, id: Uuid) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{tag}:{value}:{id}"))
+}
+
+/// Decode a tagged cursor back to (tag, value, id).
+pub(super) fn decode_cursor_tagged(cursor: &str) -> Result<(String, String, Uuid), AppError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    let s = std::str::from_utf8(&bytes)
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    
+    let parts: Vec<&str> = s.splitn(3, ':').collect();
+    if parts.len() != 3 {
+        return Err(AppError::Validation("invalid cursor format".to_string()));
+    }
+    
+    let tag = parts[0].to_string();
+    let value = parts[1].to_string();
+    let id = Uuid::parse_str(parts[2])
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    
+    if id.get_version() != Some(uuid::Version::Random) {
+        return Err(AppError::Validation("invalid cursor".to_string()));
+    }
+    
+    Ok((tag, value, id))
+}
+
+/// Encode a (ledger, id) pair as an opaque URL-safe base64 cursor.
+pub(super) fn encode_cursor(ledger: i64, id: Uuid) -> String {
+    URL_SAFE_NO_PAD.encode(format!("{ledger}:{id}"))
+}
+
+/// Decode a cursor back to (ledger, id). Returns a validation error on malformed input.
+pub(super) fn decode_cursor(cursor: &str) -> Result<(i64, Uuid), AppError> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(cursor)
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    let s = std::str::from_utf8(&bytes)
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    let (ledger_str, id_str) = s
+        .split_once(':')
+        .ok_or_else(|| AppError::Validation("invalid cursor".to_string()))?;
+    let ledger = ledger_str
+        .parse::<i64>()
+        .map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    if ledger <= 0 {
+        return Err(AppError::Validation("invalid cursor".to_string()));
+    }
+    // Reject astronomically large ledger values (Stellar ledger sequence is a u32)
+    if ledger > i64::from(u32::MAX) {
+        return Err(AppError::Validation("invalid cursor".to_string()));
+    }
+    let id =
+        Uuid::parse_str(id_str).map_err(|_| AppError::Validation("invalid cursor".to_string()))?;
+    if id.get_version() != Some(uuid::Version::Random) {
+        return Err(AppError::Validation("invalid cursor".to_string()));
+    }
+    Ok((ledger, id))
+}
+pub(super) fn resolve_columns<'a>(params: &'a PaginationParams) -> Result<Vec<&'a str>, AppError> {
+    params.columns().map_err(|(unknown, allowed)| {
+        AppError::Validation(format!(
+            "unknown fields: [{}]; valid fields are: [{}]",
+            unknown.join(", "),
+            allowed.join(", ")
+        ))
+    })
+}
+
+/// Stellar ledger sequences are 32-bit unsigned integers (max 2^32 - 1).
+/// Validate that a ledger parameter is within [0, 2^32 - 1] (issue #423).
+pub(crate) fn validate_ledger_param(name: &str, value: i64) -> Result<(), AppError> {
+    const MAX_LEDGER: i64 = u32::MAX as i64; // 4_294_967_295
+    if value < 0 || value > MAX_LEDGER {
+        return Err(AppError::Validation(format!(
+            "{name} must be in range [0, {MAX_LEDGER}]"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate a `tx_hash` query/path parameter.
+///
+/// `pub` (not `pub(crate)`) because `fuzz/fuzz_targets/fuzz_validate_tx_hash.rs`
+/// links this crate as an external dependency.
+pub fn validate_tx_hash(tx_hash: &str) -> Result<(), AppError> {
+    if tx_hash.len() != 64 {
+        return Err(AppError::Validation("invalid tx_hash format".to_string()));
+    }
+    // Accept both uppercase and lowercase hex — callers should normalize to lowercase first.
+    if !tx_hash.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::Validation("invalid tx_hash format".to_string()));
+    }
+    Ok(())
+}
+
+/// Validate and parse ISO 8601 timestamp string.
+pub(super) fn validate_timestamp(ts: &str) -> Result<DateTime<Utc>, AppError> {
+    ts.parse::<DateTime<Utc>>()
+        .map_err(|_| AppError::Validation(format!("invalid timestamp format: {}", ts)))
+}
+
+/// Converts an `Event` to a JSON object containing only the requested fields.
+pub(super) fn filter_fields(
+    event: &models::Event,
+    columns: &[&str],
+    enc_key: Option<&[u8; 32]>,
+    enc_key_old: Option<&[u8; 32]>,
+) -> Value {
+    let mut map = serde_json::Map::new();
+    for &col in columns {
+        match col {
+            "id" => {
+                map.insert(col.to_string(), json!(event.id));
+            }
+            "contract_id" => {
+                map.insert(col.to_string(), json!(event.contract_id));
+            }
+            "event_type" => {
+                map.insert(col.to_string(), json!(event.event_type));
+            }
+            "tx_hash" => {
+                map.insert(col.to_string(), json!(event.tx_hash));
+            }
+            "ledger" => {
+                map.insert(col.to_string(), json!(event.ledger));
+            }
+            "timestamp" => {
+                map.insert(col.to_string(), json!(event.timestamp));
+            }
+            "event_data" => {
+                let decrypted = decrypt_event_data(&event.event_data, enc_key, enc_key_old);
+                map.insert(col.to_string(), decrypted);
+            }
+            "event_data_normalized" => {
+                map.insert(col.to_string(), json!(event.event_data_normalized));
+            }
+            "event_data_decoded" => {
+                map.insert(col.to_string(), json!(event.event_data_decoded));
+            }
+            "ledger_hash" => {
+                map.insert(col.to_string(), json!(event.ledger_hash));
+            }
+            "anonymized" => {
+                map.insert(col.to_string(), json!(event.anonymized));
+            }
+            "in_successful_call" => {
+                map.insert(col.to_string(), json!(event.in_successful_call));
+            }
+            "created_at" => {
+                map.insert(col.to_string(), json!(event.created_at));
+            }
+            "schema_version" => {
+                map.insert(col.to_string(), json!(event.schema_version));
+            }
+            _ => {}
+        }
+    }
+    Value::Object(map)
+}
+
+/// Returns true if the client prefers NDJSON via the Accept header.
+pub(super) fn extract_api_key_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("Authorization")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .or_else(|| headers.get("X-Api-Key").and_then(|h| h.to_str().ok()))
+}
+
+pub(super) fn is_admin_request(headers: &HeaderMap, admin_api_keys: &[secrecy::SecretString]) -> bool {
+    extract_api_key_from_headers(headers)
+        .map(|provided_key| {
+            admin_api_keys
+                .iter()
+                .any(|expected| expected.expose_secret().as_str() == provided_key)
+        })
+        .unwrap_or(false)
+}
+
+pub(super) fn accepts_ndjson(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/x-ndjson"))
+        .unwrap_or(false)
+}
+
+/// Extract client IP from X-Forwarded-For or X-Real-IP headers, falling back to "unknown".
+pub(crate) fn extract_client_ip(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string())
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Build a plain JSON response from a `Value`.
+pub(super) fn json_response(body: Value) -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(serde_json::to_vec(&body).unwrap_or_default()))
+        .unwrap_or_else(|e| response_build_error(e))
+}
+
+/// Build an NDJSON response: one JSON object per line, no wrapping array.
+pub(super) fn ndjson_response(events: impl Iterator<Item = Value>) -> Response<Body> {
+    let mut buf = String::new();
+    for ev in events {
+        buf.push_str(&serde_json::to_string(&ev).unwrap_or_default());
+        buf.push('\n');
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/x-ndjson")
+        .body(Body::from(buf))
+        .unwrap_or_else(|e| response_build_error(e))
+}
+
+pub(super) fn xml_response(body: String) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/atom+xml; charset=utf-8")
+        .body(Body::from(body))
+        .unwrap_or_else(|e| response_build_error(e))
+}
+
+pub(super) fn render_atom_feed(rows: &[sqlx::postgres::PgRow]) -> Result<String, AppError> {
+    let updated = rows
+        .first()
+        .and_then(|row| row.try_get::<DateTime<Utc>, _>("timestamp").ok())
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339();
+    let mut feed = format!(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+         <feed xmlns=\"http://www.w3.org/2005/Atom\">\
+         <title>Soroban Pulse Events</title>\
+         <id>urn:soroban-pulse:events</id><updated>{}</updated>",
+        escape_xml(&updated)
+    );
+    for row in rows {
+        feed.push_str(&render_feed_entry(row)?);
+    }
+    feed.push_str("</feed>");
+    Ok(feed)
+}
+
+pub(super) fn render_feed_entry(row: &sqlx::postgres::PgRow) -> Result<String, AppError> {
+    let id: Uuid = row.try_get("id")?;
+    let contract_id: String = row.try_get("contract_id")?;
+    let event_type: String = row.try_get("event_type")?;
+    let tx_hash: String = row.try_get("tx_hash")?;
+    let ledger: i64 = row.try_get("ledger")?;
+    let timestamp: DateTime<Utc> = row.try_get("timestamp")?;
+    let event_data: Value = row.try_get("event_data")?;
+    Ok(format!(
+        "<entry><title>{} event for {}</title>\
+         <id>urn:soroban-pulse:event:{}</id><updated>{}</updated>\
+         <summary type=\"html\">ledger {} tx {}</summary>\
+         <content type=\"application/json\">{}</content></entry>",
+        escape_xml(&event_type),
+        escape_xml(&contract_id),
+        id,
+        escape_xml(&timestamp.to_rfc3339()),
+        ledger,
+        escape_xml(&tx_hash),
+        escape_xml(&event_data.to_string())
+    ))
+}
+
+pub(super) fn escape_xml(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+/// Escape a single CSV field per RFC 4180.
+///
+/// A field is wrapped in double-quotes if it contains a comma, double-quote,
+/// newline (`\n`), or carriage-return (`\r`). Any double-quote character
+/// inside the field is escaped by doubling it (`"` → `""`).
+pub(super) fn csv_escape_field(value: &str) -> String {
+    if value.contains([',', '"', '\n', '\r']) {
+        // Escape embedded double-quotes by doubling them, then wrap in quotes.
+        let escaped = value.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        value.to_owned()
+    }
+}
+
+/// Query parameters for the /v1/events/recent endpoint.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct RecentParams {
+    pub limit: Option<i64>,
+    pub event_type: Option<crate::models::EventType>,
+    pub contract_id: Option<String>,
+    /// Cursor for pagination (opaque, URL-safe).
+    pub cursor: Option<String>,
+    /// Not supported — returns 400 if provided.
+    pub from_ledger: Option<i64>,
+    /// Not supported — returns 400 if provided.
+    pub to_ledger: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct RelatedTxParams {
+    pub depth: Option<u8>,
+}
+
+pub(super) fn collect_tx_refs(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if is_tx_ref_key(key) {
+                    if let Some(tx_hash) = value.as_str() {
+                        out.push(tx_hash.to_string());
+                    }
+                }
+                collect_tx_refs(value, out);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_tx_refs(value, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(super) fn is_tx_ref_key(key: &str) -> bool {
+    matches!(key, "tx_hash" | "transaction_hash" | "related_tx_hash" | "parent_tx_hash" | "child_tx_hash")
+}
+
+/// Get time-series aggregation of events
+#[utoipa::path(
+    get,
+    path = "/v1/events/timeseries",
+    tag = "events",
+    params(
+        ("bucket" = String, Query, description = "Time bucket: 1h, 1d, 1w, 1mo"),
+        ("contract_id" = Option<String>, Query, description = "Filter by contract ID"),
+        ("from_ledger" = Option<i64>, Query, description = "Start ledger"),
+        ("to_ledger" = Option<i64>, Query, description = "End ledger"),
+    ),
+    responses(
+        (status = 200, description = "Time-series data", body = models::TimeseriesResponse),
+        (status = 400, description = "Invalid parameters"),
+    )
+)]
+pub async fn get_timeseries(
+    State(state): State<AppState>,
+    Query(params): Query<models::TimeseriesParams>,
+) -> Result<Json<models::TimeseriesResponse>, AppError> {
+    let start = std::time::Instant::now();
+    
+    let interval = match params.bucket.as_str() {
+        "1h" => "1 hour",
+        "1d" => "1 day",
+        "1w" => "1 week",
+        "1mo" => "1 month",
+        _ => return Err(AppError::Validation("invalid bucket".to_string())),
+    };
+    
+    let mut conditions = vec!["1=1".to_string()];
+    let mut bind_idx = 1;
+    
+    if params.contract_id.is_some() {
+        conditions.push(format!("contract_id = ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if params.from_ledger.is_some() {
+        conditions.push(format!("ledger >= ${bind_idx}"));
+        bind_idx += 1;
+    }
+    if params.to_ledger.is_some() {
+        conditions.push(format!("ledger <= ${bind_idx}"));
+        bind_idx += 1;
+    }
+    
+    let where_clause = conditions.join(" AND ");
+    let query_str = format!(
+        "SELECT \
+            date_trunc('{}', timestamp) as bucket_start, \
+            COUNT(*) as event_count, \
+            COUNT(DISTINCT contract_id) as contract_count, \
+            event_type, \
+            COUNT(*) as type_count \
+         FROM events \
+         WHERE {} \
+         GROUP BY date_trunc('{}', timestamp), event_type \
+         ORDER BY bucket_start ASC",
+        interval, where_clause, interval
+    );
+    
+    let mut q = sqlx::query(&query_str);
+    if let Some(ref cid) = params.contract_id {
+        q = q.bind(cid);
+    }
+    if let Some(fl) = params.from_ledger {
+        q = q.bind(fl);
+    }
+    if let Some(tl) = params.to_ledger {
+        q = q.bind(tl);
+    }
+    
+    let rows = q.fetch_all(&state.read_pool).await?;
+    
+    let mut buckets_map: std::collections::HashMap<chrono::DateTime<chrono::Utc>, models::TimeseriesBucket> = std::collections::HashMap::new();
+    
+    for row in rows {
+        let bucket_start: chrono::DateTime<chrono::Utc> = row.try_get("bucket_start")?;
+        let event_count: i64 = row.try_get("event_count")?;
+        let contract_count: i64 = row.try_get("contract_count")?;
+        let event_type: String = row.try_get("event_type")?;
+        let type_count: i64 = row.try_get("type_count")?;
+        
+        let bucket = buckets_map.entry(bucket_start).or_insert_with(|| models::TimeseriesBucket {
+            bucket_start,
+            event_count,
+            contract_count,
+            event_types: std::collections::HashMap::new(),
+        });
+        
+        bucket.event_types.insert(event_type, type_count);
+    }
+    
+    let mut data: Vec<_> = buckets_map.into_values().collect();
+    data.sort_by_key(|b| b.bucket_start);
+    
+    crate::metrics::record_timeseries_query_duration(start.elapsed());
+    
+    Ok(Json(models::TimeseriesResponse {
+        bucket: params.bucket,
+        data,
+    }))
+}
+
+/// Parse a relative time expression such as `"24h"`, `"1d"`, `"30m"`, `"1w"`, `"90s"`.
+/// Returns the equivalent `chrono::Duration` or a validation error.
+pub(super) fn parse_relative_duration(expr: &str) -> Result<chrono::Duration, AppError> {
+    let expr = expr.trim();
+    if expr.is_empty() {
+        return Err(AppError::Validation(
+            "relative time expression must not be empty".to_string(),
+        ));
+    }
+    let (num_str, unit) = expr
+        .find(|c: char| c.is_alphabetic())
+        .map(|i| (&expr[..i], &expr[i..]))
+        .ok_or_else(|| {
+            AppError::Validation(format!(
+                "invalid relative time expression '{}': missing unit (s/m/h/d/w)",
+                expr
+            ))
+        })?;
+    let n: i64 = num_str.parse().map_err(|_| {
+        AppError::Validation(format!(
+            "invalid relative time expression '{}': '{}' is not a number",
+            expr, num_str
+        ))
+    })?;
+    if n <= 0 {
+        return Err(AppError::Validation(format!(
+            "relative time value must be positive, got '{}'",
+            expr
+        )));
+    }
+    match unit {
+        "s" => Ok(chrono::Duration::seconds(n)),
+        "m" => Ok(chrono::Duration::minutes(n)),
+        "h" => Ok(chrono::Duration::hours(n)),
+        "d" => Ok(chrono::Duration::days(n)),
+        "w" => Ok(chrono::Duration::weeks(n)),
+        other => Err(AppError::Validation(format!(
+            "unknown time unit '{}' in '{}': use s, m, h, d, or w",
+            other, expr
+        ))),
+    }
+}
+
+pub(super) async fn handle_ws_connection(
+    socket: axum::extract::ws::WebSocket,
+    contract_id: Option<String>,
+    event_tx: tokio::sync::broadcast::Sender<models::SorobanEvent>,
+    keepalive_ms: u64,
+    ws_connections: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use axum::extract::ws::{Message, WebSocket};
+    use tokio::time::{interval, Duration};
+    
+    let count = ws_connections.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    crate::metrics::update_ws_connections(count);
+    
+    let (mut sender, mut receiver) = socket.split();
+    let mut rx = event_tx.subscribe();
+    let mut keepalive_interval = interval(Duration::from_millis(keepalive_ms));
+    
+    loop {
+        tokio::select! {
+            _ = keepalive_interval.tick() => {
+                if sender.send(Message::Ping(vec![])).await.is_err() {
+                    break;
+                }
+            }
+            msg = receiver.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+            result = rx.recv() => {
+                match result {
+                    Ok(event) => {
+                        if let Some(ref cid) = contract_id {
+                            if event.contract_id != *cid {
+                                continue;
+                            }
+                        }
+                        if let Ok(json) = serde_json::to_string(&event) {
+                            if sender.send(Message::Text(json)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+    
+    let count = ws_connections.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) - 1;
+    crate::metrics::update_ws_connections(count);
+}
+
+// ============================================================================
+// Issue #624: Bulk batch query with streaming
+// ============================================================================
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct BatchEventFilter {
+    /// Filter by contract_id.
+    pub contract_id: Option<String>,
+    /// Filter by event type.
+    pub event_type: Option<String>,
+    /// Minimum ledger (inclusive).
+    pub from_ledger: Option<i64>,
+    /// Maximum ledger (inclusive).
+    pub to_ledger: Option<i64>,
+    /// Filter by tx_hash.
+    pub tx_hash: Option<String>,
+    /// Maximum events to return for this filter (max: 10_000).
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct BatchQueryRequest {
+    /// Array of filter objects to query in a single request.
+    pub filters: Vec<BatchEventFilter>,
+    /// Response format: "json" (default) or "csv".
+    #[serde(default = "default_batch_format")]
+    pub format: String,
+}
+
+pub(super) fn default_batch_format() -> String {
+    "json".to_string()
+}
+
+// ============================================================================
+// Issue #625: Full-text search endpoint
+// ============================================================================
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct FulltextSearchParams {
+    /// Full-text search query (PostgreSQL plainto_tsquery format).
+    pub q: String,
+    /// Filter by contract_id.
+    pub contract_id: Option<String>,
+    /// Filter by event type.
+    pub event_type: Option<String>,
+    /// Minimum ledger.
+    pub from_ledger: Option<i64>,
+    /// Maximum ledger.
+    pub to_ledger: Option<i64>,
+    /// Maximum results (default 50, max 500).
+    pub limit: Option<i64>,
+    /// Offset for pagination.
+    pub offset: Option<i64>,
+    /// When true, results are sorted by relevance rank (default true).
+    #[serde(default = "default_rank")]
+    pub rank: bool,
+}
+
+pub(super) fn default_rank() -> bool {
+    true
+}
+
+/// `GET /v1/search` — full-text search on event data.
+///
+/// Searches the `event_data_tsv` tsvector column using PostgreSQL
+/// `plainto_tsquery`. Results are ranked by relevance by default.
+/// Requires the migration `20260429000000_event_data_fulltext_search.sql`.
+#[utoipa::path(
+    get,
+    path = "/v1/search",
+    tag = "search",
+    params(
+        ("q" = String, Query, description = "Full-text query (plain text, supports AND/OR/NOT)"),
+        ("contract_id" = Option<String>, Query, description = "Filter by contract ID"),
+        ("event_type" = Option<String>, Query, description = "Filter by event type"),
+        ("from_ledger" = Option<i64>, Query, description = "Minimum ledger"),
+        ("to_ledger" = Option<i64>, Query, description = "Maximum ledger"),
+        ("limit" = Option<i64>, Query, description = "Max results (default 50, max 500)"),
+        ("offset" = Option<i64>, Query, description = "Pagination offset"),
+        ("rank" = Option<bool>, Query, description = "Sort by relevance (default true)"),
+    ),
+    responses(
+        (status = 200, description = "Full-text search results with relevance scores"),
+        (status = 400, description = "Invalid query"),
+    )
+)]
+pub async fn fulltext_search(
+    State(state): State<AppState>,
+    Query(params): Query<FulltextSearchParams>,
+) -> Result<Json<Value>, AppError> {
+    let q = params.q.trim();
+    if q.is_empty() {
+        return Err(AppError::Validation("q parameter must not be empty".to_string()));
+    }
+    if q.len() > 1000 {
+        return Err(AppError::Validation(
+            "q parameter exceeds maximum length of 1000 characters".to_string(),
+        ));
+    }
+
+    let limit = params.limit.unwrap_or(50).max(1).min(500);
+    let offset = params.offset.unwrap_or(0).max(0);
+
+    let order_clause = if params.rank {
+        "ORDER BY ts_rank(event_data_tsv, plainto_tsquery('english', $1)) DESC, ledger DESC"
+    } else {
+        "ORDER BY ledger DESC, id DESC"
+    };
+
+    let mut sql = format!(
+        "SELECT id, contract_id, event_type, tx_hash, ledger, timestamp, event_data, created_at, \
+         ts_rank(event_data_tsv, plainto_tsquery('english', $1)) AS rank \
+         FROM events \
+         WHERE event_data_tsv @@ plainto_tsquery('english', $1)"
+    );
+
+    let mut bind_idx = 2i32;
+    let mut bind_contract_id: Option<String> = None;
+    let mut bind_event_type: Option<String> = None;
+    let mut bind_from: Option<i64> = None;
+    let mut bind_to: Option<i64> = None;
+
+    if let Some(ref cid) = params.contract_id {
+        sql.push_str(&format!(" AND contract_id = ${bind_idx}"));
+        bind_contract_id = Some(cid.clone());
+        bind_idx += 1;
+    }
+    if let Some(ref et) = params.event_type {
+        sql.push_str(&format!(" AND event_type = ${bind_idx}"));
+        bind_event_type = Some(et.clone());
+        bind_idx += 1;
+    }
+    if let Some(from) = params.from_ledger {
+        sql.push_str(&format!(" AND ledger >= ${bind_idx}"));
+        bind_from = Some(from);
+        bind_idx += 1;
+    }
+    if let Some(to) = params.to_ledger {
+        sql.push_str(&format!(" AND ledger <= ${bind_idx}"));
+        bind_to = Some(to);
+        bind_idx += 1;
+    }
+    let _ = bind_idx;
+
+    sql.push_str(&format!(" {order_clause} LIMIT {limit} OFFSET {offset}"));
+
+    let mut query = sqlx::query(&sql).bind(q);
+    if let Some(ref v) = bind_contract_id { query = query.bind(v); }
+    if let Some(ref v) = bind_event_type { query = query.bind(v); }
+    if let Some(v) = bind_from { query = query.bind(v); }
+    if let Some(v) = bind_to { query = query.bind(v); }
+
+    let rows = query
+        .fetch_all(&state.read_pool)
+        .await
+        .map_err(|e| AppError::Internal(format!("Full-text search query failed: {e}")))?;
+
+    let mut results: Vec<Value> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let id: uuid::Uuid = row.try_get("id")?;
+        let contract_id: String = row.try_get("contract_id")?;
+        let event_type: String = row.try_get("event_type")?;
+        let tx_hash: String = row.try_get("tx_hash")?;
+        let ledger: i64 = row.try_get("ledger")?;
+        let timestamp: chrono::DateTime<Utc> = row.try_get("timestamp")?;
+        let event_data: Value = row.try_get("event_data")?;
+        let rank: f32 = row.try_get("rank").unwrap_or(0.0f32);
+
+        results.push(json!({
+            "id": id.to_string(),
+            "contract_id": contract_id,
+            "event_type": event_type,
+            "tx_hash": tx_hash,
+            "ledger": ledger,
+            "timestamp": timestamp.to_rfc3339(),
+            "event_data": event_data,
+            "relevance": rank,
+        }));
+    }
+
+    crate::metrics::record_fulltext_search();
+
+    Ok(Json(json!({
+        "query": q,
+        "total": results.len(),
+        "limit": limit,
+        "offset": offset,
+        "data": results,
+    })))
+}
+
+// ============================================================================
+// Issue #626: Faceted search / aggregation API
+// ============================================================================
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct EventsAggregationParams {
+    /// Filter by contract_id.
+    pub contract_id: Option<String>,
+    /// Filter by event type.
+    pub event_type: Option<String>,
+    /// Minimum ledger.
+    pub from_ledger: Option<i64>,
+    /// Maximum ledger.
+    pub to_ledger: Option<i64>,
+    /// Time bucket: "hourly", "daily" (default), or "weekly".
+    #[serde(default = "default_time_bucket")]
+    pub time_bucket: String,
+    /// Maximum buckets per aggregation dimension (default 100, max 500).
+    pub limit: Option<i64>,
+}
+
+pub(super) fn default_time_bucket() -> String {
+    "daily".to_string()
+}
+
+// ── Issue #671: GET /v1/analytics/trending ───────────────────────────────────
+
+/// Query parameters for the trending endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct TrendingParams {
+    pub window_mins:  Option<i64>,
+    pub baseline_hrs: Option<i64>,
+    pub contract_id:  Option<String>,
+    pub event_type:   Option<String>,
+    pub min_zscore:   Option<f64>,
+    pub limit:        Option<i64>,
+}
+
+// ── Issue #672: GET /v1/analytics/correlations ───────────────────────────────
+
+/// Query parameters for the correlations endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub struct CorrelationParams {
+    pub window_hrs:      Option<i64>,
+    pub bucket_mins:     Option<i64>,
+    pub min_correlation: Option<f64>,
+    pub contract_ids:    Option<String>,
+    pub event_type:      Option<String>,
+    pub limit:           Option<i64>,
 }

@@ -16,9 +16,32 @@ git-repository-url = "https://github.com/Soroban-Pulse/SorobanPulse"
 git-repository-icon = "fa-github"
 edit-url-template = "https://github.com/Soroban-Pulse/SorobanPulse/edit/main/{path}"
 no-section-label = false
-additional-css = []
-additional-js = []
+additional-css = ["docs/theme/custom.css"]
+additional-js = ["docs/theme/edit-link.js"]
 cname = ""
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.redirect]
+# SCREAMING_CASE.md -> kebab-case subdirectories
+"SAAS_PLATFORM.md" = "integrations/saas-platform.md"
+"ML_INTEGRATION.md" = "integrations/ml-integration.md"
+"QUERY_PLAN_CACHING.md" = "operations/query-plan-caching.md"
+
+# snake_case.md -> kebab-case subdirectories
+"audit_logging.md" = "operations/audit-logging.md"
+"bulk_export.md" = "guides/bulk-export.md"
+"cross_chain_correlation.md" = "reference/cross-chain-correlation.md"
+"data-retention-tiers.md" = "operations/data-retention-tiers.md"
+
+# Merged duplicate-topic pages
+"audit-trail.md" = "operations/audit-logging.md"
+"cross-chain-events.md" = "reference/cross-chain-correlation.md"
+"data-retention.md" = "operations/data-retention-tiers.md"
+
+# Missing pages referenced by SUMMARY.md (issue #1483) -> existing equivalents
+"api-contract-testing.md" = "contract-testing.md"
+"property-testing.md" = "contract-testing.md"
 
 [output.html.search]
 enable = true

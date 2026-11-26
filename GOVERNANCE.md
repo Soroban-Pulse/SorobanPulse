@@ -114,6 +114,37 @@ normal nomination process.
 A maintainer may be removed for a serious or repeated breach of the Code of
 Conduct by a two-thirds vote of the other maintainers.
 
+## Branch Protection
+
+The `main` branch is protected with the following settings. Maintainers must
+not weaken them without an RFC:
+
+- **Required status check:** `ci-success` must pass before a pull request can
+  be merged. `ci-success` is the aggregate job of the CI workflow and fails
+  when any required job fails, is cancelled, or is skipped, and when the CI
+  workflow did not run at all for the pull request. A skipped Rust job (for
+  example because of a path filter) therefore does not count as a pass.
+- **No bypass:** administrators and maintainers are subject to the same
+  required checks; force pushes and direct pushes to `main` are disabled.
+- **Up-to-date branches:** a pull request must be up to date with `main`
+  before merging, so the checks that passed are the ones that will land.
+- **Review requirement:** at least one code owner approval for every touched
+  area, as described under *Decision Making*.
+
+### Dependabot Auto-Merge
+
+Dependabot patch updates labelled `dependencies` may be auto-merged by
+`.github/workflows/auto-merge.yml`, but only under these conditions:
+
+- Auto-merge is enabled only when the full Rust test suite has actually run
+  and passed on the pull request. Because `ci-success` fails on skipped jobs,
+  a pull request whose Rust jobs were skipped cannot satisfy the required
+  check and will not merge.
+- Auto-merge is disabled entirely while CI is known to be broken or invalid.
+- Crates that use build scripts (`build.rs`) or proc macros are excluded from
+  auto-merge; their updates require at least one human approval.
+- The `dependabot/fetch-metadata` action is pinned by commit SHA.
+
 ## Changes to This Document
 
 Changes to this document follow the RFC process above.

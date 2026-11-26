@@ -1,10 +1,16 @@
-//! Scoped API keys stored hashed in the database — Issue #1258.
+//! Scoped API keys stored hashed in the database — Issues #1258, #1429, #1430.
 //!
-//! - Keys are generated as `sp_<base58(32 random bytes)>`; only
-//!   `sha256(key)` (hex) is persisted, so a database leak does not leak keys.
+//! - Keys are generated as `sp_<base58(32 random bytes)>` (256 bits of
+//!   randomness); only a peppered HMAC-SHA256 digest is persisted, so a
+//!   database leak does not leak usable keys.
 //! - Each key carries a set of [`ApiKeyScope`]s. `admin` implies every scope.
 //! - Keys are validated against the database on every request (no in-memory
 //!   cache), so a revoked key is rejected on the very next request.
+//! - Tenant-bound keys (formerly stored in plaintext in
+//!   `saas_tenants.api_keys`) live in the same `api_keys` table with
+//!   `tenant_id` set; there is no plaintext key storage anywhere.
+//! - Digests written by older releases (bare SHA-256) are re-hashed with the
+//!   current peppered HMAC transparently on the next successful validation.
 //! - The legacy `API_KEY` / `ADMIN_API_KEY` env vars keep working unchanged;
 //!   see [`crate::middleware::auth`].
 //!
@@ -24,13 +30,20 @@ use sqlx::PgPool;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::{error::AppError, middleware::hash_api_key, routes::AppState};
+use crate::{
+    error::AppError,
+    middleware::{hash_api_key, hash_api_key_legacy},
+    routes::AppState,
+};
 
 /// Prefix of every database-backed API key.
 pub const KEY_PREFIX: &str = "sp_";
 
 /// Number of random bytes in a generated key (before base58 encoding).
+/// 32 bytes = 256 bits of randomness, the minimum we accept.
 const KEY_RANDOM_BYTES: usize = 32;
+
+const _: () = assert!(KEY_RANDOM_BYTES * 8 >= 256);
 
 /// Maximum length of a key's human-readable name.
 const MAX_NAME_LEN: usize = 100;
@@ -179,6 +192,10 @@ struct ActiveKeyRow {
 /// Always hits the database so revocation takes effect immediately. Also
 /// refreshes `last_used_at`, at most once a minute so authentication does
 /// not turn every request into a row update.
+///
+/// Digests written by older releases (bare SHA-256, no pepper) are matched
+/// as a fallback and re-hashed with the current peppered HMAC in place, so
+/// existing keys keep working and are upgraded transparently.
 pub async fn lookup_active_key(
     pool: &PgPool,
     raw_key: &str,
@@ -187,9 +204,69 @@ pub async fn lookup_active_key(
         return Ok(None);
     }
 
+    let current_hash = hash_api_key(raw_key);
+    if let Some(row) = fetch_and_touch(pool, &current_hash).await? {
+        return Ok(Some(row.into_scoped()));
+    }
+
+    // Fallback: legacy unsalted SHA-256 digest. On a hit, rewrite the row
+    // with the peppered digest so the legacy value stops being valid.
+    let legacy_hash = hash_api_key_legacy(raw_key);
+    if legacy_hash == current_hash {
+        return Ok(None);
+    }
+    let Some(row) = fetch_and_touch(pool, &legacy_hash).await? else {
+        return Ok(None);
+    };
+
+    sqlx::query("UPDATE api_keys SET key_hash = $1 WHERE id = $2")
+        .bind(&current_hash)
+        .bind(row.id)
+        .execute(pool)
+        .await?;
+    tracing::info!(api_key_id = %row.id, "API key digest upgraded to peppered HMAC");
+
+    Ok(Some(row.into_scoped()))
+}
+
+/// Look up an active key bound to `tenant_id` by its raw value.
+///
+/// Used by the SaaS tenant authentication path (Issue #1429): tenant keys
+/// live in the unified `api_keys` table, never in plaintext columns.
+pub async fn lookup_active_tenant_key(
+    pool: &PgPool,
+    tenant_id: &str,
+    raw_key: &str,
+) -> Result<Option<ScopedApiKey>, sqlx::Error> {
+    let Some(key) = lookup_active_key(pool, raw_key).await? else {
+        return Ok(None);
+    };
+    if key.tenant_id.as_deref() == Some(tenant_id) {
+        Ok(Some(key))
+    } else {
+        Ok(None)
+    }
+}
+
+impl ActiveKeyRow {
+    fn into_scoped(self) -> ScopedApiKey {
+        ScopedApiKey {
+            id: self.id,
+            name: self.name,
+            scopes: self.scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect(),
+            tenant_id: self.tenant_id,
+        }
+    }
+}
+
+/// Fetch an active key by digest and refresh `last_used_at` (throttled).
+async fn fetch_and_touch(
+    pool: &PgPool,
+    key_hash: &str,
+) -> Result<Option<ActiveKeyRow>, sqlx::Error> {
     // The data-modifying CTE runs even though the outer SELECT does not
     // reference it.
-    let row: Option<ActiveKeyRow> = sqlx::query_as(
+    sqlx::query_as(
         r#"
         WITH active AS (
             SELECT id, name, scopes, tenant_id, last_used_at
@@ -206,16 +283,9 @@ pub async fn lookup_active_key(
         SELECT id, name, scopes, tenant_id FROM active
         "#,
     )
-    .bind(hash_api_key(raw_key))
+    .bind(key_hash)
     .fetch_optional(pool)
-    .await?;
-
-    Ok(row.map(|r| ScopedApiKey {
-        id: r.id,
-        name: r.name,
-        scopes: r.scopes.iter().filter_map(|s| ApiKeyScope::parse(s)).collect(),
-        tenant_id: r.tenant_id,
-    }))
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -443,6 +513,19 @@ mod tests {
             assert!((32..=44).contains(&body.len()), "unexpected length: {key}");
             assert!(body.bytes().all(|c| BASE58_ALPHABET.contains(&c)));
         }
+    }
+
+    #[test]
+    fn generated_keys_carry_at_least_256_bits_of_randomness() {
+        assert!(KEY_RANDOM_BYTES * 8 >= 256);
+    }
+
+    #[test]
+    fn legacy_digest_differs_from_peppered_digest() {
+        // The fallback path must never collide with the current digest,
+        // otherwise the transparent re-hash would be a no-op.
+        let key = "sp_legacy-key-for-test";
+        assert_ne!(hash_api_key(key), hash_api_key_legacy(key));
     }
 
     #[test]

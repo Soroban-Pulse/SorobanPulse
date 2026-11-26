@@ -104,14 +104,18 @@ pub fn current_cpu_utilization() -> Option<f64> {
         Some(utime + stime)
     }
 
+    // Linux `USER_HZ` (the clock tick rate reported by `_SC_CLK_TCK`) is
+    // fixed at 100 on every mainstream Linux kernel/userspace. Hardcoding it
+    // avoids an undeclared `libc` dependency and any `unsafe` code.
+    const TICKS_PER_SEC: f64 = 100.0;
+
     let before = read_process_ticks()?;
     let t0 = Instant::now();
     std::thread::sleep(Duration::from_millis(100));
     let after = read_process_ticks()?;
     let elapsed = t0.elapsed().as_secs_f64();
 
-    let ticks_per_sec = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
-    let cpu_seconds = (after - before) as f64 / ticks_per_sec;
+    let cpu_seconds = (after - before) as f64 / TICKS_PER_SEC;
     Some((cpu_seconds / elapsed).clamp(0.0, 1.0))
 }
 

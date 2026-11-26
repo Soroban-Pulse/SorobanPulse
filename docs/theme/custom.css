@@ -1,0 +1,76 @@
+/* SorobanPulse mdBook theme (#1355). Brand: docs/design/brand.md */
+:root {
+  --sp-indigo: #4F46E5;
+  --sp-indigo-200: #C7D2FE;
+  --sp-cyan: #22D3EE;
+  --sp-ink: #111827;
+  --sp-note: #2563EB;
+  --sp-warning: #D97706;
+  --sp-danger: #DC2626;
+  --content-max-width: 820px;
+}
+
+.light, .rust {
+  --links: var(--sp-indigo);
+  --sidebar-bg: #111827;
+  --sidebar-fg: #D1D5DB;
+  --sidebar-active: var(--sp-cyan);
+  --sidebar-non-existant: #6B7280;
+  --sidebar-spacer: #1F2937;
+  --scrollbar: #4B5563;
+  --theme-hover: #EEF2FF;
+  --quote-bg: #EEF2FF;
+  --quote-border: var(--sp-indigo);
+  --inline-code-color: #3730A3;
+}
+
+.navy, .coal, .ayu {
+  --links: #A5B4FC;
+  --sidebar-active: var(--sp-cyan);
+  --quote-border: var(--sp-indigo);
+}
+
+body { font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; }
+code, pre { font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.content h1, .content h2, .content h3 { color: var(--fg); letter-spacing: -0.01em; }
+.content h1 { border-bottom: 3px solid var(--sp-indigo); padding-bottom: 0.3em; }
+.content a { text-decoration: none; border-bottom: 1px solid transparent; }
+.content a:hover { border-bottom-color: currentColor; }
+
+.menu-title::before {
+  content: "";
+  display: inline-block;
+  width: 1.2em; height: 1.2em;
+  margin-right: 0.4em;
+  vertical-align: -0.2em;
+  background: url("design/brand/icon.svg") no-repeat center / contain;
+}
+
+.chapter li.part-title { color: var(--sp-indigo-200); text-transform: uppercase; font-size: 0.75em; letter-spacing: 0.08em; margin-top: 1.2em; }
+
+/* Callouts: <div class="callout note|warning|danger">…</div>
+   (mdbook-admonish blocks are also re-tinted below) */
+.callout {
+  margin: 1.25em 0;
+  padding: 0.75em 1em 0.75em 1.1em;
+  border-left: 4px solid var(--sp-note);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--sp-note) 8%, transparent);
+}
+.callout > :first-child { margin-top: 0; }
+.callout > :last-child { margin-bottom: 0; }
+.callout::before { display: block; font-weight: 700; margin-bottom: 0.25em; }
+.callout.note { border-color: var(--sp-note); background: color-mix(in srgb, var(--sp-note) 8%, transparent); }
+.callout.note::before { content: "ℹ Note"; color: var(--sp-note); }
+.callout.warning { border-color: var(--sp-warning); background: color-mix(in srgb, var(--sp-warning) 10%, transparent); }
+.callout.warning::before { content: "⚠ Warning"; color: var(--sp-warning); }
+.callout.danger { border-color: var(--sp-danger); background: color-mix(in srgb, var(--sp-danger) 9%, transparent); }
+.callout.danger::before { content: "⛔ Danger"; color: var(--sp-danger); }
+
+.admonition.admonish-note { border-color: var(--sp-note); }
+.admonition.admonish-warning { border-color: var(--sp-warning); }
+.admonition.admonish-danger { border-color: var(--sp-danger); }
+
+/* "Edit this page on GitHub" footer link (theme/edit-link.js) */
+.sp-edit-link { display: block; margin-top: 3em; padding-top: 1em; border-top: 1px solid var(--theme-popup-border, #e5e7eb); font-size: 0.9em; }

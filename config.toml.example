@@ -24,7 +24,13 @@
 
 # SLOW_REQUEST_THRESHOLD_MS = "500"
 
-# ALLOWED_ORIGINS = "*"
+# Comma-separated list of origins allowed to make cross-origin requests.
+# Defaults to empty (same-origin only) in production. In development
+# (ENVIRONMENT=development) the default is "*". A wildcard "*" entry is
+# refused when REQUIRE_AUTH=true unless ALLOW_WILDCARD_CORS=true is set.
+# ALLOWED_ORIGINS = "https://app.example.com,https://admin.example.com"
+# Explicitly permit wildcard CORS even when REQUIRE_AUTH=true.
+# ALLOW_WILDCARD_CORS = "false"
 # RATE_LIMIT_PER_MINUTE = "60"
 # SSE_KEEPALIVE_INTERVAL_MS = "15000"
 # SSE_MAX_CONNECTIONS = "1000"
@@ -39,6 +45,18 @@
 
 # API_KEY = ""
 # API_KEY_SECONDARY = ""
+
+# --- Admin API authentication (issue #1440) ---
+# Admin routes under /v1/admin/* fail closed: when no admin credential is
+# configured (no ADMIN_API_KEY and no DB-backed API key with the `admin`
+# scope), every admin request is rejected with 403 Forbidden.
+# Set ADMIN_API_KEY (ideally from a secret) to enable admin access.
+# ADMIN_API_KEY = ""
+# ADMIN_API_KEY_SECONDARY = ""
+#
+# Local development only: allow unauthenticated admin access. This is
+# refused at startup when ENVIRONMENT=production.
+# ALLOW_UNAUTHENTICATED_ADMIN = "false"
 
 # --- Web dashboard (issue #1112) ---
 # Serve the built dashboard at /ui (defaults to true in the Docker image).

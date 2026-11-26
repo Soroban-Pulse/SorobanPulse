@@ -3,14 +3,19 @@ name: Helm Chart
 on:
   push:
     branches: [main]
+    tags: ["v*"]
     paths:
       - "helm/**"
       - "ct.yaml"
+      - "Dockerfile"
+      - "migrations/**"
       - ".github/workflows/helm.yml"
   pull_request:
     paths:
       - "helm/**"
       - "ct.yaml"
+      - "Dockerfile"
+      - "migrations/**"
       - ".github/workflows/helm.yml"
 
 permissions:
@@ -20,6 +25,32 @@ jobs:
   lint:
     name: helm lint & ct lint
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a3c1a3c4c4c4c4c4c4c4c4c4c4c4c4c4c # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: azure/setup-helm@b9e51907a09c216f16ebe8536097933489208112 # v4.3.0
+        with:
+          version: v3.16.4
+
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      # Installs ct plus the yamllint / yamale tools it runs.
+      - uses: helm/chart-testing-action@e6669bcd63d7cb57cb4380c33043eebe5d111a33 # v2.7.0
+
+      - name: helm lint
+        run: helm lint --strict helm/soroban-pulse
+
+      - name: ct lint
+        run: ct lint --config ct.yaml --charts helm/soroban-pulse
+
+  install:
+    name: ct install (kind, real image)
+    runs-on: ubuntu-latest
+    needs: lint
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,11 +64,18 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Installs ct plus the yamllint / yamale tools it runs.
       - uses: helm/chart-testing-action@v2.7.0
 
-      - name: helm lint
-        run: helm lint --strict helm/soroban-pulse
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          cluster_name: chart-testing
 
-      - name: ct lint
-        run: ct lint --config ct.yaml --charts helm/soroban-pulse
+      # Pull the real published image (chart defaults / appVersion) so the
+      # install test verifies the registry image actually deploys.
+      - name: ct install
+        run: |
+          ct install \
+            --config ct.yaml \
+            --charts helm/soroban-pulse \
+            --helm-extra-set-args "--set=image.pullPolicy=Always"

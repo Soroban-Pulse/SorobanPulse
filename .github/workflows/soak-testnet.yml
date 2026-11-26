@@ -131,15 +131,32 @@ jobs:
 
           # Give the service 30 s to initialise and run migrations.
           echo "Waiting for service to start..."
-          for i in $(seq 1 30); do
+          READY=0
+          for i in $(seq 1 120); do
             if curl -sf http://localhost:3000/healthz/ready >/dev/null 2>&1; then
               echo "Service is ready after ${i}s"
+              READY=1
               break
+            fi
+            if ! kill -0 "$APP_PID" 2>/dev/null; then
+              echo "::error::Service exited during startup"
+              tail -50 /tmp/soak-app.log || true
+              exit 1
             fi
             sleep 1
           done
+          if [ "$READY" != "1" ]; then
+            echo "::error::Service did not become ready within 120s"
+            tail -50 /tmp/soak-app.log || true
+            exit 1
+          fi
 
-          # Record baseline memory RSS (kB → bytes).
+          # Let caches, connection pools and the first backfill batch settle so
+          # the baseline reflects steady state rather than a cold process
+          # (Issue #1398: cold baselines tripped the 1.5x memory assertion).
+          sleep 60
+
+          # Record baseline memory RSS (kB).
           BASELINE_RSS=$(ps -o rss= -p "$APP_PID" | tr -d '[:space:]')
           echo "baseline_rss=${BASELINE_RSS}" >> "$GITHUB_OUTPUT"
           echo "Baseline RSS: ${BASELINE_RSS} kB"
@@ -153,14 +170,16 @@ jobs:
           curl -sf http://localhost:3000/metrics > /tmp/soak-metrics.txt || echo "metrics unavailable"
 
           # ── Check lag ────────────────────────────────────────────────────
-          LAG=$(grep 'soroban_pulse_indexer_lag_ledgers ' /tmp/soak-metrics.txt \
-                | awk '{print $2}' | head -1 || echo "0")
+          # Match both labelled and unlabelled series; take the max lag.
+          LAG=$(grep -E '^soroban_pulse_indexer_lag_ledgers(\{[^}]*\})? ' /tmp/soak-metrics.txt \
+                | awk 'BEGIN{m=""} {if (m=="" || $2>m) m=$2} END{print m}' || true)
           echo "lag_ledgers=${LAG}" >> "$GITHUB_OUTPUT"
           echo "Indexer lag: ${LAG} ledgers"
 
           # ── Check event count ────────────────────────────────────────────
-          EVENT_COUNT=$(grep 'soroban_pulse_events_indexed_total ' /tmp/soak-metrics.txt \
-                        | awk '{print $2}' | head -1 || echo "0")
+          # Sum across label sets (per-contract / per-type series).
+          EVENT_COUNT=$(grep -E '^soroban_pulse_events_indexed_total(\{[^}]*\})? ' /tmp/soak-metrics.txt \
+                        | awk '{s+=$2} END{printf "%d", s}' || echo "0")
           echo "event_count=${EVENT_COUNT}" >> "$GITHUB_OUTPUT"
           echo "Events indexed: ${EVENT_COUNT}"
 
@@ -194,7 +213,7 @@ jobs:
         run: |
           COUNT="${{ steps.soak.outputs.event_count }}"
           echo "Events indexed: ${COUNT}"
-          if [ -z "${COUNT}" ] || [ "${COUNT}" = "0" ]; then
+          if [ -z "${COUNT}" ] || ! awk "BEGIN { exit !(${COUNT} > 0) }"; then
             echo "::error::No events were indexed during the soak run"
             exit 1
           fi
@@ -345,25 +364,65 @@ jobs:
           retention-days: 30
 
       # ── 7. Open or update a GitHub Issue on failure ───────────────────────
+      # Issue #1500 — Deduplicate automated issues.  We distinguish two failure
+      # classes so build/infra breakage is not buried among genuine soak
+      # regressions:
+      #   * build-failure  — the binary failed to build or the app never started
+      #   * soak-failure   — the app ran but an assertion failed
+      # For each class we search for an existing open issue (stable title, no
+      # date suffix) and comment on it instead of opening a new dated issue.
       - name: Report failure as GitHub Issue
         if: failure()
         uses: actions/github-script@v7
         with:
           script: |
-            const title = `[Soak Test] Nightly testnet soak failed — ${new Date().toISOString().slice(0,10)}`;
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const artifactUrl = `${runUrl}#artifacts`;
+
+            // ── Classify the failure ─────────────────────────────────────────
+            // The "Run soak test" step writes app_pid only once the binary has
+            // started; if that output is missing the build or startup failed.
+            const appPid = `${{ steps.soak.outputs.app_pid }}`;
+            const buildFailed = !appPid || appPid.trim() === '';
+
+            const failureClass = buildFailed ? 'build-failure' : 'soak-failure';
+            const title = buildFailed
+              ? '[Soak Test] Nightly testnet soak build/startup failure'
+              : '[Soak Test] Nightly testnet soak failure';
+            const labels = buildFailed
+              ? ['bug', 'soak-test', 'automated', 'build-failure']
+              : ['bug', 'soak-test', 'automated'];
+
+            const heading = buildFailed
+              ? '## 🔴 Nightly Testnet Soak — Build / Startup Failure'
+              : '## 🔴 Nightly Testnet Soak Test Failure';
+
+            const details = buildFailed
+              ? [
+                  'The release binary failed to build, or the service never became',
+                  'ready (`/healthz/ready`) within the startup window. This is an',
+                  'infrastructure/build problem, **not** a soak regression.',
+                ]
+              : [
+                  'The service ran for the full soak window but one or more',
+                  'assertions failed. See the run logs for which assertion tripped.',
+                ];
 
             const body = [
-              '## 🔴 Nightly Testnet Soak Test Failure',
+              heading,
               '',
+              `**Failure class:** \`${failureClass}\``,
               `**Run:** ${runUrl}`,
+              `**Artifacts:** ${artifactUrl} (see \`soak-results-${context.runId}\`)`,
               `**Date:** ${new Date().toUTCString()}`,
               `**Branch:** ${context.ref}`,
-              `**Commit:** ${context.sha}`,
+              `**Commit:** \`${context.sha}\``,
               '',
               '### Failure details',
               '',
-              'Check the [workflow run](' + runUrl + ') for full logs and the uploaded `soak-results` artifact for:',
+              ...details,
+              '',
+              'The uploaded `soak-results` artifact contains:',
               '- `soak-app.log` — structured JSON application logs',
               '- `soak-metrics.txt` — Prometheus metrics snapshot at end of run',
               '',
@@ -375,33 +434,36 @@ jobs:
               '- Sampled events verified against direct RPC call',
             ].join('\n');
 
-            // Search for an existing open issue with the same title prefix.
+            // ── Deduplicate: find an existing open issue for this class ──────
+            // Match on the stable title prefix so the search is reliable
+            // regardless of which day the original issue was opened.
             const { data: issues } = await github.rest.issues.listForRepo({
               owner: context.repo.owner,
               repo: context.repo.repo,
               state: 'open',
               labels: 'soak-test,automated',
+              per_page: 100,
             });
 
-            const existing = issues.find(i => i.title.startsWith('[Soak Test]'));
+            const existing = issues.find(i => i.title === title);
 
             if (existing) {
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: existing.number,
-                body: `## New failure\n\n${body}`,
+                body: `## New ${failureClass}\n\n${body}`,
               });
-              console.log(`Updated existing issue #${existing.number}`);
+              console.log(`Updated existing issue #${existing.number} (${failureClass})`);
             } else {
               await github.rest.issues.create({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 title,
                 body,
-                labels: ['bug', 'soak-test', 'automated'],
+                labels,
               });
-              console.log('Created new failure issue');
+              console.log(`Created new ${failureClass} issue`);
             }
         env:
           MAX_LAG_LEDGERS: ${{ env.MAX_LAG_LEDGERS }}

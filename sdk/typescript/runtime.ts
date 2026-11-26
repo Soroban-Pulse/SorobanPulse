@@ -503,3 +503,14 @@ export class TextApiResponse {
         return await this.raw.text();
     };
 }
+
+/**
+ * Compute the webhook signature for a payload, matching the server's signing
+ * scheme: HMAC-SHA256(secret, timestamp + "." + payload) as a lowercase hex digest.
+ */
+export function computeWebhookSignature(secret: string, timestamp: string | number, payload: string): string {
+    // Lazily require node:crypto so this helper is only used in Node environments.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const crypto = require('crypto');
+    return crypto.createHmac('sha256', secret).update(`${timestamp}.${payload}`).digest('hex');
+}

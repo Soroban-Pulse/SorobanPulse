@@ -1,6 +1,67 @@
 # Deployment Guide
 
+## Choosing a Deployment Platform
+
+Soroban Pulse supports two first-class deployment paths. Pick one per
+environment; both run the same `production` container image and the same
+database migrations.
+
+| | **Kubernetes (Helm)** | **AWS ECS (Terraform)** |
+| --- | --- | --- |
+| Manifests | `helm/soroban-pulse/`, `k8s/` | `terraform/` (modules `vpc`, `alb`, `ecs`, `rds`, `backup`, `monitoring`) |
+| Environments | values files / namespaces | `terraform/environments/{dev,staging,production}` |
+| Provisioning | `helm install` / `helm upgrade` | `terraform apply` (CI: `terraform-apply.yml`) |
+| Scaling | `replicaCount`, HPA | ECS service desired count / autoscaling |
+| Database | self-managed Postgres or managed (RDS, Cloud SQL) | RDS provisioned by the `rds` module |
+| TLS | ingress controller, cert-manager, or ALB | ALB listener with an ACM certificate |
+| Extras | full chart surface (probes, PDB, ServiceMonitor) | `cdn.tf`, `multi-region.tf`, `backup` and `monitoring` modules |
+
+### When to choose Kubernetes (Helm)
+
+- You already run a Kubernetes cluster and want the service to live alongside
+  other workloads.
+- You need fine-grained control over probes, resource limits, HPA, PodDisruptionBudgets
+  or Prometheus `ServiceMonitor` objects.
+- You deploy to multiple clouds or on-premises, or you use GitOps (Argo CD,
+  Flux) — see [Installing from the Helm repository](#installing-from-the-helm-repository)
+  and [Resource Sizing](#resource-sizing).
+
+### When to choose AWS ECS (Terraform)
+
+- You want a fully managed AWS stack (VPC, ALB, ECS, RDS, backups, monitoring)
+  provisioned from a single Terraform root per environment.
+- You do not want to operate a Kubernetes control plane.
+- You need the AWS-specific extras: CloudFront CDN (`cdn.tf`), multi-region
+  failover (`multi-region.tf`), automated RDS snapshots via the `backup` module
+  and CloudWatch alarms via the `monitoring` module.
+
+### Trade-offs
+
+- **Operational surface** — ECS/Terraform shifts work to AWS managed services
+  but ties you to AWS; Helm/Kubernetes is portable but you own the cluster.
+- **Change safety** — Terraform changes are reviewed as plans and applied by CI
+  with approvals (see below); Helm changes are reviewed as values/template diffs
+  and applied by your release tooling.
+- **Blast radius** — a bad `terraform apply` can recreate networking or database
+  resources, so production applies are approval-gated and should always be
+  reviewed from the saved plan.
+- **Feature parity** — application behaviour is identical; only the surrounding
+  infrastructure differs.
+
+### Terraform workflow and approvals
+
+Terraform is validated on every pull request by `.github/workflows/terraform-ci.yml`
+(`terraform fmt`/`validate`, `tflint`, and `trivy config`/`checkov` security
+scanning with SARIF results uploaded to GitHub code scanning). Applying is done
+by `.github/workflows/terraform-apply.yml`, which requires a **manual approval**
+through a protected GitHub environment for `staging` and `production` — a
+production apply cannot start until a reviewer approves it.
+
+See [docs/terraform.md](terraform.md) for the module layout, environment
+variables, state backend configuration and the full apply/rollback procedure.
+
 ## Container Image Targets
+=======
 
 The `Dockerfile` builds two targets:
 
@@ -16,7 +77,74 @@ The `Dockerfile` builds two targets:
 Those binaries are behind the `dev-tools` Cargo feature, so a plain
 `cargo build --release` and the production image both exclude them.
 
-## Installing from the Helm repository
+## Kubernetes Deployment: One Supported Path
+
+The **Helm chart in `helm/soroban-pulse/` is the single source of truth** for
+Kubernetes deployment. Everything else is derived from it:
+
+- **Argo CD** (`gitops/argocd/`) deploys the chart, not raw manifests. Each
+  environment has its own values file (e.g. `values-staging.yaml`,
+  `values-production.yaml`) layered on top of the chart defaults.
+- **Raw YAML** is no longer hand-maintained. The `k8s/` directory has been
+  removed; if you need plain manifests (for review, GitOps diffing, or a
+  non-Helm tool), generate them from the chart:
+
+  ```bash
+  helm template soroban-pulse ./helm/soroban-pulse \
+    --namespace soroban-pulse \
+    -f helm/soroban-pulse/values-production.yaml \
+    > soroban-pulse.generated.yaml
+  ```
+
+  CI regenerates and validates these manifests, so they can never drift from
+  the chart. Do not edit generated output by hand — change the chart or the
+  values file instead.
+
+If you were previously applying `k8s/*.yaml` directly, migrate to the chart
+(see below). Istio, Linkerd and observability add-ons are expressed as chart
+values rather than separate manifest trees.
+
+### Container image defaults
+
+The chart defaults to the image published by `docker-publish.yml`:
+
+| Value | Default | Meaning |
+| ----- | ------- | ------- |
+| `image.repository` | `ghcr.io/soroban-pulse/sorobanpulse` | Published registry path |
+| `image.tag` | `""` | Empty means "use `.Chart.AppVersion`" |
+| `image.digest` | `""` | When set, pins the image by digest and overrides `tag` |
+| `image.pullPolicy` | `IfNotPresent` | |
+
+With the defaults, installing chart version `X.Y.Z` deploys the image tagged
+`X.Y.Z` (matching `appVersion`), never `:latest`. No manifest references
+`:latest`.
+
+### Pinning an image
+
+Pin by tag (the default behaviour):
+
+```bash
+helm upgrade soroban-pulse ./helm/soroban-pulse \
+  --set image.tag=1.2.3
+```
+
+Pin by digest for fully reproducible, immutable deployments:
+
+```bash
+helm upgrade soroban-pulse ./helm/soroban-pulse \
+  --set image.digest=sha256:<digest>
+```
+
+When `image.digest` is set the rendered image reference is
+`<repository>@sha256:<digest>` and `image.tag` is ignored. Find the digest with:
+
+```bash
+docker buildx imagetools inspect ghcr.io/soroban-pulse/sorobanpulse:1.2.3
+# or
+crane digest ghcr.io/soroban-pulse/sorobanpulse:1.2.3
+```
+
+### Installing from the Helm repository
 
 The Helm chart in `helm/soroban-pulse/` is published to GitHub Pages (the
 `gh-pages` branch) by `.github/workflows/helm-release.yml` on each release, so
@@ -64,7 +192,7 @@ when installing from a local checkout (see [Resource Sizing](#resource-sizing)).
 | CPU | `100m` | `1000m` |
 | Memory | `256Mi` | `512Mi` |
 
-These values are set in both `k8s/deployment.yaml` and `helm/soroban-pulse/values.yaml`. The Helm chart exposes the full `resources` block in `values.yaml` so you can override it without editing the template:
+These values are set in `helm/soroban-pulse/values.yaml`. The Helm chart exposes the full `resources` block in `values.yaml` so you can override it without editing the template:
 
 ```bash
 helm upgrade soroban-pulse ./helm/soroban-pulse \
@@ -109,10 +237,15 @@ Because the dependency layer is keyed on `recipe.json`, changing application sou
 
 ```bash
 # Standard build
-docker build -t soroban-pulse:latest .
+docker build -t ghcr.io/soroban-pulse/sorobanpulse:dev .
 
 # Build for a specific platform (e.g. Apple Silicon -> amd64 servers)
-docker build --platform linux/amd64 -t soroban-pulse:latest .
+docker build --platform linux/amd64 -t ghcr.io/soroban-pulse/sorobanpulse:dev .
+```
+
+> **Note:** `:latest` is never used for deployment. Kubernetes manifests and
+> Helm values reference an explicit version tag or a digest (see
+> [Kubernetes Deployment](#kubernetes-deployment-one-supported-path)).
 ```
 
 The build is also wired into the Makefile:
@@ -126,7 +259,7 @@ make docker-build
 The final image is **under 80 MB** (typically ~40–60 MB depending on the Rust toolchain version). Verify it with:
 
 ```bash
-docker image inspect soroban-pulse:latest --format '{{.Size}}' | awk '{printf "%.1f MB\n", $1/1024/1024}'
+docker image inspect ghcr.io/soroban-pulse/sorobanpulse:dev --format '{{.Size}}' | awk '{printf "%.1f MB\n", $1/1024/1024}'
 ```
 
 ### CI size gate
@@ -152,7 +285,7 @@ The distroless runtime image is intentionally minimal:
 - **No package manager** — install nothing at runtime; everything must be baked into the build stage.
 - **CA certificates** are included, so outbound TLS (Stellar RPC, S3 backups) works out of the box.
 - **Non-root user** — the container runs as `nonroot` (UID 65532). Ensure any mounted secret files are readable by that UID.
-- **Entrypoint** — the binary is the entrypoint (`/soroban-pulse`); pass arguments directly, e.g. `docker run soroban-pulse:latest --help`.
+- **Entrypoint** — the binary is the entrypoint (`/soroban-pulse`); pass arguments directly, e.g. `docker run ghcr.io/soroban-pulse/sorobanpulse:dev --help`.
 - **Environment variables** — all env var defaults (`PORT=3000`, `ENVIRONMENT=development`, `BEHIND_PROXY=false`, etc.) are unchanged; nothing is baked into the image.
 - **Healthcheck** — the image declares a `HEALTHCHECK` that polls `GET /healthz/ready` on `$PORT` every 10 seconds (5s timeout, 5 retries, 30s start period). Because there is no shell, the check uses the binary's built-in `healthcheck` subcommand rather than `curl`/`wget`.
 
@@ -245,7 +378,7 @@ On graceful shutdown (`SIGTERM` / `Ctrl-C`), the active indexer explicitly relea
 ```yaml
 services:
   app:
-    image: soroban-pulse:latest
+    image: ghcr.io/soroban-pulse/sorobanpulse:1.2.3
     deploy:
       replicas: 3
     environment:
@@ -359,26 +492,18 @@ docker-compose -f docker-compose.test.yml down
 
 For stricter separation of concerns, you can disable in-process migrations and run them as a Kubernetes `Job` that completes before the `Deployment` rollout begins:
 
-```yaml
-# k8s/migrate-job.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: soroban-pulse-migrate
-spec:
-  template:
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: migrate
-          image: soroban-pulse:latest
-          command: ["./migrate"] # separate migrate binary
-          envFrom:
-            - secretRef:
-                name: soroban-pulse-secrets
+The chart already ships a migration `Job` template (disabled by default). Enable
+it via values instead of writing your own manifest:
+
+```bash
+helm upgrade soroban-pulse ./helm/soroban-pulse \
+  --set migrations.enabled=true
 ```
 
-Reference this Job in your `Deployment` rollout pipeline (e.g., Argo CD sync waves, Helm hooks) so it runs to completion before any application pods start.
+The Job uses the same `image.repository` / `image.tag` / `image.digest` values
+as the Deployment, so it always runs the same immutable image. It is wired as a
+Helm pre-install/pre-upgrade hook (and an Argo CD sync wave) so it completes
+before any application pods start.
 
 ---
 

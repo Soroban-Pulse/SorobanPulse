@@ -23,7 +23,8 @@ This file is **auto-generated** from `src/config.rs`. Do not edit it by hand —
 | `BEHIND_PROXY` | `false` | Set to true when running behind a reverse proxy so the real client IP is extracted from X-Forwarded-For. |
 | `RPC_CONNECT_TIMEOUT_SECS` | `5` | TCP connection timeout in seconds for RPC requests. |
 | `RPC_REQUEST_TIMEOUT_SECS` | `30` | Total request timeout in seconds for RPC calls. |
-| `ALLOWED_ORIGINS` | `*` | Comma-separated CORS allowed origins. Wildcard (*) is rejected in production-like environments. |
+| `ALLOWED_ORIGINS` | `(empty)` | Comma-separated CORS allowed origins. Empty means same-origin only. `*` is only honoured in development, or when ALLOW_WILDCARD_CORS=true, and is always rejected in production-like environments. |
+| `ALLOW_WILDCARD_CORS` | `false` | Explicitly opt in to wildcard CORS (`ALLOWED_ORIGINS=*`) even when REQUIRE_AUTH=true. A startup warning is logged whenever wildcard CORS is active. |
 | `RATE_LIMIT_PER_MINUTE` | `60` | Maximum HTTP requests per IP per minute. Set to 0 to disable rate limiting. |
 | `INDEXER_LAG_WARN_THRESHOLD` | `100` | Number of ledgers behind the tip before a warning is emitted. |
 | `INDEXER_STALL_TIMEOUT_SECS` | `60` | Seconds without a successful indexer poll before the health check reports unhealthy. |
@@ -179,7 +180,10 @@ Variables marked with a feature flag only take effect when the binary is built w
 | `CONFIG_FILE` | string | — | no | — | Path to an optional TOML file supplying any variable in this reference. Environment variables take precedence over file values. |
 | `PORT` | integer | `3000` | no | — | HTTP server port to listen on. |
 | `BEHIND_PROXY` | bool | `false` | no | — | Trust `X-Forwarded-For` / `X-Real-IP` for client IPs. Enable only behind a trusted reverse proxy. |
-| `ALLOWED_ORIGINS` | list | `*` | no | — | Comma-separated CORS origins. `*` allows all origins and is rejected in staging/production. |
+| `BEHIND_PROXY` | bool | `false` | no | — | Trust `X-Forwarded-For` / `X-Real-IP` for client IPs. Enable only behind a trusted reverse proxy. Superseded by `TRUSTED_PROXIES`; when both are set, `TRUSTED_PROXIES` wins. |
+| `TRUSTED_PROXIES` | list | — | no | — | Comma-separated CIDR blocks of reverse proxies whose `X-Forwarded-For` / `Forwarded` headers are trusted. The client IP is taken from the right-most hop that is not itself a trusted proxy; headers from any other peer are ignored. Empty disables proxy header parsing entirely (the TCP peer address is used). See [Client IP resolution](#client-ip-resolution). |
+| `ALLOWED_ORIGINS` | list | — | no | — | Comma-separated CORS origins. Empty (the default) allows same-origin requests only. `*` allows all origins, is only honoured in `development` or when `ALLOW_WILDCARD_CORS=true`, and is rejected in staging/production. |
+| `ALLOW_WILDCARD_CORS` | bool | `false` | no | — | Explicitly allow `ALLOWED_ORIGINS=*` even when `REQUIRE_AUTH=true`. A startup warning is logged whenever wildcard CORS is active. |
 | `MAX_BODY_SIZE_BYTES` | integer | `1048576` | no | — | Maximum accepted HTTP request body size in bytes. |
 | `TLS_CERT_FILE` | string | — | no | — | Path to a PEM certificate. When set together with `TLS_KEY_FILE`, the server terminates TLS itself. |
 | `TLS_KEY_FILE` | string | — | no | — | Path to the PEM private key matching `TLS_CERT_FILE`. |
@@ -238,12 +242,60 @@ Variables marked with a feature flag only take effect when the binary is built w
 
 | Name | Type | Default | Required | Feature | Description |
 |------|------|---------|----------|---------|-------------|
-| `API_KEY` | secret | — | no | — | API key for authenticated endpoints. When unset, authentication is disabled. |
-| `API_KEY_SECONDARY` | secret | — | no | — | Second accepted API key, for rotating `API_KEY` without downtime. |
-| `ADMIN_API_KEY` | secret | — | no | — | Key required for `/v1/admin/*` endpoints, independent of `API_KEY`. When unset, admin endpoints fall back to the `API_KEY` gate. |
-| `ADMIN_API_KEY_SECONDARY` | secret | — | no | — | Second accepted admin key, for rotating `ADMIN_API_KEY` without downtime. |
+| `API_KEY` | secret | — | no | — | API key for authenticated endpoints. When unset, authentication is disabled. Must be at least 32 characters; shorter values are rejected at startup. |
+| `API_KEY_SECONDARY` | secret | — | no | — | Second accepted API key, for rotating `API_KEY` without downtime. Subject to the same 32-character minimum. |
+| `API_KEY_PEPPER` | secret | — | conditional | — | Server-side pepper (at least 32 bytes) mixed into every API key digest with HMAC-SHA256. **Required whenever `API_KEY` or `ADMIN_API_KEY` is set**; startup fails if it is missing or too short. Never store it next to the database. See [API key hashing and pepper rotation](#api-key-hashing-and-pepper-rotation). |
+| `ADMIN_API_KEY` | secret | — | no | — | Key required for `/v1/admin/*` endpoints, independent of `API_KEY`. When unset, admin endpoints fall back to the `API_KEY` gate. Must be at least 32 characters. |
+| `ADMIN_API_KEY_SECONDARY` | secret | — | no | — | Second accepted admin key, for rotating `ADMIN_API_KEY` without downtime. Subject to the same 32-character minimum. |
 | `IP_DENYLIST` | list | — | no | — | Comma-separated IPs/CIDR blocks to reject. |
 | `IP_ALLOWLIST` | list | — | no | — | Comma-separated IPs/CIDR blocks to exclusively allow. Empty disables enforcement. |
+
+### Client IP resolution
+
+Audit records, per-IP rate limits, SSE per-IP connection caps and `IP_ALLOWLIST` / `IP_DENYLIST` all use the same `ClientIp` extractor. The extractor starts from the TCP peer address (`ConnectInfo`) and only consults `X-Forwarded-For` / `Forwarded` when that peer is inside one of the `TRUSTED_PROXIES` CIDRs. It then walks the header from right to left and returns the first hop that is not a trusted proxy, so a client cannot spoof its address by prepending values.
+
+When `TRUSTED_PROXIES` is empty, forwarded headers are ignored completely. This is the safe default for direct-to-internet deployments.
+
+Common setups:
+
+```bash
+# nginx ingress controller (Kubernetes): the controller pod network
+TRUSTED_PROXIES=10.0.0.0/8
+
+# Cloudflare: only Cloudflare's published edge ranges
+TRUSTED_PROXIES=173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32
+
+# AWS Application Load Balancer: the VPC CIDR the ALB lives in
+TRUSTED_PROXIES=10.0.0.0/16
+```
+
+If you run behind Cloudflare, also restrict traffic to Cloudflare's ranges at the network layer; otherwise a client can connect directly to the origin and present a forged `X-Forwarded-For`.
+
+### API key hashing and pepper rotation
+
+API keys are never stored in plaintext. Each key is hashed with HMAC-SHA256 using `API_KEY_PEPPER` as the key, and only the hex digest is persisted or compared. The pepper keeps O(1) lookup while making offline brute-force of leaked digests infeasible without the secret.
+
+- Generated `sp_` keys carry at least 256 bits of randomness.
+- Operator-supplied `API_KEY` / `ADMIN_API_KEY` values must be at least 32 characters; startup fails otherwise.
+- `API_KEY_PEPPER` must be at least 32 bytes and must be supplied from a secret manager, not from the same store as the database.
+
+To rotate the pepper without downtime:
+
+1. Generate a new pepper and set `API_KEY_PEPPER_SECONDARY` alongside the current `API_KEY_PEPPER`.
+2. Restart. Digests are verified against both peppers; rows still matching the old pepper are re-hashed with the new one on next successful use.
+3. Once no rows match the old pepper (the admin endpoint `GET /v1/admin/api-keys/pepper-status` reports the remaining count), remove `API_KEY_PEPPER_SECONDARY` and promote the new value to `API_KEY_PEPPER`.
+4. Restart again and destroy the old pepper.
+
+### SaaS tenant key rotation
+
+The legacy `saas_tenants.api_keys` array column has been removed. Tenant keys now live in the unified `api_keys` table with `tenant_id`, scopes and revocation metadata, and are hashed exactly like operator keys. The migration that drops the column hashes any remaining values into `api_keys` first; because only digests are kept, **the original tenant keys cannot be recovered or displayed again**.
+
+After upgrading:
+
+1. Run the migrations (`RUN_MIGRATIONS_ON_STARTUP=true` or the Helm migration Job). Existing tenant keys keep working through the unified lookup.
+2. Notify each tenant that its key was migrated and cannot be re-displayed, and ask it to rotate via `POST /v1/admin/api-keys` (or the tenant self-service endpoint).
+3. Revoke the migrated keys with `DELETE /v1/admin/api-keys/{id}` once the tenant confirms the new key is in use.
+4. Verify no rows remain with the legacy marker (`SELECT count(*) FROM api_keys WHERE legacy_source = 'saas_tenants';` should return 0).
 
 ## Rate limiting
 

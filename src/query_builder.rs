@@ -492,7 +492,9 @@ impl EventQueryBuilder {
             cols = Self::BASE_COLS,
         );
 
-        let count_sql = format!("SELECT COUNT(*) FROM events {where_clause}");
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM (SELECT 1 FROM events {where_clause} LIMIT {TOTAL_COUNT_CAP}) capped"
+        );
 
         (data_sql, count_sql)
     }
@@ -547,6 +549,9 @@ impl EventQueryBuilder {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Upper bound for exact counts. One past the cap lets callers detect overflow.
+pub const TOTAL_COUNT_CAP: i64 = 10_001;
 
 #[cfg(test)]
 mod tests {

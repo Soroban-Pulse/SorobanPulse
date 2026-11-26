@@ -6,7 +6,7 @@ amount threshold to a Discord channel.
 
 ```
 Stellar testnet ──► SorobanPulse ──(signed webhook)──► alert bot ──► Discord
-   (Soroban RPC)     index + filter     X-Signature-256    verify + threshold
+   (Soroban RPC)     index + filter  X-SorobanPulse-*   verify + threshold
 ```
 
 **Time:** about 30 minutes. **Code:** [`examples/token-alert-bot/`](https://github.com/Soroban-Pulse/SorobanPulse/tree/main/examples/token-alert-bot)
@@ -63,9 +63,24 @@ WEBHOOK_CONTRACT_FILTER=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC
 ```
 
 `WEBHOOK_CONTRACT_FILTER` makes SorobanPulse deliver only this token's events,
-and `WEBHOOK_SECRET` makes it sign each delivery with an `X-Signature-256`
-header. `START_LEDGER=0` starts from the latest ledger, so you only see new
-transfers.
+and `WEBHOOK_SECRET` makes it sign each delivery. `START_LEDGER=0` starts from
+the latest ledger, so you only see new transfers.
+
+### How deliveries are signed
+
+Every delivery carries a signed timestamp and a unique delivery ID, so a
+captured request cannot be replayed later:
+
+| Header | Value |
+|---|---|
+| `X-SorobanPulse-Signature` | `t=<unix>,v1=<hex>`, where `v1 = HMAC-SHA256(secret, "<t>.<body>")` |
+| `X-SorobanPulse-Delivery-Id` | A unique ID for this delivery attempt |
+
+The signature covers the timestamp *and* the raw body, so verification must
+reject a `t` that is more than 5 minutes away from the receiver's clock
+(the default tolerance window). The older `X-Signature-256` header, which
+signed the body only and is therefore replayable, is still sent during a
+deprecation window but should not be used for new integrations.
 
 Start the service:
 
@@ -127,16 +142,26 @@ startup to confirm SorobanPulse is reachable and indexing the token.
 Everything lives in three small files in `src/`:
 
 - **`index.ts`** receives `POST /webhook`, verifies the signature against the
-  *raw* request body with the SDK's `verifyWebhookSignature`, and replies
-  `204` straight away so a slow Discord call never triggers SorobanPulse
-  retries. Requests with a missing or wrong signature get `401`.
+  *raw* request body and the signed timestamp with the SDK's
+  `verifyWebhookSignature`, and replies `204` straight away so a slow Discord
+  call never triggers SorobanPulse retries. Requests with a missing, wrong or
+  stale signature get `401`.
 
   ```ts
   const body = await readBody(req);
-  const signature = req.headers["x-signature-256"];
+  const signature = req.headers["x-sorobanpulse-signature"];
+  const deliveryId = req.headers["x-sorobanpulse-delivery-id"];
   valid = typeof signature === "string" &&
-    verifyWebhookSignature(body, signature, webhookSecret).isValid;
+    typeof deliveryId === "string" &&
+    verifyWebhookSignature(body, signature, webhookSecret, {
+      toleranceSeconds: 300, // default: 5 minutes
+    }).isValid;
   ```
+
+  The helper parses `t=<unix>,v1=<hex>`, recomputes
+  `HMAC-SHA256(secret, "<t>.<body>")`, compares it in constant time, and
+  rejects timestamps outside the tolerance window. The delivery ID is logged
+  so duplicate deliveries can be traced.
 
 - **`transfer.ts`** decodes the event. Topics and value arrive as base64 XDR
   ScVals, which `@stellar/stellar-sdk` turns into native values. Amounts stay
@@ -152,7 +177,9 @@ Everything lives in three small files in `src/`:
   and a block-explorer link to the transaction.
 
 Webhooks can be retried, so the bot remembers recently alerted events and
-skips duplicates.
+skips duplicates. The signed timestamp and delivery ID are a second line of
+defence: a replayed request whose `t` is older than the tolerance window is
+rejected before it reaches the threshold logic.
 
 ## 5. Send a real testnet transfer
 
@@ -177,7 +204,8 @@ Discord channel shows the alert. A transfer below `MIN_AMOUNT`, such as
 
 | Symptom | Check |
 |---|---|
-| Bot logs `rejected delivery … X-Signature-256` | `WEBHOOK_SECRET` must be identical in both `.env` files. Restart SorobanPulse after changing it. |
+| Bot logs `rejected delivery … X-SorobanPulse-Signature` | `WEBHOOK_SECRET` must be identical in both `.env` files. Restart SorobanPulse after changing it. |
+| Bot logs `timestamp outside tolerance` | The bot's clock drifted more than 5 minutes from SorobanPulse's. Sync both hosts (NTP) or raise `toleranceSeconds` in the verification options. |
 | Bot receives nothing | SorobanPulse logs `Webhook delivery enabled` at startup when `WEBHOOK_URL` is set. Confirm `WEBHOOK_CONTRACT_FILTER` is the token's contract ID and the bot listens on the port in `WEBHOOK_URL`. |
 | SorobanPulse runs in Docker Compose | `localhost` is the container itself. Use `WEBHOOK_URL=http://host.docker.internal:8787/webhook` (on Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to the `app` service). |
 | No events indexed | `START_LEDGER=0` only picks up new ledgers. Check `curl localhost:3000/status` shows the indexer advancing and that `STELLAR_RPC_URL` points to testnet. |
@@ -192,7 +220,8 @@ Run the bot's unit tests with `npm test`.
 - **Watch several tokens:** list more contract IDs in `WEBHOOK_CONTRACT_FILTER`
   and keep a per-contract threshold map in the bot.
 - **Deploy it:** run the bot behind HTTPS and set `WEBHOOK_REQUIRE_HTTPS=true`;
-  see [webhook signing](../webhook-signing.md) and [webhook verification](../webhook-verification.md).
+  see [webhook signing](../webhook-signing.md) and [webhook verification](../webhook-verification.md)
+  for the signature v2 format and verification examples in each SDK language.
 - **Use Discord natively:** SorobanPulse can post to Discord itself; see the
   [Discord integration](../discord-integration.md).
 - **Stream instead of push:** subscribe to `GET /v1/events/contract/{contract_id}/stream`

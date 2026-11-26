@@ -12,16 +12,51 @@ jobs:
   auto-merge:
     name: Auto-merge patch-level dependencies
     runs-on: ubuntu-latest
-    if: github.actor == 'dependabot[bot]'
+    # Temporarily disabled until CI is fixed (see issue #1491).
+    # Re-enable by setting the repository variable ENABLE_DEPENDABOT_AUTOMERGE to 'true'
+    # after confirming branch protection requires `ci-success` and that `ci-success`
+    # fails when any needed job fails, is cancelled, or did not run.
+    if: |
+      github.actor == 'dependabot[bot]' &&
+      vars.ENABLE_DEPENDABOT_AUTOMERGE == 'true'
     steps:
       - name: Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@v2
+        # dependabot/fetch-metadata v2
+        uses: dependabot/fetch-metadata@dbb049abf0d677abbd7f7eee0375145b417fdd34
         with:
           github-token: "${{ secrets.GITHUB_TOKEN }}"
 
+      - name: Check for build scripts or proc macros
+        id: guard
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # List changed files in the PR. Crates with build scripts (build.rs)
+          # or proc macros (proc-macro = true in Cargo.toml) require human review.
+          changed="$(gh pr diff "$PR_URL" --name-only)"
+          echo "Changed files:"
+          echo "$changed"
+          if echo "$changed" | grep -Eq '(^|/)build\.rs$'; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "Build script detected; skipping auto-merge."
+            exit 0
+          fi
+          if echo "$changed" | grep -Eq '(^|/)Cargo\.toml$'; then
+            # Inspect the PR's Cargo.toml changes for proc-macro declarations.
+            if gh pr diff "$PR_URL" | grep -Eq '^\+.*proc-macro\s*=\s*true'; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "Proc macro detected; skipping auto-merge."
+              exit 0
+            fi
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+
       - name: Enable auto-merge for patch updates
         if: |
+          steps.guard.outputs.skip != 'true' &&
           steps.metadata.outputs.update-type == 'version-update:semver-patch' &&
           contains(github.event.pull_request.labels.*.name, 'dependencies')
         run: gh pr merge --auto --squash "$PR_URL"
@@ -31,6 +66,7 @@ jobs:
 
       - name: Approve PR
         if: |
+          steps.guard.outputs.skip != 'true' &&
           steps.metadata.outputs.update-type == 'version-update:semver-patch' &&
           contains(github.event.pull_request.labels.*.name, 'dependencies')
         run: gh pr review --approve "$PR_URL"

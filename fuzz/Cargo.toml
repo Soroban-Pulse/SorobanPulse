@@ -4,6 +4,7 @@ version = "0.0.0"
 publish = false
 license = "MIT"
 edition = "2021"
+rust-version = "1.87"
 
 [package.metadata]
 cargo-fuzz = true
@@ -12,9 +13,10 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 soroban-pulse = { path = "..", features = [] }
 serde_json = "1"
-# Must match the stellar-xdr API used by the library (`Limits`, serde JSON for
-# `ScVal`); the old 0.0.18 pin without `serde` left fuzz_xdr_scval unbuildable.
-stellar-xdr = { version = "22", features = ["curr", "serde"] }
+# Pinned to the same stellar-xdr version/features as the root crate so fuzz
+# targets decode XDR identically to the library (see issue #1420). The fuzz
+# crate is its own `[workspace]`, so `workspace = true` cannot be used here.
+stellar-xdr = { version = "26.0.1", default-features = false, features = ["std", "curr", "base64", "serde"] }
 
 # Prevent this from interfering with the workspace
 [workspace]

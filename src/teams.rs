@@ -1,4 +1,3 @@
-use reqwest::Client;
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -7,7 +6,15 @@ use tracing::{error, info, warn};
 use crate::{
     metrics,
     models::{Event, EventType},
+    net::outbound::OutboundClient,
 };
+
+/// Hosts that Microsoft Teams incoming webhooks are legitimately served from.
+const TEAMS_ALLOWED_HOSTS: &[&str] = &[
+    "outlook.office.com",
+    "outlook.office365.com",
+    "webhook.office.com",
+];
 
 /// A user to @-mention in a Teams Adaptive Card, via the `msteams.entities`
 /// mention pattern (Teams doesn't support a plain `<@id>`-style mention
@@ -36,16 +43,16 @@ pub struct TeamsConfig {
 
 /// Teams API client for Adaptive Card webhook notifications.
 pub struct TeamsClient {
-    client: Client,
+    client: OutboundClient,
     webhook_url: String,
 }
 
 impl TeamsClient {
     pub fn new(config: TeamsConfig) -> Result<Self, crate::error::InitError> {
-        let client = crate::net::outbound::build_http_client(
-            Client::builder().timeout(Duration::from_secs(10)),
-            "teams",
-        )?;
+        let client = OutboundClient::builder("teams")
+            .timeout(Duration::from_secs(10))
+            .allowed_hosts(TEAMS_ALLOWED_HOSTS.iter().copied())
+            .build()?;
 
         Ok(Self {
             client,
@@ -60,7 +67,12 @@ impl TeamsClient {
         subscription_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let payload = Self::test_payload(subscription_id);
-        let response = self.client.post(&self.webhook_url).json(&payload).send().await?;
+        let response = self
+            .client
+            .post(&self.webhook_url)
+            .json(&payload)
+            .send()
+            .await?;
         if response.status().is_success() {
             Ok(())
         } else {
@@ -310,6 +322,27 @@ mod tests {
         };
         let client = TeamsClient::new(config).unwrap();
         assert_eq!(client.webhook_url, "https://outlook.office.com/webhook/test");
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_webhook_target_is_rejected() {
+        let config = TeamsConfig {
+            webhook_url: "http://127.0.0.1:8080/webhook".to_string(),
+        };
+        let client = TeamsClient::new(config).unwrap();
+        let result = client.send_test_message("sub-1").await;
+        assert!(result.is_err(), "private-IP webhook target must be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_private_ip_webhook_target_is_rejected_for_events() {
+        let config = TeamsConfig {
+            webhook_url: "http://10.0.0.5/webhook".to_string(),
+        };
+        let client = TeamsClient::new(config).unwrap();
+        let event = sample_event();
+        let result = client.send_event_notification(&event, &[], &[]).await;
+        assert!(result.is_err(), "private-IP webhook target must be rejected");
     }
 
     #[test]

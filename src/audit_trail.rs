@@ -67,6 +67,52 @@ pub struct ComplianceAuditEntry {
     pub details: Option<serde_json::Value>,
 }
 
+/// Build a compliance audit entry from a verified client IP.
+///
+/// The `client_ip` argument MUST come from the centralised `ClientIp`
+/// extractor (see `src/middleware/client_ip.rs`), which only honours
+/// `X-Forwarded-For` / `Forwarded` when the TCP peer is a trusted proxy.
+/// Handlers must never derive the IP from raw headers themselves
+/// (issue #1432).
+pub fn build_compliance_audit_entry(
+    id: String,
+    event_type: impl Into<String>,
+    action: impl Into<String>,
+    resource_type: impl Into<String>,
+    resource_id: Option<String>,
+    actor: Option<String>,
+    severity: impl Into<String>,
+    compliance_tags: Vec<String>,
+    retention_class: RetentionClass,
+    client_ip: &crate::middleware::client_ip::ClientIp,
+    details: Option<serde_json::Value>,
+) -> ComplianceAuditEntry {
+    let mut details = details.unwrap_or_else(|| serde_json::json!({}));
+    if let Some(obj) = details.as_object_mut() {
+        obj.insert(
+            "client_ip".to_string(),
+            serde_json::Value::String(client_ip.as_str().to_string()),
+        );
+    }
+
+    ComplianceAuditEntry {
+        id,
+        event_type: event_type.into(),
+        action: action.into(),
+        resource_type: resource_type.into(),
+        resource_id,
+        actor,
+        severity: severity.into(),
+        compliance_tags,
+        retention_class,
+        log_hash: None,
+        chain_hash: None,
+        signed_at: None,
+        created_at: Utc::now(),
+        details: Some(details),
+    }
+}
+
 /// Compute a SHA-256 hash of an audit log entry for tamper detection.
 ///
 /// The hash covers the fields that must not change after insertion.
@@ -360,5 +406,33 @@ mod tests {
         let p = AuditSearchParams::new();
         assert_eq!(p.limit, 100);
         assert_eq!(p.offset, 0);
+    }
+
+    #[test]
+    fn test_build_compliance_audit_entry_uses_verified_client_ip() {
+        use crate::middleware::client_ip::ClientIp;
+        use std::net::IpAddr;
+
+        let client_ip = ClientIp::from_verified(IpAddr::from([203, 0, 113, 7]));
+        let entry = build_compliance_audit_entry(
+            "id-1".to_string(),
+            "DELETE",
+            "DELETE_USER_DATA",
+            "subscription",
+            Some("sub-42".to_string()),
+            Some("admin@example.com".to_string()),
+            "CRITICAL",
+            vec!["gdpr".to_string()],
+            RetentionClass::Regulatory,
+            &client_ip,
+            None,
+        );
+
+        let recorded = entry
+            .details
+            .as_ref()
+            .and_then(|d| d.get("client_ip"))
+            .and_then(|v| v.as_str());
+        assert_eq!(recorded, Some("203.0.113.7"));
     }
 }
