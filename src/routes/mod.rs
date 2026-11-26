@@ -811,12 +811,17 @@ pub fn create_router_with_tx_and_tenant_map(
 fn graphql_routes() -> Router<AppState> {
     #[cfg(feature = "graphql")]
     {
-        // Issue #1350: GraphQL subscriptions over WebSocket (graphql-ws /
-        // graphql-transport-ws protocols).
-        Router::new().route(
-            "/graphql/ws",
-            get(crate::graphql_subscriptions::handle_graphql_ws),
-        )
+        // Issue #1463: Mount GraphQL endpoint for queries and mutations
+        // Issue #1350: GraphQL subscriptions over WebSocket
+        Router::new()
+            .route(
+                "/graphql",
+                post(crate::graphql::handle_graphql_query),
+            )
+            .route(
+                "/graphql/ws",
+                get(crate::graphql_subscriptions::handle_graphql_ws),
+            )
     }
     #[cfg(not(feature = "graphql"))]
     {
